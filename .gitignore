@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+.ralph-tasks.json
+.ralph-logs/
+*.tmp
+.claude/

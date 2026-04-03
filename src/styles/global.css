@@ -1,0 +1,90 @@
+@import "@blueprintjs/core/lib/css/blueprint.css";
+@import "@blueprintjs/icons/lib/css/blueprint-icons.css";
+@import "normalize.css/normalize.css";
+
+/* Override Blueprint v6 font family tokens — propagates to all Blueprint components */
+:root {
+  --bp-typography-family-default: "Geist Sans", system-ui, sans-serif;
+  --bp-typography-family-mono: "JetBrains Mono", monospace;
+}
+
+body {
+  font-family: var(--bp-typography-family-default);
+  background-color: var(--bp-surface-background-color-default-rest);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Light mode — tone down the aggressive white on background and navbar */
+body:not(.bp6-dark) {
+  background-color: var(--bp-palette-light-gray-5) !important;
+}
+
+body:not(.bp6-dark) .bp6-navbar {
+  background-color: var(--bp-palette-light-gray-2) !important;
+  box-shadow: 0 1px 0 var(--bp-surface-border-color-default) !important;
+}
+
+body.bp6-dark {
+  background-color: var(--bp-palette-dark-gray-1);
+}
+
+/* Section panel headers — QUEUE, NOTES etc */
+.section-label {
+  font-family: var(--bp-typography-family-mono);
+  font-size: var(--bp-typography-size-body-medium);
+  font-weight: var(--bp-typography-weight-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--bp-typography-color-muted);
+  margin: 0;
+}
+
+/* Warning intent buttons always use white text */
+.bp6-button.bp6-intent-warning {
+  color: white;
+}
+
+/* Diagram status dot — save pulse animation */
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.75); }
+}
+
+/* CodeMirror 6 — Blueprint integration */
+.cm-editor {
+  font-family: var(--bp-typography-family-default);
+  font-size: 13px;
+  border: 1px solid var(--bp-surface-border-color-default);
+  border-radius: 3px;
+}
+
+.cm-editor .cm-placeholder {
+  color: var(--bp-typography-color-muted);
+}
+
+/* Hide scrollbar on tab strip (webkit) */
+.notes-tab-strip::-webkit-scrollbar {
+  display: none;
+}
+
+/* Excalidraw — hide default scroll-to-fit animation flicker on load */
+.excalidraw .App-menu_top {
+  user-select: none;
+}
+
+/* Compact markdown file tree */
+.md-file-tree .bp6-tree-node-content {
+  height: 26px;
+  padding-left: 8px;
+}
+
+.md-file-tree .bp6-tree-node-label {
+  font-family: var(--bp-typography-family-mono);
+  font-size: 12px;
+}
+
+.md-file-tree .bp6-tree-node-caret {
+  min-width: 18px;
+}
+
