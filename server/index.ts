@@ -33,12 +33,10 @@ const app = new Elysia()
 if (!isDev) {
   app
     .use(staticPlugin({ assets: "dist/assets", prefix: "/assets" }))
-    .onError(({ code, set }) => {
-      if (code === "NOT_FOUND") {
-        set.headers["content-type"] = "text/html; charset=utf-8";
-        set.headers["cache-control"] = "no-cache";
-        return indexHtml;
-      }
+    .get("*", ({ set }) => {
+      set.headers["content-type"] = "text/html; charset=utf-8";
+      set.headers["cache-control"] = "no-cache";
+      return indexHtml;
     });
 }
 

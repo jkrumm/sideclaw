@@ -1,11 +1,8 @@
 dev:
-	@lsof -ti :7705 | xargs kill -9 2>/dev/null; true
-	@lsof -ti :7706 | xargs kill -9 2>/dev/null; true
-	@trap 'kill 0' INT; PORT=7706 bun run dev:server & bun run dev:client; wait
+	@echo "ERROR: sideclaw runs via LaunchAgent only. Use 'make reload' to apply changes." && exit 1
 
-start: build
-	@lsof -ti :7705 | xargs kill -9 2>/dev/null; true
-	bun server/index.ts
+start:
+	@echo "ERROR: sideclaw runs via LaunchAgent only. Use 'make reload' to apply changes." && exit 1
 
 build:
 	bun run build

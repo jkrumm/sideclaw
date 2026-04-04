@@ -8,25 +8,19 @@ Served on `http://sideclaw.local` (localias proxy → port 7705).
 Bun loads `.env` automatically from the `sideclaw/` directory — all env vars
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`) live there.
 
-## Development
+## Running sideclaw
+
+**sideclaw runs exclusively via LaunchAgent. Never start it standalone.**
+
+- `make dev` and `make start` are intentionally broken — they exit with an error.
+- Do NOT run `bun run dev`, `bun run start`, `bun server/index.ts`, or anything that starts a server directly.
+- Port 7705 is owned by the LaunchAgent. Starting a second process there causes conflicts.
 
 ```bash
-make dev    # Vite on :7705 (HMR) + API on :7706 — both via http://sideclaw.local
-make build  # Build frontend to dist/
-make start  # Prod: Elysia serves everything on :7705
-```
-
-**Dev:** Vite runs on :7705 and proxies `/api` to Elysia on :7706. Full HMR,
-`sideclaw.local` works as-is. Server hot-reloads via `bun --watch`.
-
-**Prod:** Elysia serves `dist/` + API on :7705 directly.
-
-## Production (always-on)
-
-```bash
-make install-agent   # one-time: build + install + start LaunchAgent
-make reload          # after code changes: build + kickstart
-make uninstall-agent # remove LaunchAgent
+make build           # Build frontend to dist/ (no server start)
+make reload          # After code changes: build + kickstart LaunchAgent
+make install-agent   # One-time: build + install + start LaunchAgent
+make uninstall-agent # Remove LaunchAgent
 
 tail -f /tmp/sideclaw.log   # stdout
 tail -f /tmp/sideclaw.err   # stderr
