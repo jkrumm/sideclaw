@@ -30,15 +30,15 @@ The LaunchAgent starts automatically on login and restarts on crash.
 
 ## Git Workflow
 
-Direct-to-master repo — no PRs, no releases, no validation step.
+Direct-to-master repo — no PRs, no releases.
 
 ```
 /review   → optional code review before committing
-/commit   → commit changes
-/ship     → review → commit → push (skips /check, PR, and release steps)
+/commit   → commit, then push to master directly
+/ship     → review → commit → push (skips PR and release steps)
 ```
 
-Never create feature branches or PRs. No lint, format, or typecheck configured — `/check` is skipped entirely.
+Never create feature branches or PRs for this repo.
 
 ## Fullscreen (kiosk mode)
 
