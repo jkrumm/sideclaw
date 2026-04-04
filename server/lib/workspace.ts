@@ -11,7 +11,7 @@ function buildWorkspaces(): Workspace[] {
     .map((p) => ({ name: basename(p), root: p }));
 }
 
-const WORKSPACES: Workspace[] = buildWorkspaces();
+export const WORKSPACES: Workspace[] = buildWorkspaces();
 
 /** "/Users/.../SourceRoot/vps" → "/SourceRoot/vps" */
 export function toDisplayPath(hostPath: string): string {

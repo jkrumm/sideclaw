@@ -12,6 +12,7 @@
   "dependencies": {
     "@blueprintjs/core": "6.10.0",
     "@blueprintjs/icons": "6.7.0",
+    "@blueprintjs/select": "6.1.8",
     "@codemirror/lang-markdown": "^6.5.0",
     "@codemirror/language-data": "^6.5.2",
     "@dnd-kit/core": "6.3.1",

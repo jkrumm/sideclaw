@@ -7,6 +7,7 @@
       "dependencies": {
         "@blueprintjs/core": "6.10.0",
         "@blueprintjs/icons": "6.7.0",
+        "@blueprintjs/select": "6.1.8",
         "@codemirror/lang-markdown": "^6.5.0",
         "@codemirror/language-data": "^6.5.2",
         "@dnd-kit/core": "6.3.1",
@@ -87,6 +88,8 @@
     "@blueprintjs/eslint-plugin": ["@blueprintjs/eslint-plugin@6.1.23", "", { "dependencies": { "@typescript-eslint/utils": "^8.23.0" }, "peerDependencies": { "eslint": "^8.57 || ^9.0.0" } }, "sha512-ar2xszq0g2LTP38pzEoKtQftNaFjwNYcgrwZCfgNeoFY4j80J+F0JRLbD1Ug8BzKoPoQhX4tEkRjSEMz6S/59w=="],
 
     "@blueprintjs/icons": ["@blueprintjs/icons@6.7.0", "", { "dependencies": { "change-case": "^4.1.2", "classnames": "^2.3.1", "tslib": "~2.6.2" }, "peerDependencies": { "@types/react": "18", "react": "18", "react-dom": "18" }, "optionalPeers": ["@types/react"] }, "sha512-wT8LjdXz5ogWYtWGsMpmLHbgg5Ml7rGcTg4QzHRL4NROaS2LEuNCNRQxmRNBdRdfpKcnGGwXNYqUNZYurB1r4Q=="],
+
+    "@blueprintjs/select": ["@blueprintjs/select@6.1.8", "", { "dependencies": { "@blueprintjs/colors": "^5.1.16", "@blueprintjs/core": "^6.11.3", "@blueprintjs/icons": "^6.8.0", "classnames": "^2.3.1", "tslib": "~2.6.2" }, "peerDependencies": { "@types/react": "18", "react": "18", "react-dom": "18" }, "optionalPeers": ["@types/react"] }, "sha512-6cSoUDN5bYery4TBVEsHFeoZcQGUB26c8x+HJ+zrrjL1yyE1iK+0VTcW+kB0PW4J/fFN0vhVkveLKlrJQIcJcA=="],
 
     "@borewit/text-codec": ["@borewit/text-codec@0.2.2", "", {}, "sha512-DDaRehssg1aNrH4+2hnj1B7vnUGEjU6OIlyRdkMd0aUdIUvKXrJfXsy8LVtXAy7DRvYVluWbMspsRhz2lcW0mQ=="],
 
@@ -1341,6 +1344,12 @@
     "@babel/core/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
 
     "@babel/helper-compilation-targets/semver": ["semver@6.3.1", "", { "bin": { "semver": "bin/semver.js" } }, "sha512-BR7VvDCVHO+q2xBEWskxS6DJE1qRnb7DxzUrogb71CWoSficBxYsiAGd+Kl0mmq/MprG9yArRkyrQxTO6XjMzA=="],
+
+    "@blueprintjs/select/@blueprintjs/colors": ["@blueprintjs/colors@5.1.16", "", { "dependencies": { "tslib": "~2.6.2" } }, "sha512-P9uX0Aj2TP9+6aUcori1iPl4snxM/Vgq0LZbhUl1l5bHTgNxxwm/0+IoS/SlQg93HBRl8KTAM1evEqtPbwV10A=="],
+
+    "@blueprintjs/select/@blueprintjs/core": ["@blueprintjs/core@6.11.3", "", { "dependencies": { "@blueprintjs/colors": "^5.1.16", "@blueprintjs/icons": "^6.8.0", "@floating-ui/react": "^0.27.13", "@popperjs/core": "^2.11.8", "classnames": "^2.3.1", "normalize.css": "^8.0.1", "react-popper": "^2.3.0", "react-transition-group": "^4.4.5", "tslib": "~2.6.2", "use-sync-external-store": "^1.2.0" }, "peerDependencies": { "@types/react": "18", "react": "18", "react-dom": "18" }, "optionalPeers": ["@types/react"], "bin": { "upgrade-blueprint-2.0.0-rename": "scripts/upgrade-blueprint-2.0.0-rename.sh", "upgrade-blueprint-3.0.0-rename": "scripts/upgrade-blueprint-3.0.0-rename.sh" } }, "sha512-pHApk7prF8aQeTUjcuVhoT7gA89BbDO2Qwn/XdD1/ewFawjK53YbYGuerLv2vQ6BmIMeFf2Cs6cM34XCtT0LWw=="],
+
+    "@blueprintjs/select/@blueprintjs/icons": ["@blueprintjs/icons@6.8.0", "", { "dependencies": { "change-case": "^4.1.2", "classnames": "^2.3.1", "tslib": "~2.6.2" }, "peerDependencies": { "@types/react": "18", "react": "18", "react-dom": "18" }, "optionalPeers": ["@types/react"] }, "sha512-a281z8VTNesqVunBO2OigrPFxMRWHpYc84fN+xWbdN5hCiqQNv8ha6sqxeXHUsaTdnemiTH07thiZ8u8Uhfj4A=="],
 
     "@eslint-community/eslint-plugin-eslint-comments/ignore": ["ignore@7.0.5", "", {}, "sha512-Hs59xBNfUIunMFgWAbGX5cq6893IbWg4KnrjbYwX3tx0ztorVgTDA6B2sxf8ejHJ4wz8BqGUMYlnzNBer5NvGg=="],
 
