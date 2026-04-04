@@ -38,6 +38,30 @@ function Root() {
     return "system";
   });
 
+  useEffect(() => {
+    let buildId: string | null = null;
+
+    async function checkBuildId() {
+      try {
+        const res = await fetch("/api/build-id");
+        const data = (await res.json()) as { buildId: string };
+        if (buildId === null) {
+          buildId = data.buildId;
+        } else if (buildId !== data.buildId) {
+          window.location.reload();
+        }
+      } catch {
+        // ignore — server may be restarting
+      }
+    }
+
+    checkBuildId();
+
+    const handler = () => checkBuildId();
+    window.addEventListener("focus", handler);
+    return () => window.removeEventListener("focus", handler);
+  }, []);
+
   const isDark = mode === "dark" || (mode === "system" && getSystemDark());
 
   useEffect(() => {

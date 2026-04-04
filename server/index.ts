@@ -15,9 +15,11 @@ import { kioskRoute } from "./routes/kiosk";
 
 const isDev = !existsSync("dist/index.html");
 const indexHtml = isDev ? null : readFileSync("dist/index.html", "utf-8");
+const BUILD_ID = crypto.randomUUID();
 
 const app = new Elysia()
   .get("/health", () => ({ ok: true }))
+  .get("/api/build-id", () => ({ buildId: BUILD_ID }))
   .use(reposRoutes)
   .use(queueRoutes)
   .use(notesRoutes)
