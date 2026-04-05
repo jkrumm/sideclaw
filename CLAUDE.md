@@ -49,6 +49,15 @@ In WebKit-based browsers (e.g. CMUX) that don't expose it, the frontend calls
 Chromium, then Playwright Chrome for Testing. Falls back to CSS focus mode if
 no binary is found. **Exit kiosk:** `Cmd+Q`.
 
+## Project Skills
+
+Project-specific skills live in `.claude/skills/` (tracked in git, unlike most repos).
+Settings files (`.claude/settings.json`, `.claude/settings.local.json`) remain gitignored.
+
+| Skill | Purpose |
+|-|-|
+| `claude-cli` | Reference for spawning `claude -p` subprocesses from Bun/TypeScript |
+
 ## Validating UI Changes
 
 In dev: changes reflect immediately via Vite HMR at the dev server port.
