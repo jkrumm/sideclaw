@@ -36,24 +36,29 @@ export interface GitStatus {
   githubRepo: string | null;
 }
 
-function run(args: string[]): string | null {
-  try {
-    const result = Bun.spawnSync(["git", ...args], { stderr: "ignore" });
-    if (result.exitCode !== 0) return null;
-    return new TextDecoder().decode(result.stdout).trim();
-  } catch {
-    return null;
-  }
-}
+async function runGit(
+  args: string[],
+  opts: { raw?: boolean; timeoutMs?: number } = {},
+): Promise<string | null> {
+  const proc = Bun.spawn(["git", ...args], { stderr: "ignore", stdout: "pipe" });
 
-// Like run() but without trimming — needed for git status --porcelain where
-// leading spaces are meaningful status characters (unstaged file indicator).
-function runRaw(args: string[]): string | null {
+  let killed = false;
+  const timer =
+    opts.timeoutMs != null
+      ? setTimeout(() => {
+          killed = true;
+          proc.kill();
+        }, opts.timeoutMs)
+      : null;
+
   try {
-    const result = Bun.spawnSync(["git", ...args], { stderr: "ignore" });
-    if (result.exitCode !== 0) return null;
-    return new TextDecoder().decode(result.stdout);
+    const text = await new Response(proc.stdout).text();
+    const exitCode = await proc.exited;
+    if (timer) clearTimeout(timer);
+    if (killed || exitCode !== 0) return null;
+    return opts.raw ? text : text.trim();
   } catch {
+    if (timer) clearTimeout(timer);
     return null;
   }
 }
@@ -106,106 +111,76 @@ function parseCommits(output: string | null): GitCommit[] {
     .filter((c) => c.sha);
 }
 
-export function getGitStatus(repoPath: string): GitStatus | null {
-  // Update remote tracking refs so ahead/behind, tags, and history are current
-  run(["-C", repoPath, "fetch", "--quiet", "--prune"]);
+export async function getGitStatus(repoPath: string): Promise<GitStatus | null> {
+  const g = (args: string[], opts?: { raw?: boolean; timeoutMs?: number }) =>
+    runGit(["-C", repoPath, ...args], opts);
 
-  const branch = run(["-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD"]);
+  // Phase 1 — all independent, run in parallel (fetch included)
+  const [
+    , // fetch — side effect only, updates remote tracking refs
+    branch,
+    shortstat,
+    stagedOutput,
+    symbolicRef,
+    statusOutput,
+    stashOutput,
+    lastTag,
+    worktreeOutput,
+    remoteUrl,
+  ] = await Promise.all([
+    g(["fetch", "--quiet", "--prune"], { timeoutMs: 5_000 }),
+    g(["rev-parse", "--abbrev-ref", "HEAD"]),
+    g(["diff", "--shortstat"]),
+    g(["diff", "--cached", "--name-only"]),
+    g(["symbolic-ref", "refs/remotes/origin/HEAD"]),
+    g(["status", "--porcelain"], { raw: true }),
+    g(["stash", "list"]),
+    g(["describe", "--tags", "--abbrev=0"]),
+    g(["worktree", "list", "--porcelain"]),
+    g(["remote", "get-url", "origin"]),
+  ]);
+
   if (!branch) return null;
 
+  const mainBranch = symbolicRef ? (symbolicRef.split("/").pop() ?? "main") : "main";
+
+  // Phase 2 — depend on phase 1 results, run in parallel
+  const [aheadBehind, logOutput, masterLogOutput, distStr] = await Promise.all([
+    g(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]),
+    g(["log", `${mainBranch}..HEAD`, `--format=%h%n%s%n%ar%n%b%n${LOG_SEP}`, "--"]),
+    g(["log", mainBranch, "-n", "10", `--format=%h%n%s%n%ar%n%b%n${LOG_SEP}`, "--"]),
+    lastTag ? g(["rev-list", `${lastTag}..HEAD`, "--count"]) : Promise.resolve(null),
+  ]);
+
+  // Parse ahead/behind
   let ahead = 0;
   let behind = 0;
-  const aheadBehind = run([
-    "-C",
-    repoPath,
-    "rev-list",
-    "--left-right",
-    "--count",
-    "HEAD...@{upstream}",
-  ]);
   if (aheadBehind) {
     const parts = aheadBehind.split(/\s+/);
     ahead = parseInt(parts[0] ?? "0", 10) || 0;
     behind = parseInt(parts[1] ?? "0", 10) || 0;
   }
 
+  // Parse diff shortstat
   let insertions = 0;
   let deletions = 0;
-  const shortstat = run(["-C", repoPath, "diff", "--shortstat"]);
   if (shortstat) {
-    const insMatch = shortstat.match(/(\d+) insertion/);
-    const delMatch = shortstat.match(/(\d+) deletion/);
-    insertions = insMatch ? parseInt(insMatch[1], 10) : 0;
-    deletions = delMatch ? parseInt(delMatch[1], 10) : 0;
+    insertions = parseInt(shortstat.match(/(\d+) insertion/)?.[1] ?? "0", 10) || 0;
+    deletions = parseInt(shortstat.match(/(\d+) deletion/)?.[1] ?? "0", 10) || 0;
   }
 
-  const stagedOutput = run(["-C", repoPath, "diff", "--cached", "--name-only"]);
   const stagedCount =
     stagedOutput && stagedOutput.length > 0
       ? stagedOutput.split("\n").filter(Boolean).length
       : 0;
 
-  // Main branch detection
-  const symbolicRef = run([
-    "-C",
-    repoPath,
-    "symbolic-ref",
-    "refs/remotes/origin/HEAD",
-  ]);
-  const mainBranch = symbolicRef
-    ? (symbolicRef.split("/").pop() ?? "main")
-    : "main";
-
-  // Changed files — use runRaw to preserve leading spaces (unstaged status chars)
-  const statusOutput = runRaw(["-C", repoPath, "status", "--porcelain"]);
   const changedFiles = parseChangedFiles(statusOutput);
-
-  // Commits on branch vs main
-  const logOutput = run([
-    "-C",
-    repoPath,
-    "log",
-    `${mainBranch}..HEAD`,
-    `--format=%h%n%s%n%ar%n%b%n${LOG_SEP}`,
-    "--",
-  ]);
   const branchCommits = parseCommits(logOutput);
-
-  // Stash count
-  const stashOutput = run(["-C", repoPath, "stash", "list"]);
-  const stashCount = stashOutput
-    ? stashOutput.split("\n").filter(Boolean).length
-    : 0;
-
-  // Last tag
-  const lastTag = run(["-C", repoPath, "describe", "--tags", "--abbrev=0"]);
-  let distanceFromTag = 0;
-  if (lastTag) {
-    const distStr = run([
-      "-C",
-      repoPath,
-      "rev-list",
-      `${lastTag}..HEAD`,
-      "--count",
-    ]);
-    distanceFromTag = distStr ? parseInt(distStr, 10) || 0 : 0;
-  }
-
-  // Recent commits on main branch
-  const masterLogOutput = run([
-    "-C",
-    repoPath,
-    "log",
-    mainBranch,
-    "-n",
-    "10",
-    `--format=%h%n%s%n%ar%n%b%n${LOG_SEP}`,
-    "--",
-  ]);
   const masterCommits = parseCommits(masterLogOutput);
+  const stashCount = stashOutput ? stashOutput.split("\n").filter(Boolean).length : 0;
+  const distanceFromTag = distStr ? parseInt(distStr, 10) || 0 : 0;
 
-  // Worktrees
-  const worktreeOutput = run(["-C", repoPath, "worktree", "list", "--porcelain"]);
+  // Parse worktrees
   const worktrees: Worktree[] = [];
   if (worktreeOutput) {
     const blocks = worktreeOutput.split("\n\n").filter(Boolean);
@@ -223,8 +198,6 @@ export function getGitStatus(repoPath: string): GitStatus | null {
     }
   }
 
-  // Remote URL + GitHub repo
-  const remoteUrl = run(["-C", repoPath, "remote", "get-url", "origin"]);
   const githubRepo = remoteUrl ? parseGithubRepo(remoteUrl) : null;
 
   return {

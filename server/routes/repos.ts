@@ -79,7 +79,7 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
     if (existsSync(notesPath)) await fs.rm(notesPath);
     return { ok: true };
   })
-  .get("/repo/git", ({ query, set }) => {
+  .get("/repo/git", async ({ query, set }) => {
     const path = query.path;
     if (!path) {
       set.status = 400;
@@ -87,7 +87,7 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
     }
 
     const containerPath = toContainerPath(path);
-    const git = getGitStatus(containerPath);
+    const git = await getGitStatus(containerPath);
 
     // Normalise worktree paths to display paths so frontend can pass them back
     // to API endpoints directly (e.g. /api/actions/chain { worktreePath })

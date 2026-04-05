@@ -31,8 +31,18 @@ type SseController = ReadableStreamDefaultController<string>;
 
 // ── In-memory store ───────────────────────────────────────────────────────────
 
+const MAX_COMPLETED_JOBS = 20;
 const jobs = new Map<string, ChainJob>();
 const subscribers = new Map<string, Set<SseController>>();
+
+function pruneJobs() {
+  const completed = [...jobs.entries()].filter(([, j]) => j.status !== "running");
+  if (completed.length <= MAX_COMPLETED_JOBS) return;
+  completed
+    .sort((a, b) => (a[1].completedAt?.getTime() ?? 0) - (b[1].completedAt?.getTime() ?? 0))
+    .slice(0, completed.length - MAX_COMPLETED_JOBS)
+    .forEach(([id]) => jobs.delete(id));
+}
 
 function push(jobId: string, event: string, data: string) {
   const line = `event: ${event}\ndata: ${data}\n\n`;
@@ -146,6 +156,7 @@ async function runJob(job: ChainJob) {
   close(job.id);
 
   notify(job);
+  pruneJobs();
 }
 
 function notify(job: ChainJob) {
