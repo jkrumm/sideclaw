@@ -1,4 +1,5 @@
 import { Octokit } from "@octokit/rest";
+import { appLogger as logger } from "../logger.ts";
 
 // Silence the built-in request-log plugin — 404s for repos without releases
 // are expected and handled via allSettled; real errors bubble to our catch.
@@ -148,7 +149,7 @@ export async function getGithubData(
 
     return { currentPR, openPRs, workflowRuns, latestRelease, hasReleaseWorkflow };
   } catch (err) {
-    console.error("GitHub API error:", err);
+    logger.error({ err }, "GitHub API error");
     return null;
   }
 }

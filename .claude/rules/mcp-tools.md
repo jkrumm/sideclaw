@@ -114,15 +114,22 @@ Key requirements (already handled by the runner):
 
 ## Logging
 
-Use the shared `log()` helper from `server/mcp/logger.ts` — do NOT use raw `console.error()` in tool handlers, as those messages won't appear in the log file.
+Use `logger` from `"../logger.ts"` (which resolves to `server/mcp/logger.ts` from tool files).
+Never use `console.error()` or `console.log()` in tool handlers:
+- `console.log()` corrupts MCP stdio JSON-RPC
+- `console.error()` is safe for the terminal but bypasses the structured log file
 
 ```typescript
-import { log } from "../logger.ts";
-log("info", "[check] starting", { cwd });
+import { logger } from "../logger.ts";
+
+const startMs = performance.now();
+logger.info({ event: "mcp.tool.start", tool: "check", project: cwd }, "check starting");
+// ... run session ...
+logger.info({ event: "mcp.tool.end", tool: "check", project: cwd, passed: true, durationMs: Math.round(performance.now() - startMs) }, "check done");
 ```
 
-All logging via `console.error()` under the hood — `console.log()` corrupts MCP stdio JSON-RPC.
-Appends to `/tmp/sideclaw-mcp.log`. Tail it with `tail -f /tmp/sideclaw-mcp.log`.
+Logs append to `/tmp/sideclaw.jsonl`. See `.claude/rules/logs.md` for full schema + query patterns.
+Always include `event`, `tool`, `project` on tool start/end entries.
 
 ## Skill Prompts
 

@@ -38,8 +38,9 @@ Entry point: `server/mcp.ts`. Tools live in `server/mcp/tools/`, skill prompts i
 # Register at user scope (one-time, already done)
 claude mcp add --scope user sideclaw -- bun run /Users/johannes.krumm/SourceRoot/sideclaw/server/mcp.ts
 
-# Logs (MCP process writes here)
-tail -f /tmp/sideclaw-mcp.log
+# Structured logs (both HTTP + MCP processes write here)
+tail -f /tmp/sideclaw.jsonl | jq .
+tail -f /tmp/sideclaw.jsonl | jq 'select(.source == "mcp")'
 ```
 
 Inner sessions spawned by MCP tools use `claude -p` with `--setting-sources user,project` and Max subscription billing (no API key). See `.claude/rules/mcp-tools.md` for authoring conventions.

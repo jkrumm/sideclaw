@@ -8,6 +8,7 @@ build:
 	bun run build
 
 reload: build
+	@pkill -f "sideclaw/server/mcp.ts" 2>/dev/null || true
 	launchctl kickstart -k gui/$$(id -u)/com.jkrumm.sideclaw
 	@echo "sideclaw reloaded"
 

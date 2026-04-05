@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerCheckTool } from "./mcp/tools/check.ts";
+import { logger } from "./mcp/logger.ts";
 
 const server = new McpServer({
   name: "sideclaw",
@@ -12,4 +13,4 @@ registerCheckTool(server);
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
-console.error("[sideclaw mcp] server ready");
+logger.info({ event: "mcp.startup" }, "sideclaw mcp server ready");

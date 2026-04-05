@@ -1,7 +1,7 @@
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { log } from "./logger.ts";
+import { logger } from "./logger.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -78,7 +78,8 @@ export async function runSession<T = unknown>(
   env.CLAUDE_ENTRYPOINT = "worker";
   // No ANTHROPIC_API_KEY — preserves Max subscription billing
 
-  log("info", "[session-runner] spawn", { cwd, model, maxTurns, schema: !!jsonSchema });
+  const startMs = performance.now();
+  logger.info({ event: "session.spawn", project: cwd, model, maxTurns, jsonSchema: !!jsonSchema }, "session spawn");
 
   const proc = Bun.spawn([CLAUDE_BIN, ...args], {
     cwd,
@@ -92,12 +93,12 @@ export async function runSession<T = unknown>(
   let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
   const timeoutHandle = setTimeout(() => {
     timedOut = true;
-    log("error", "[session-runner] timed out — SIGTERM");
+    logger.error({ event: "session.timeout", project: cwd }, "session timed out — SIGTERM");
     proc.kill("SIGTERM");
     sigkillTimer = setTimeout(() => {
       sigkillTimer = null;
       if (proc.exitCode === null) {
-        log("error", "[session-runner] still alive — SIGKILL");
+        logger.error({ event: "session.timeout", project: cwd }, "session still alive — SIGKILL");
         proc.kill("SIGKILL");
       }
     }, 5000);
@@ -115,15 +116,13 @@ export async function runSession<T = unknown>(
   const stderrTrimmed = stderr.trim();
 
   if (stderrTrimmed) {
-    log("debug", "[session-runner] stderr", { stderr: stderrTrimmed.slice(0, 1000) });
+    logger.debug({ stderr: stderrTrimmed.slice(0, 1000) }, "session stderr");
   }
 
-  log("debug", "[session-runner] raw stdout", {
-    exitCode,
-    timedOut,
-    stdoutLen: stdout.length,
-    stdoutHead: stdout.slice(0, 500),
-  });
+  logger.debug(
+    { exitCode, timedOut, stdoutLen: stdout.length, stdoutHead: stdout.slice(0, 500) },
+    "session raw stdout",
+  );
 
   if (timedOut) {
     return { ok: false, error: `Session timed out after ${timeoutMs}ms` };
@@ -140,41 +139,60 @@ export async function runSession<T = unknown>(
   try {
     envelope = JSON.parse(stdout.trim()) as ClaudeJsonEnvelope;
   } catch {
-    log("error", "[session-runner] envelope parse failed", { stdout: stdout.slice(0, 500) });
+    logger.error({ stdout: stdout.slice(0, 500) }, "envelope parse failed");
     return { ok: false, error: `Failed to parse JSON output: ${stdout.slice(0, 500)}` };
   }
 
-  log("debug", "[session-runner] envelope", {
-    type: envelope.type,
-    subtype: envelope.subtype,
-    is_error: envelope.is_error,
-    hasStructuredOutput: envelope.structured_output !== undefined,
-    resultLen: typeof envelope.result === "string" ? envelope.result.length : "n/a",
-    turns: envelope.num_turns,
-    cost: envelope.total_cost_usd,
-  });
+  logger.debug(
+    {
+      type: envelope.type,
+      subtype: envelope.subtype,
+      is_error: envelope.is_error,
+      hasStructuredOutput: envelope.structured_output !== undefined,
+      turns: envelope.num_turns,
+      costUsd: envelope.total_cost_usd,
+    },
+    "envelope received",
+  );
 
   if (envelope.is_error) {
     const errMsg = envelope.errors?.join("; ") ?? String(envelope.result ?? "Unknown error");
-    log("error", "[session-runner] is_error", { subtype: envelope.subtype, error: errMsg });
+    logger.error({ event: "session.error", project: cwd, subtype: envelope.subtype, error: errMsg }, "session is_error");
     return { ok: false, error: errMsg };
   }
 
+  const logSessionEnd = () => logger.info(
+    {
+      event: "session.end",
+      project: cwd,
+      model,
+      durationMs: Math.round(performance.now() - startMs),
+      costUsd: envelope.total_cost_usd,
+      turns: envelope.num_turns,
+    },
+    "session end",
+  );
+
   // --json-schema puts the parsed object in structured_output; fall back to result string
   if (envelope.structured_output !== undefined) {
+    logSessionEnd();
     return { ok: true, data: envelope.structured_output as T };
   }
 
   const raw = envelope.result;
   if (typeof raw === "string" && raw.trim()) {
     try {
-      return { ok: true, data: JSON.parse(raw) as T };
+      // Strip markdown code block fences the model sometimes adds around JSON
+      const stripped = raw.replace(/^```(?:json)?\n?([\s\S]*?)\n?```\s*$/, "$1").trim();
+      const data = JSON.parse(stripped) as T;
+      logSessionEnd();
+      return { ok: true, data };
     } catch {
-      log("error", "[session-runner] result JSON parse failed", { raw: raw.slice(0, 500) });
+      logger.error({ raw: raw.slice(0, 500) }, "result JSON parse failed");
       return { ok: false, error: `result field is not valid JSON: ${raw.slice(0, 500)}` };
     }
   }
 
-  log("error", "[session-runner] no usable output", { envelope });
+  logger.error({ event: "session.error", project: cwd }, "session no usable output");
   return { ok: false, error: "Session produced no output (empty structured_output and result)" };
 }

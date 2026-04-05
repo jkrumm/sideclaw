@@ -3,7 +3,7 @@ import { join } from "path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { runSession } from "../session-runner.ts";
-import { log } from "../logger.ts";
+import { logger } from "../logger.ts";
 
 // ── Output schema — single source of truth ────────────────────────────────────
 // Both the MCP typed contract (outputSchema) and the claude --json-schema flag
@@ -77,7 +77,8 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
         };
       }
 
-      log("info", `[check] starting in ${cwd}`);
+      const startMs = performance.now();
+      logger.info({ event: "mcp.tool.start", tool: "check", project: cwd }, "check starting");
 
       const result = await runSession<CheckOutput>({
         cwd,
@@ -89,14 +90,20 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
       });
 
       if (!result.ok) {
-        log("error", `[check] failed: ${result.error}`);
+        logger.error(
+          { event: "mcp.tool.end", tool: "check", project: cwd, passed: false, durationMs: Math.round(performance.now() - startMs), error: result.error },
+          "check failed",
+        );
         return {
           content: [{ type: "text", text: JSON.stringify({ error: result.error }) }],
           isError: true,
         };
       }
 
-      log("info", `[check] done — passed: ${result.data?.passed}`);
+      logger.info(
+        { event: "mcp.tool.end", tool: "check", project: cwd, passed: result.data?.passed, durationMs: Math.round(performance.now() - startMs) },
+        "check done",
+      );
       return {
         content: [{ type: "text", text: JSON.stringify(result.data) }],
         structuredContent: result.data!,
