@@ -1,6 +1,7 @@
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": ["typescript", "react", "unicorn", "promise", "import"],
+  "jsPlugins": ["eslint-plugin-zod"],
   "env": {
     "browser": true,
     "node": true
@@ -24,7 +25,12 @@
     "import/no-unassigned-import": "off",
     "import/no-named-as-default": "off",
     "promise/no-nesting": "warn",
-    "promise/always-return": "off"
+    "promise/always-return": "off",
+    "zod/no-any-schema": "error",
+    "zod/no-optional-and-default-together": "error",
+    "zod/prefer-enum-over-literal-union": "warn",
+    "zod/consistent-import": ["error", { "syntax": "named" }],
+    "zod/prefer-meta": "off"
   },
   "ignorePatterns": ["dist/**", "node_modules/**", ".out/**"]
 }
