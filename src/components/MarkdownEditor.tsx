@@ -12,7 +12,6 @@ import {
   type ViewUpdate as CMViewUpdate,
   keymap,
 } from "@codemirror/view";
-import { Prec } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 
 interface Props {
@@ -228,16 +227,6 @@ export function MarkdownEditor({ content, contentKey, onSave, placeholder }: Pro
       hrPlugin,
       markdownKeymap,
       EditorView.lineWrapping,
-      // Prevent parent apps (e.g. cmux.dev) from capturing keyboard events
-      // when the editor is focused. Prec.highest ensures this fires before
-      // CM's own keymaps so stopPropagation reaches the outer listener.
-      Prec.highest(
-        EditorView.domEventHandlers({
-          keydown(event) {
-            event.stopPropagation();
-          },
-        }),
-      ),
     ],
     [],
   );
@@ -311,6 +300,7 @@ export function MarkdownEditor({ content, contentKey, onSave, placeholder }: Pro
         bracketMatching: false,
         closeBrackets: false,
         autocompletion: false,
+        defaultKeymap: true,
         searchKeymap: true,
       }}
     />
