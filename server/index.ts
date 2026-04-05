@@ -27,23 +27,29 @@ const app = new Elysia()
   .onAfterHandle(({ request, set, _startMs }) => {
     const url = new URL(request.url);
     if (SKIP_LOG_PATHS.has(url.pathname)) return;
-    logger.info({
-      event: "app.request",
-      method: request.method,
-      path: url.pathname,
-      status: typeof set.status === "number" ? set.status : 200,
-      durationMs: Math.round(performance.now() - _startMs),
-    }, "request");
+    logger.info(
+      {
+        event: "app.request",
+        method: request.method,
+        path: url.pathname,
+        status: typeof set.status === "number" ? set.status : 200,
+        durationMs: Math.round(performance.now() - _startMs),
+      },
+      "request",
+    );
   })
   .onError(({ request, error, set }) => {
     const url = new URL(request.url);
-    logger.error({
-      event: "app.request",
-      method: request.method,
-      path: url.pathname,
-      status: typeof set.status === "number" ? set.status : 500,
-      err: error,
-    }, "request error");
+    logger.error(
+      {
+        event: "app.request",
+        method: request.method,
+        path: url.pathname,
+        status: typeof set.status === "number" ? set.status : 500,
+        err: error,
+      },
+      "request error",
+    );
   })
   .get("/health", () => ({ ok: true }))
   .get("/api/build-id", () => ({ buildId: BUILD_ID }))
@@ -60,13 +66,11 @@ const app = new Elysia()
   .use(kioskRoute);
 
 if (!isDev) {
-  app
-    .use(staticPlugin({ assets: "dist/assets", prefix: "/assets" }))
-    .get("*", ({ set }) => {
-      set.headers["content-type"] = "text/html; charset=utf-8";
-      set.headers["cache-control"] = "no-cache";
-      return indexHtml;
-    });
+  app.use(staticPlugin({ assets: "dist/assets", prefix: "/assets" })).get("*", ({ set }) => {
+    set.headers["content-type"] = "text/html; charset=utf-8";
+    set.headers["cache-control"] = "no-cache";
+    return indexHtml;
+  });
 }
 
 const PORT = parseInt(process.env.PORT ?? "7705");
@@ -74,9 +78,7 @@ app.listen(PORT);
 
 logger.info(
   { event: "app.startup", port: PORT, dev: isDev },
-  isDev
-    ? `sideclaw API running on :${PORT} (dev)`
-    : `sideclaw running on :${PORT}`,
+  isDev ? `sideclaw API running on :${PORT} (dev)` : `sideclaw running on :${PORT}`,
 );
 
 export type App = typeof app;

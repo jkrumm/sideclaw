@@ -24,4 +24,4 @@ export const usageRoutes = new Elysia({ prefix: "/api" })
       }),
     },
   )
-  .get("/usage", () => ({ ok: true, data: current } as const));
+  .get("/usage", () => ({ ok: true, data: current }) as const);

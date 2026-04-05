@@ -1,5 +1,12 @@
 import pino from "pino";
-import { statSync, existsSync, renameSync, unlinkSync, createReadStream, createWriteStream } from "fs";
+import {
+  statSync,
+  existsSync,
+  renameSync,
+  unlinkSync,
+  createReadStream,
+  createWriteStream,
+} from "fs";
 import { createInterface } from "readline";
 
 export const LOG_FILE = "/tmp/sideclaw.jsonl";
@@ -45,7 +52,11 @@ export async function cleanupLogFile(): Promise<void> {
       settled = true;
       if (err) {
         // Clean up tmp on error so a corrupt partial file is never left behind
-        try { unlinkSync(tmp); } catch { /* best-effort */ }
+        try {
+          unlinkSync(tmp);
+        } catch {
+          /* best-effort */
+        }
         reject(err);
       } else {
         resolve();
@@ -80,7 +91,11 @@ export async function cleanupLogFile(): Promise<void> {
     renameSync(tmp, LOG_FILE);
   } catch {
     // best-effort: leave original log intact if rename fails
-    try { unlinkSync(tmp); } catch { /* ignore */ }
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* ignore */
+    }
     return;
   }
   try {

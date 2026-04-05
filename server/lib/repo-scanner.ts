@@ -4,7 +4,7 @@ import { WORKSPACE_ROOTS, toDisplayPath } from "./workspace";
 
 export interface RepoInfo {
   name: string;
-  path: string;          // display path: "/SourceRoot/vps"
+  path: string; // display path: "/SourceRoot/vps"
   containerPath: string; // host path: "/Users/.../SourceRoot/vps"
   hasQueue: boolean;
   hasNotes: boolean;

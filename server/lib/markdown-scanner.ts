@@ -40,5 +40,5 @@ export function scanMarkdownFiles(repoPath: string): string[] {
   }
 
   walk(repoPath);
-  return files.sort();
+  return files.toSorted();
 }

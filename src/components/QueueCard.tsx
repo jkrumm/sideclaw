@@ -10,6 +10,11 @@ interface Props {
   onUpdate: (content: string) => void;
 }
 
+function autoResize(el: HTMLTextAreaElement) {
+  el.style.height = "auto";
+  el.style.height = `${el.scrollHeight}px`;
+}
+
 function kindIcon(kind: QueueTask["kind"]): React.ReactElement {
   if (kind === "slash") {
     return <Icon icon="lightning" intent={Intent.PRIMARY} size={14} />;
@@ -25,14 +30,9 @@ export function QueueCard({ task, onDelete, onUpdate }: Props) {
   const [editContent, setEditContent] = useState(task.content);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: task.index });
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: task.index,
+  });
 
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
@@ -72,19 +72,13 @@ export function QueueCard({ task, onDelete, onUpdate }: Props) {
     }
   };
 
-  const autoResize = (el: HTMLTextAreaElement) => {
-    el.style.height = "auto";
-    el.style.height = `${el.scrollHeight}px`;
-  };
-
   const handleTextareaChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setEditContent(e.target.value);
     autoResize(e.target);
   };
 
   const handleTextareaRef = (el: HTMLTextAreaElement | null) => {
-    (textareaRef as React.MutableRefObject<HTMLTextAreaElement | null>).current =
-      el;
+    (textareaRef as React.MutableRefObject<HTMLTextAreaElement | null>).current = el;
     if (el) {
       autoResize(el);
       el.focus();
@@ -135,8 +129,7 @@ export function QueueCard({ task, onDelete, onUpdate }: Props) {
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
-              fontFamily:
-                task.kind === "slash" ? "var(--bp-typography-family-mono)" : undefined,
+              fontFamily: task.kind === "slash" ? "var(--bp-typography-family-mono)" : undefined,
               fontSize: 13,
             }}
           >

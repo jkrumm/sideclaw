@@ -87,6 +87,7 @@ export const eventsRoutes = new Elysia({ prefix: "/api" }).get(
       });
 
       while (pending.length > 0) {
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- shift() on a non-empty array always returns a value; TS can't narrow from the while-guard
         const event = pending.shift()!;
         if (event.file === "ping") {
           yield sse({ event: "ping", data: "{}" });

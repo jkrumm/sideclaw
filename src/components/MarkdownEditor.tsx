@@ -12,6 +12,7 @@ import {
   type ViewUpdate as CMViewUpdate,
   keymap,
 } from "@codemirror/view";
+import { Prec } from "@codemirror/state";
 import { syntaxTree } from "@codemirror/language";
 
 interface Props {
@@ -84,7 +85,9 @@ const lightTheme = createTheme({
 // ── Horizontal rule decoration ──────────────────────────────────────
 
 function buildHrDecorations(view: EditorView): DecorationSet {
-  const decorations: Array<ReturnType<typeof Decoration.line> | ReturnType<typeof Decoration.mark>> = [];
+  const decorations: Array<
+    ReturnType<typeof Decoration.line> | ReturnType<typeof Decoration.mark>
+  > = [];
   syntaxTree(view.state).iterate({
     enter(node) {
       if (node.name === "HorizontalRule") {
@@ -105,9 +108,7 @@ function buildHrDecorations(view: EditorView): DecorationSet {
           );
           // Treat the --- line as a normal separator
           decorations.push(Decoration.line({ class: "cm-hr-line" }).range(markFrom));
-          decorations.push(
-            Decoration.mark({ class: "cm-hr-text" }).range(markFrom, node.to),
-          );
+          decorations.push(Decoration.mark({ class: "cm-hr-text" }).range(markFrom, node.to));
         }
       }
     },
@@ -213,12 +214,7 @@ const editorTheme = EditorView.theme({
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function MarkdownEditor({
-  content,
-  contentKey,
-  onSave,
-  placeholder,
-}: Props) {
+export function MarkdownEditor({ content, contentKey, onSave, placeholder }: Props) {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
@@ -232,13 +228,21 @@ export function MarkdownEditor({
       hrPlugin,
       markdownKeymap,
       EditorView.lineWrapping,
+      // Prevent parent apps (e.g. cmux.dev) from capturing keyboard events
+      // when the editor is focused. Prec.highest ensures this fires before
+      // CM's own keymaps so stopPropagation reaches the outer listener.
+      Prec.highest(
+        EditorView.domEventHandlers({
+          keydown(event) {
+            event.stopPropagation();
+          },
+        }),
+      ),
     ],
     [],
   );
 
-  const isDark =
-    typeof document !== "undefined" &&
-    document.body.classList.contains("bp6-dark");
+  const isDark = typeof document !== "undefined" && document.body.classList.contains("bp6-dark");
 
   const onChange = useCallback((value: string, _viewUpdate: ViewUpdate) => {
     latestValueRef.current = value;
@@ -268,10 +272,10 @@ export function MarkdownEditor({
       if (debounceRef.current && pendingSaveFnRef.current) {
         clearTimeout(debounceRef.current);
         const fn = pendingSaveFnRef.current;
-        const content = latestValueRef.current;
+        const latestContent = latestValueRef.current;
         pendingSaveFnRef.current = null;
         debounceRef.current = null;
-        fn(content).catch(() => {});
+        fn(latestContent).catch(() => {});
       }
     };
     document.addEventListener("visibilitychange", handleHide);

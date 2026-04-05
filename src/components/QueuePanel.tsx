@@ -14,14 +14,7 @@ import {
   verticalListSortingStrategy,
   arrayMove,
 } from "@dnd-kit/sortable";
-import {
-  Button,
-  Collapse,
-  Icon,
-  InputGroup,
-  Intent,
-  Spinner,
-} from "@blueprintjs/core";
+import { Button, Collapse, Icon, InputGroup, Intent, Spinner } from "@blueprintjs/core";
 import { api } from "../lib/api";
 import { QueueCard } from "./QueueCard";
 import type { CompletedTask, QueueTask, RepoData } from "../types";
@@ -59,10 +52,7 @@ function reindex(tasks: QueueTask[]): QueueTask[] {
   return tasks.map((t, i) => ({ ...t, index: i }));
 }
 
-async function syncToServer(
-  path: string,
-  tasks: QueueTask[],
-): Promise<void> {
+async function syncToServer(path: string, tasks: QueueTask[]): Promise<void> {
   await api.api.queue.put({ tasks }, { query: { path } });
 }
 
@@ -195,7 +185,9 @@ export function QueuePanel({ repoPath, initialPromise, ref }: Props) {
   useImperativeHandle(ref, () => ({ refresh }), [refresh]);
 
   // Initial completed tasks load
-  useEffect(() => { void doFetchCompleted(); }, [doFetchCompleted]);
+  useEffect(() => {
+    void doFetchCompleted();
+  }, [doFetchCompleted]);
 
   // 2s polling
   useEffect(() => {
@@ -304,9 +296,7 @@ export function QueuePanel({ repoPath, initialPromise, ref }: Props) {
 
   // Split completed tasks into running vs done (oldest first for done)
   const runningTask = completedTasks.find((t) => t.is_running === 1) ?? null;
-  const doneTasks = completedTasks
-    .filter((t) => t.is_running === 0)
-    .reverse(); // oldest first (API returns newest first)
+  const doneTasks = completedTasks.filter((t) => t.is_running === 0).toReversed(); // oldest first (API returns newest first)
 
   const hasCompletedSection = doneTasks.length > 0 || runningTask;
   const sortableIds = tasks.map((t) => t.index);
@@ -365,9 +355,7 @@ export function QueuePanel({ repoPath, initialPromise, ref }: Props) {
           )}
 
           {/* Queued tasks */}
-          {hasCompletedSection && tasks.length > 0 && (
-            <p style={subLabelStyle}>Queued</p>
-          )}
+          {hasCompletedSection && tasks.length > 0 && <p style={subLabelStyle}>Queued</p>}
 
           {tasks.length === 0 && !hasCompletedSection && (
             <p
@@ -387,10 +375,7 @@ export function QueuePanel({ repoPath, initialPromise, ref }: Props) {
             collisionDetection={closestCenter}
             onDragEnd={handleDragEnd}
           >
-            <SortableContext
-              items={sortableIds}
-              strategy={verticalListSortingStrategy}
-            >
+            <SortableContext items={sortableIds} strategy={verticalListSortingStrategy}>
               {tasks.map((task) => (
                 <QueueCard
                   key={task.index}
@@ -403,9 +388,7 @@ export function QueuePanel({ repoPath, initialPromise, ref }: Props) {
           </DndContext>
 
           {/* Add task row */}
-          <div
-            style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}
-          >
+          <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
             <div style={{ flex: 1 }}>
               <InputGroup
                 inputRef={addInputRef}
@@ -417,11 +400,7 @@ export function QueuePanel({ repoPath, initialPromise, ref }: Props) {
                 style={{ fontFamily: "var(--bp-typography-family-mono)" }}
               />
             </div>
-            <Button
-              intent={Intent.DANGER}
-              icon="stop"
-              onClick={handleAddStop}
-            >
+            <Button intent={Intent.DANGER} icon="stop" onClick={handleAddStop}>
               Stop
             </Button>
           </div>

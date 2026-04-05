@@ -28,10 +28,18 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
     for (const ws of WORKSPACES) {
       if (!existsSync(ws.root)) continue;
       let entries: string[];
-      try { entries = readdirSync(ws.root); } catch { continue; }
+      try {
+        entries = readdirSync(ws.root);
+      } catch {
+        continue;
+      }
       for (const entry of entries) {
         const repoPath = join(ws.root, entry);
-        try { if (!statSync(repoPath).isDirectory()) continue; } catch { continue; }
+        try {
+          if (!statSync(repoPath).isDirectory()) continue;
+        } catch {
+          continue;
+        }
         if (tracked.has(repoPath)) continue;
         if (!existsSync(join(repoPath, ".git"))) continue;
         candidates.push({ name: entry, workspace: ws.name });

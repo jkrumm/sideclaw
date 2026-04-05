@@ -27,6 +27,15 @@ interface Props {
   repoPath: string;
 }
 
+function validateName(name: string, existingNames: string[]): string {
+  const trimmed = name.trim();
+  if (!trimmed) return "Name is required";
+  if (!/^[a-zA-Z0-9 \-_]+$/.test(trimmed))
+    return "Only letters, numbers, spaces, hyphens and underscores allowed";
+  if (existingNames.includes(trimmed)) return "A diagram with this name already exists";
+  return "";
+}
+
 const EMPTY_EXCALIDRAW = JSON.stringify({
   type: "excalidraw",
   version: 2,
@@ -66,13 +75,17 @@ const fsElement = () =>
 
 const fsEnter = (el: HTMLElement) => {
   if (el.requestFullscreen) return el.requestFullscreen();
-  if ((el as ElWithWebkit).webkitRequestFullscreen) return (el as ElWithWebkit).webkitRequestFullscreen!();
+  if ((el as ElWithWebkit).webkitRequestFullscreen)
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- existence checked on the line above; webkit types don't narrow after the check
+    return (el as ElWithWebkit).webkitRequestFullscreen!();
   return Promise.reject(new Error("Fullscreen not supported"));
 };
 
 const fsExit = () => {
   if (document.exitFullscreen) return document.exitFullscreen();
-  if ((document as DocWithWebkit).webkitExitFullscreen) return (document as DocWithWebkit).webkitExitFullscreen!();
+  if ((document as DocWithWebkit).webkitExitFullscreen)
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- existence checked on the line above; webkit types don't narrow after the check
+    return (document as DocWithWebkit).webkitExitFullscreen!();
   return Promise.resolve();
 };
 
@@ -154,9 +167,7 @@ export function DiagramPanel({ repoPath }: Props) {
 
   const fetchDiagrams = useCallback(async () => {
     setLoading(true);
-    const res = await api.api.diagrams
-      .get({ query: { path: repoPath } })
-      .catch(() => null);
+    const res = await api.api.diagrams.get({ query: { path: repoPath } }).catch(() => null);
     setLoading(false);
     if (res?.data?.ok) setDiagrams(res.data.data as DiagramMeta[]);
   }, [repoPath]);
@@ -216,7 +227,10 @@ export function DiagramPanel({ repoPath }: Props) {
   const closeTab = (name: string) => {
     const newOpen = openDiagrams.filter((n) => n !== name);
     setOpenDiagrams(newOpen);
-    setDiagramContents((prev) => { const { [name]: _, ...rest } = prev; return rest; });
+    setDiagramContents((prev) => {
+      const { [name]: _, ...rest } = prev;
+      return rest;
+    });
     if (activeDiagram === name) {
       const idx = openDiagrams.indexOf(name);
       setActiveDiagram(newOpen[idx] ?? newOpen[idx - 1] ?? null);
@@ -233,11 +247,11 @@ export function DiagramPanel({ repoPath }: Props) {
     const savedOpen: string[] = savedOpenRaw ? (JSON.parse(savedOpenRaw) as string[]) : [];
 
     const validOpen = savedOpen.filter((n) => diagrams.some((d) => d.name === n));
-    const validActive = savedActive && diagrams.some((d) => d.name === savedActive) ? savedActive : null;
+    const validActive =
+      savedActive && diagrams.some((d) => d.name === savedActive) ? savedActive : null;
 
-    const toOpen = validActive && !validOpen.includes(validActive)
-      ? [...validOpen, validActive]
-      : validOpen;
+    const toOpen =
+      validActive && !validOpen.includes(validActive) ? [...validOpen, validActive] : validOpen;
 
     if (toOpen.length === 0) return;
 
@@ -247,7 +261,11 @@ export function DiagramPanel({ repoPath }: Props) {
           .get({ query: { path: repoPath, name } })
           .then((res) =>
             res?.data?.ok
-              ? { name, content: (res.data as { data: string }).data, modifiedAt: (res.data as { modifiedAt: number }).modifiedAt ?? 0 }
+              ? {
+                  name,
+                  content: (res.data as { data: string }).data,
+                  modifiedAt: (res.data as { modifiedAt: number }).modifiedAt ?? 0,
+                }
               : null,
           )
           .catch(() => null),
@@ -276,10 +294,13 @@ export function DiagramPanel({ repoPath }: Props) {
   // ── Lock management ─────────────────────────────────────────────────────────
 
   // Release a lock, fire-and-forget. Safe to call even if already released.
-  const doReleaseLock = useCallback((name: string, token: string) => {
-    const url = `/api/diagrams/lock/release?path=${encodeURIComponent(repoPath)}&name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}`;
-    void fetch(url, { method: "POST" }).catch(() => {});
-  }, [repoPath]);
+  const doReleaseLock = useCallback(
+    (name: string, token: string) => {
+      const url = `/api/diagrams/lock/release?path=${encodeURIComponent(repoPath)}&name=${encodeURIComponent(name)}&token=${encodeURIComponent(token)}`;
+      void fetch(url, { method: "POST" }).catch(() => {});
+    },
+    [repoPath],
+  );
 
   // Acquire lock and enter edit mode. Fetches latest content before opening editor.
   const handleEditClick = useCallback(async () => {
@@ -296,7 +317,7 @@ export function DiagramPanel({ repoPath }: Props) {
       );
 
       if (res.ok) {
-        const { token } = await res.json() as { token: string };
+        const { token } = (await res.json()) as { token: string };
 
         // Fetch latest from server before opening editor — ensures we start from
         // the current state even if another instance saved while we were viewing.
@@ -315,7 +336,7 @@ export function DiagramPanel({ repoPath }: Props) {
         setLockToken(token);
         setSaveStatus("idle");
       } else if (res.status === 423) {
-        const body = await res.json() as { lockedAgoMs: number };
+        const body = (await res.json()) as { lockedAgoMs: number };
         setLockDeniedMs(body.lockedAgoMs);
         const ago = Math.round(body.lockedAgoMs / 1000);
         showToast(`Another instance is editing this diagram (locked ${ago}s ago)`, "warning");
@@ -395,7 +416,9 @@ export function DiagramPanel({ repoPath }: Props) {
       }
     };
 
-    const id = setInterval(() => { void doHeartbeat(); }, 15_000);
+    const id = setInterval(() => {
+      void doHeartbeat();
+    }, 15_000);
     return () => clearInterval(id);
   }, [lockToken, activeDiagram, repoPath]);
 
@@ -454,15 +477,14 @@ export function DiagramPanel({ repoPath }: Props) {
 
       if (!res.ok) throw new Error(`Save failed — HTTP ${res.status}`);
 
-      const body = await res.json() as { ok: boolean; modifiedAt?: number };
-      if (body.modifiedAt) {
-        setDiagramVersions((prev) => ({ ...prev, [name]: body.modifiedAt! }));
+      const body = (await res.json()) as { ok: boolean; modifiedAt?: number };
+      const { modifiedAt } = body;
+      if (modifiedAt) {
+        setDiagramVersions((prev) => ({ ...prev, [name]: modifiedAt }));
       }
       setLastSavedAt((prev) => ({ ...prev, [name]: Date.now() }));
       setSvgVersions((prev) => ({ ...prev, [name]: Date.now() }));
-      setDiagrams((prev) =>
-        prev.map((d) => (d.name === name ? { ...d, hasSvg: true } : d)),
-      );
+      setDiagrams((prev) => prev.map((d) => (d.name === name ? { ...d, hasSvg: true } : d)));
     },
     [repoPath],
   );
@@ -471,21 +493,24 @@ export function DiagramPanel({ repoPath }: Props) {
   // Fetches latest from server and remounts the editor if content is newer.
   // Only called on viewer tabs — editors never call this (they hold the lock).
 
-  const syncDiagram = useCallback((name: string) => {
-    void api.api.diagrams.file
-      .get({ query: { path: repoPath, name } })
-      .then((res) => {
-        if (!res?.data?.ok) return;
-        const fresh = res.data as { ok: true; data: string; modifiedAt: number };
-        // Skip if we already have this version or newer
-        if ((diagramVersionsRef.current[name] ?? 0) >= fresh.modifiedAt) return;
-        setDiagramContents((prev) => ({ ...prev, [name]: fresh.data }));
-        setDiagramVersions((prev) => ({ ...prev, [name]: fresh.modifiedAt }));
-        setDiagramReloadCounts((prev) => ({ ...prev, [name]: (prev[name] ?? 0) + 1 }));
-        setLastSavedAt((prev) => ({ ...prev, [name]: Date.now() }));
-      })
-      .catch(() => {});
-  }, [repoPath]);
+  const syncDiagram = useCallback(
+    (name: string) => {
+      void api.api.diagrams.file
+        .get({ query: { path: repoPath, name } })
+        .then((res) => {
+          if (!res?.data?.ok) return;
+          const fresh = res.data as { ok: true; data: string; modifiedAt: number };
+          // Skip if we already have this version or newer
+          if ((diagramVersionsRef.current[name] ?? 0) >= fresh.modifiedAt) return;
+          setDiagramContents((prev) => ({ ...prev, [name]: fresh.data }));
+          setDiagramVersions((prev) => ({ ...prev, [name]: fresh.modifiedAt }));
+          setDiagramReloadCounts((prev) => ({ ...prev, [name]: (prev[name] ?? 0) + 1 }));
+          setLastSavedAt((prev) => ({ ...prev, [name]: Date.now() }));
+        })
+        .catch(() => {});
+    },
+    [repoPath],
+  );
 
   // ── SSE for real-time diagram sync ──────────────────────────────────────────
   // Lock is the single source of truth for "who is editing":
@@ -538,7 +563,11 @@ export function DiagramPanel({ repoPath }: Props) {
 
       es.addEventListener("change", (e: MessageEvent) => {
         resetWatchdog();
-        const payload = JSON.parse(e.data as string) as { file: string; name?: string; modifiedAt?: number };
+        const payload = JSON.parse(e.data as string) as {
+          file: string;
+          name?: string;
+          modifiedAt?: number;
+        };
         if (payload.file !== "diagram" || !payload.name || !payload.modifiedAt) return;
         const { name } = payload as { name: string };
 
@@ -551,12 +580,15 @@ export function DiagramPanel({ repoPath }: Props) {
         syncDiagram(name);
       });
 
-      es.onerror = () => {
-        if (watchdog) { clearTimeout(watchdog); watchdog = null; }
+      es.addEventListener("error", () => {
+        if (watchdog) {
+          clearTimeout(watchdog);
+          watchdog = null;
+        }
         es?.close();
         setSseConnected(false);
         if (!closed) setTimeout(connect, 5_000);
-      };
+      });
     };
 
     connect();
@@ -569,20 +601,16 @@ export function DiagramPanel({ repoPath }: Props) {
 
   // ── New diagram ─────────────────────────────────────────────────────────────
 
-  const validateName = (name: string, existingNames: string[]): string => {
-    const trimmed = name.trim();
-    if (!trimmed) return "Name is required";
-    if (!/^[a-zA-Z0-9 \-_]+$/.test(trimmed))
-      return "Only letters, numbers, spaces, hyphens and underscores allowed";
-    if (existingNames.includes(trimmed))
-      return "A diagram with this name already exists";
-    return "";
-  };
-
   const handleCreateDiagram = async () => {
     const name = newName.trim();
-    const error = validateName(name, diagrams.map((d) => d.name));
-    if (error) { setNewNameError(error); return; }
+    const error = validateName(
+      name,
+      diagrams.map((d) => d.name),
+    );
+    if (error) {
+      setNewNameError(error);
+      return;
+    }
 
     await api.api.diagrams.file.put(
       { excalidraw: EMPTY_EXCALIDRAW, svg: "" },
@@ -602,18 +630,15 @@ export function DiagramPanel({ repoPath }: Props) {
   // ── Rename ──────────────────────────────────────────────────────────────────
 
   const handleRename = useCallback(
-    async (name: string, newName: string) => {
-      const trimmed = newName.trim();
+    async (name: string, nextName: string) => {
+      const trimmed = nextName.trim();
       if (!trimmed || trimmed === name) return;
-      await api.api.diagrams.rename.post(
-        { name, newName: trimmed },
-        { query: { path: repoPath } },
-      );
+      await api.api.diagrams.rename.post({ name, newName: trimmed }, { query: { path: repoPath } });
       setDiagrams((prev) => prev.map((d) => (d.name === name ? { ...d, name: trimmed } : d)));
       setOpenDiagrams((prev) => prev.map((n) => (n === name ? trimmed : n)));
       setDiagramContents((prev) => {
-        const { [name]: content, ...rest } = prev;
-        return content !== undefined ? { ...rest, [trimmed]: content } : rest;
+        const { [name]: currentContent, ...rest } = prev;
+        return currentContent !== undefined ? { ...rest, [trimmed]: currentContent } : rest;
       });
       if (activeDiagram === name) setActiveDiagram(trimmed);
     },
@@ -627,7 +652,10 @@ export function DiagramPanel({ repoPath }: Props) {
       deletedDiagramsRef.current.add(name);
       await api.api.diagrams.file.delete({ query: { path: repoPath, name } });
       setDiagrams((prev) => prev.filter((d) => d.name !== name));
-      setDiagramContents((prev) => { const { [name]: _, ...rest } = prev; return rest; });
+      setDiagramContents((prev) => {
+        const { [name]: _, ...rest } = prev;
+        return rest;
+      });
       setOpenDiagrams((prev) => {
         const newOpen = prev.filter((n) => n !== name);
         if (activeDiagram === name) {
@@ -661,7 +689,8 @@ export function DiagramPanel({ repoPath }: Props) {
     };
 
     if (navigator.clipboard?.writeText) {
-      navigator.clipboard.writeText(path)
+      navigator.clipboard
+        .writeText(path)
         .then(() => showToast(`Copied: ${path}`))
         .catch(copyFallback);
     } else {
@@ -691,18 +720,27 @@ export function DiagramPanel({ repoPath }: Props) {
   const tryKiosk = useCallback(() => {
     const url = encodeURIComponent(window.location.href);
     void fetch(`/api/open-kiosk?url=${url}`)
-      .then((r) => { if (!r.ok) setAppFullscreen(true); })
+      .then((r) => {
+        if (!r.ok) setAppFullscreen(true);
+      })
       .catch(() => setAppFullscreen(true));
   }, []);
 
   const toggleBrowserFullscreen = useCallback(() => {
-    if (appFullscreen) { setAppFullscreen(false); return; }
-    if (fsElement()) { void fsExit(); return; }
+    if (appFullscreen) {
+      setAppFullscreen(false);
+      return;
+    }
+    if (fsElement()) {
+      void fsExit();
+      return;
+    }
     const fsEnabled =
-      document.fullscreenEnabled ??
-      (document as DocWithWebkit).webkitFullscreenEnabled ??
-      false;
-    if (!fsEnabled) { tryKiosk(); return; }
+      document.fullscreenEnabled ?? (document as DocWithWebkit).webkitFullscreenEnabled ?? false;
+    if (!fsEnabled) {
+      tryKiosk();
+      return;
+    }
     void fsEnter(document.documentElement).catch(tryKiosk);
   }, [appFullscreen, tryKiosk]);
 
@@ -725,19 +763,19 @@ export function DiagramPanel({ repoPath }: Props) {
   const activeLastSaved = activeDiagram ? (lastSavedAt[activeDiagram] ?? null) : null;
   const activeServerMtime = activeDiagram ? (diagramVersions[activeDiagram] ?? null) : null;
   const savedSecondsAgo = activeLastSaved !== null ? now - activeLastSaved : null;
-  const savedRecently = savedSecondsAgo !== null && savedSecondsAgo < 10_000 && saveStatus !== "dirty";
+  const savedRecently =
+    savedSecondsAgo !== null && savedSecondsAgo < 10_000 && saveStatus !== "dirty";
 
-  const dotColor = saveStatus === "saving"
-    ? "#4C90F0"
-    : savedRecently
-      ? "#72CA9B"
-      : saveStatus === "dirty"
-        ? "#F0A53D"
-        : "#8F99A8"; // muted when idle with no recent save
+  const dotColor =
+    saveStatus === "saving"
+      ? "#4C90F0"
+      : savedRecently
+        ? "#72CA9B"
+        : saveStatus === "dirty"
+          ? "#F0A53D"
+          : "#8F99A8"; // muted when idle with no recent save
 
-  const dotAnimation = saveStatus === "saving"
-    ? "dot-pulse 0.7s ease-in-out infinite"
-    : undefined;
+  const dotAnimation = saveStatus === "saving" ? "dot-pulse 0.7s ease-in-out infinite" : undefined;
 
   // Tooltip: structured multi-line content
   const isEditing = lockToken !== null;
@@ -746,20 +784,24 @@ export function DiagramPanel({ repoPath }: Props) {
     tooltipLines.push("Editing");
     if (saveStatus === "saving") tooltipLines.push("Saving…");
     else if (saveStatus === "dirty") tooltipLines.push("Unsaved changes");
-    else if (activeLastSaved !== null) tooltipLines.push(`Saved ${relativeTime(now - activeLastSaved)}`);
+    else if (activeLastSaved !== null)
+      tooltipLines.push(`Saved ${relativeTime(now - activeLastSaved)}`);
     else tooltipLines.push("Not yet saved");
   } else if (lockDeniedMs !== null) {
     tooltipLines.push(`Locked by another session (${Math.round(lockDeniedMs / 1000)}s ago)`);
     tooltipLines.push("Click lock icon to retry");
   } else {
     tooltipLines.push("View mode — click lock to edit");
-    if (activeServerMtime !== null) tooltipLines.push(`Server updated ${relativeTime(now - activeServerMtime)}`);
+    if (activeServerMtime !== null)
+      tooltipLines.push(`Server updated ${relativeTime(now - activeServerMtime)}`);
   }
   if (!sseConnected) tooltipLines.push("⚠ Reconnecting…");
 
   const tooltipContent = (
     <div style={{ fontSize: 12, lineHeight: 1.6 }}>
-      {tooltipLines.map((line, i) => <div key={i}>{line}</div>)}
+      {tooltipLines.map((line, i) => (
+        <div key={i}>{line}</div>
+      ))}
     </div>
   );
 
@@ -768,13 +810,14 @@ export function DiagramPanel({ repoPath }: Props) {
   const appFullscreenStyle: React.CSSProperties = appFullscreen
     ? {
         position: "fixed",
-        top: 0, left: 0, right: 0, bottom: 0,
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
         zIndex: 20,
         overflowY: "auto",
         padding: 24,
-        background: isDark
-          ? "var(--bp-palette-dark-gray-1)"
-          : "var(--bp-palette-light-gray-5)",
+        background: isDark ? "var(--bp-palette-dark-gray-1)" : "var(--bp-palette-light-gray-5)",
         display: "flex",
         flexDirection: "column",
       }
@@ -785,9 +828,7 @@ export function DiagramPanel({ repoPath }: Props) {
         height: "100vh",
         overflowY: "auto",
         padding: 24,
-        background: isDark
-          ? "var(--bp-palette-dark-gray-1)"
-          : "var(--bp-palette-light-gray-5)",
+        background: isDark ? "var(--bp-palette-dark-gray-1)" : "var(--bp-palette-light-gray-5)",
         display: "flex",
         flexDirection: "column",
       }
@@ -812,7 +853,9 @@ export function DiagramPanel({ repoPath }: Props) {
           flexShrink: 0,
         }}
       >
-        <p className="section-label" style={{ flexShrink: 0 }}>Diagrams</p>
+        <p className="section-label" style={{ flexShrink: 0 }}>
+          Diagrams
+        </p>
         <Button
           variant="minimal"
           small
@@ -835,7 +878,13 @@ export function DiagramPanel({ repoPath }: Props) {
                       variant="minimal"
                       small
                       icon={isEditing ? "unlock" : "lock"}
-                      onClick={isEditing ? handleLockClick : () => { void handleEditClick(); }}
+                      onClick={
+                        isEditing
+                          ? handleLockClick
+                          : () => {
+                              void handleEditClick();
+                            }
+                      }
                       style={{
                         minWidth: 0,
                         minHeight: 0,
@@ -902,7 +951,9 @@ export function DiagramPanel({ repoPath }: Props) {
                 </Tooltip>
                 <Popover
                   isOpen={subRenameOpen}
-                  onInteraction={(next) => { if (!next) setSubRenameOpen(false); }}
+                  onInteraction={(next) => {
+                    if (!next) setSubRenameOpen(false);
+                  }}
                   placement="bottom-end"
                   content={
                     <div style={{ padding: 12, width: 220 }}>
@@ -912,42 +963,76 @@ export function DiagramPanel({ repoPath }: Props) {
                         value={subRenameValue}
                         onChange={(e) => setSubRenameValue(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") { void handleRename(activeDiagram, subRenameValue); setSubRenameOpen(false); }
+                          if (e.key === "Enter") {
+                            void handleRename(activeDiagram, subRenameValue);
+                            setSubRenameOpen(false);
+                          }
                           if (e.key === "Escape") setSubRenameOpen(false);
                         }}
                       />
-                      <div style={{ marginTop: 8, display: "flex", gap: 4, justifyContent: "flex-end" }}>
+                      <div
+                        style={{
+                          marginTop: 8,
+                          display: "flex",
+                          gap: 4,
+                          justifyContent: "flex-end",
+                        }}
+                      >
                         <Button small text="Cancel" onClick={() => setSubRenameOpen(false)} />
-                        <Button small intent="primary" text="Rename" onClick={() => { void handleRename(activeDiagram, subRenameValue); setSubRenameOpen(false); }} />
+                        <Button
+                          small
+                          intent="primary"
+                          text="Rename"
+                          onClick={() => {
+                            void handleRename(activeDiagram, subRenameValue);
+                            setSubRenameOpen(false);
+                          }}
+                        />
                       </div>
                     </div>
                   }
                 >
                   <Tooltip content="Rename" placement="bottom" disabled={subRenameOpen}>
                     <Button
-                      small variant="minimal" icon="edit"
-                      onClick={() => { setSubRenameValue(activeDiagram); setSubRenameOpen(true); }}
+                      small
+                      variant="minimal"
+                      icon="edit"
+                      onClick={() => {
+                        setSubRenameValue(activeDiagram);
+                        setSubRenameOpen(true);
+                      }}
                       style={{ flexShrink: 0 }}
                     />
                   </Tooltip>
                 </Popover>
                 <Popover
                   isOpen={subDeleteOpen}
-                  onInteraction={(next) => { if (!next) setSubDeleteOpen(false); }}
+                  onInteraction={(next) => {
+                    if (!next) setSubDeleteOpen(false);
+                  }}
                   placement="bottom-end"
                   content={
                     <div style={{ padding: 12 }}>
                       <p style={{ margin: "0 0 8px", fontSize: 13 }}>Delete "{activeDiagram}"?</p>
                       <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                         <Button small text="Cancel" onClick={() => setSubDeleteOpen(false)} />
-                        <Button small text="Delete" onClick={() => { void handleDelete(activeDiagram); setSubDeleteOpen(false); }} />
+                        <Button
+                          small
+                          text="Delete"
+                          onClick={() => {
+                            void handleDelete(activeDiagram);
+                            setSubDeleteOpen(false);
+                          }}
+                        />
                       </div>
                     </div>
                   }
                 >
                   <Tooltip content="Delete" placement="bottom" disabled={subDeleteOpen}>
                     <Button
-                      small variant="minimal" icon="trash"
+                      small
+                      variant="minimal"
+                      icon="trash"
                       onClick={() => setSubDeleteOpen(true)}
                       style={{ flexShrink: 0 }}
                     />
@@ -957,14 +1042,28 @@ export function DiagramPanel({ repoPath }: Props) {
             )}
 
             {activeDiagram !== null && (
-              <div style={{ width: 1, height: 16, background: "var(--bp-surface-border-color-default)", marginInline: 2, flexShrink: 0 }} />
+              <div
+                style={{
+                  width: 1,
+                  height: 16,
+                  background: "var(--bp-surface-border-color-default)",
+                  marginInline: 2,
+                  flexShrink: 0,
+                }}
+              />
             )}
 
             {/* New diagram */}
             <Tooltip content="New diagram" placement="bottom">
               <Button
-                small variant="minimal" icon="plus"
-                onClick={() => { setNewName(""); setNewNameError(""); setNewDialogOpen(true); }}
+                small
+                variant="minimal"
+                icon="plus"
+                onClick={() => {
+                  setNewName("");
+                  setNewNameError("");
+                  setNewDialogOpen(true);
+                }}
                 style={{ flexShrink: 0 }}
               />
             </Tooltip>
@@ -985,23 +1084,40 @@ export function DiagramPanel({ repoPath }: Props) {
                           repoPath={repoPath}
                           isActive={d.name === activeDiagram}
                           svgVersion={svgVersions[d.name] ?? d.modifiedAt}
-                          onOpen={(name) => { void openDiagram(name); setDiagBrowserOpen(false); }}
-                          onRename={(name, newName) => void handleRename(name, newName)}
+                          onOpen={(name) => {
+                            void openDiagram(name);
+                            setDiagBrowserOpen(false);
+                          }}
+                          onRename={(name, n) => void handleRename(name, n)}
                           onDelete={(name) => void handleDelete(name)}
                           onCopyPath={handleCopySvgPath}
                         />
                       ))}
                       <Card
-                        onClick={() => { setNewName(""); setNewNameError(""); setNewDialogOpen(true); setDiagBrowserOpen(false); }}
+                        onClick={() => {
+                          setNewName("");
+                          setNewNameError("");
+                          setNewDialogOpen(true);
+                          setDiagBrowserOpen(false);
+                        }}
                         style={{
-                          padding: 8, display: "flex", flexDirection: "column",
-                          alignItems: "center", justifyContent: "center", gap: 6,
-                          cursor: "pointer", border: "1.5px dashed var(--bp-surface-border-color-default)",
-                          boxShadow: "none", minHeight: 108, background: "transparent",
+                          padding: 8,
+                          display: "flex",
+                          flexDirection: "column",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          gap: 6,
+                          cursor: "pointer",
+                          border: "1.5px dashed var(--bp-surface-border-color-default)",
+                          boxShadow: "none",
+                          minHeight: 108,
+                          background: "transparent",
                         }}
                       >
                         <Icon icon="plus" size={20} color="var(--bp-typography-color-muted)" />
-                        <span style={{ fontSize: 11, color: "var(--bp-typography-color-muted)" }}>New Diagram</span>
+                        <span style={{ fontSize: 11, color: "var(--bp-typography-color-muted)" }}>
+                          New Diagram
+                        </span>
                       </Card>
                     </div>
                   </div>
@@ -1019,7 +1135,8 @@ export function DiagramPanel({ repoPath }: Props) {
               placement="bottom"
             >
               <Button
-                variant="minimal" small
+                variant="minimal"
+                small
                 icon={appFullscreen ? "minimize" : "maximize"}
                 onClick={toggleAppFullscreen}
                 style={{ flexShrink: 0 }}
@@ -1028,11 +1145,17 @@ export function DiagramPanel({ repoPath }: Props) {
 
             {/* Browser fullscreen */}
             <Tooltip
-              content={browserFullscreen || appFullscreen ? "Exit fullscreen" : "Fullscreen (Cmd+Q to exit kiosk)"}
+              content={
+                browserFullscreen || appFullscreen
+                  ? "Exit fullscreen"
+                  : "Fullscreen (Cmd+Q to exit kiosk)"
+              }
               placement="bottom"
             >
               <Button
-                variant="minimal" small icon="fullscreen"
+                variant="minimal"
+                small
+                icon="fullscreen"
                 onClick={toggleBrowserFullscreen}
                 style={{ flexShrink: 0 }}
               />
@@ -1051,8 +1174,8 @@ export function DiagramPanel({ repoPath }: Props) {
           }
         >
           {/* Diagram grid — only when no diagram is open */}
-          {activeDiagram === null && (
-            loading && diagrams.length === 0 ? (
+          {activeDiagram === null &&
+            (loading && diagrams.length === 0 ? (
               <div style={{ display: "flex", justifyContent: "center", padding: 16 }}>
                 <Spinner size={20} />
               </div>
@@ -1066,27 +1189,39 @@ export function DiagramPanel({ repoPath }: Props) {
                     isActive={false}
                     svgVersion={svgVersions[d.name] ?? d.modifiedAt}
                     onOpen={openDiagram}
-                    onRename={(name, newName) => void handleRename(name, newName)}
+                    onRename={(name, n) => void handleRename(name, n)}
                     onDelete={(name) => void handleDelete(name)}
                     onCopyPath={handleCopySvgPath}
                   />
                 ))}
                 <Card
                   interactive
-                  onClick={() => { setNewName(""); setNewNameError(""); setNewDialogOpen(true); }}
+                  onClick={() => {
+                    setNewName("");
+                    setNewNameError("");
+                    setNewDialogOpen(true);
+                  }}
                   style={{
-                    padding: 8, display: "flex", flexDirection: "column",
-                    alignItems: "center", justifyContent: "center", gap: 6,
-                    cursor: "pointer", border: "1.5px dashed var(--bp-surface-border-color-default)",
-                    boxShadow: "none", minHeight: 108, background: "transparent",
+                    padding: 8,
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 6,
+                    cursor: "pointer",
+                    border: "1.5px dashed var(--bp-surface-border-color-default)",
+                    boxShadow: "none",
+                    minHeight: 108,
+                    background: "transparent",
                   }}
                 >
                   <Icon icon="plus" size={20} color="var(--bp-typography-color-muted)" />
-                  <span style={{ fontSize: 11, color: "var(--bp-typography-color-muted)" }}>New Diagram</span>
+                  <span style={{ fontSize: 11, color: "var(--bp-typography-color-muted)" }}>
+                    New Diagram
+                  </span>
                 </Card>
               </div>
-            )
-          )}
+            ))}
 
           {/* Active diagram editor */}
           {activeDiagram !== null && (
@@ -1113,15 +1248,20 @@ export function DiagramPanel({ repoPath }: Props) {
                     key={name}
                     onClick={() => setActiveDiagram(name)}
                     style={{
-                      display: "flex", alignItems: "center", gap: 4,
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
                       padding: "4px 10px 4px",
-                      cursor: "pointer", flexShrink: 0,
-                      borderBottom: name === activeDiagram
-                        ? "2px solid var(--bp-intent-primary-default-color)"
-                        : "2px solid transparent",
-                      color: name === activeDiagram
-                        ? "var(--bp-typography-color-default)"
-                        : "var(--bp-typography-color-muted)",
+                      cursor: "pointer",
+                      flexShrink: 0,
+                      borderBottom:
+                        name === activeDiagram
+                          ? "2px solid var(--bp-intent-primary-default-color)"
+                          : "2px solid transparent",
+                      color:
+                        name === activeDiagram
+                          ? "var(--bp-typography-color-default)"
+                          : "var(--bp-typography-color-muted)",
                       userSelect: "none",
                     }}
                   >
@@ -1129,9 +1269,20 @@ export function DiagramPanel({ repoPath }: Props) {
                       docs/diagrams/{name}.svg
                     </span>
                     <span
-                      onClick={(e) => { e.stopPropagation(); closeTab(name); }}
-                      style={{ cursor: "pointer", fontSize: 14, lineHeight: 1, opacity: 0.5, marginLeft: 2 }}
-                    >×</span>
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        closeTab(name);
+                      }}
+                      style={{
+                        cursor: "pointer",
+                        fontSize: 14,
+                        lineHeight: 1,
+                        opacity: 0.5,
+                        marginLeft: 2,
+                      }}
+                    >
+                      ×
+                    </span>
                   </div>
                 ))}
               </div>
@@ -1172,27 +1323,44 @@ export function DiagramPanel({ repoPath }: Props) {
                     Hidden in fullscreen (lock icon in header is the entry point there). */}
                 {!isEditing && !isFullscreen && (
                   <div
-                    onClick={isAcquiringLock ? undefined : () => { void handleEditClick(); }}
+                    onClick={
+                      isAcquiringLock
+                        ? undefined
+                        : () => {
+                            void handleEditClick();
+                          }
+                    }
                     style={{
-                      position: "absolute", inset: 0, zIndex: 10,
+                      position: "absolute",
+                      inset: 0,
+                      zIndex: 10,
                       cursor: isAcquiringLock ? "wait" : "pointer",
                     }}
                   >
                     {isAcquiringLock ? (
-                      <div style={{ position: "absolute", top: 8, right: 8, pointerEvents: "none" }}>
+                      <div
+                        style={{ position: "absolute", top: 8, right: 8, pointerEvents: "none" }}
+                      >
                         <Spinner size={14} />
                       </div>
                     ) : (
                       <div
                         className="canvas-edit-hint"
                         style={{
-                          position: "absolute", inset: 0,
-                          display: "flex", alignItems: "center", justifyContent: "center",
+                          position: "absolute",
+                          inset: 0,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
                           opacity: 0,
                           transition: "opacity 0.15s",
                         }}
-                        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = "1"; }}
-                        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = "0"; }}
+                        onMouseEnter={(e) => {
+                          (e.currentTarget as HTMLElement).style.opacity = "1";
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.currentTarget as HTMLElement).style.opacity = "0";
+                        }}
                       >
                         <span
                           style={{
@@ -1218,18 +1386,34 @@ export function DiagramPanel({ repoPath }: Props) {
       )}
 
       {/* New Diagram Dialog */}
-      <Dialog isOpen={newDialogOpen} onClose={() => setNewDialogOpen(false)} title="New Diagram" style={{ width: 360 }}>
+      <Dialog
+        isOpen={newDialogOpen}
+        onClose={() => setNewDialogOpen(false)}
+        title="New Diagram"
+        style={{ width: 360 }}
+      >
         <DialogBody>
           <InputGroup
             autoFocus
             placeholder="Diagram name"
             value={newName}
-            onChange={(e) => { setNewName(e.target.value); setNewNameError(""); }}
-            onKeyDown={(e) => { if (e.key === "Enter") void handleCreateDiagram(); }}
+            onChange={(e) => {
+              setNewName(e.target.value);
+              setNewNameError("");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleCreateDiagram();
+            }}
             intent={newNameError ? "danger" : "none"}
           />
           {newNameError && (
-            <p style={{ color: "var(--bp-intent-danger-default-color)", fontSize: 12, margin: "6px 0 0" }}>
+            <p
+              style={{
+                color: "var(--bp-intent-danger-default-color)",
+                fontSize: 12,
+                margin: "6px 0 0",
+              }}
+            >
               {newNameError}
             </p>
           )}
@@ -1260,7 +1444,16 @@ interface DiagramCardProps {
   onCopyPath: (name: string) => void;
 }
 
-function DiagramCard({ diagram, repoPath, isActive, svgVersion, onOpen, onRename, onDelete, onCopyPath }: DiagramCardProps) {
+function DiagramCard({
+  diagram,
+  repoPath,
+  isActive,
+  svgVersion,
+  onOpen,
+  onRename,
+  onDelete,
+  onCopyPath,
+}: DiagramCardProps) {
   const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -1287,7 +1480,15 @@ function DiagramCard({ diagram, repoPath, isActive, svgVersion, onOpen, onRename
           style={{ width: "100%", height: 72, objectFit: "contain", borderRadius: 2 }}
         />
       ) : (
-        <div style={{ width: "100%", height: 72, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div
+          style={{
+            width: "100%",
+            height: 72,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
           <Icon icon="media" size={24} color="var(--bp-typography-color-muted)" />
         </div>
       )}
@@ -1306,59 +1507,98 @@ function DiagramCard({ diagram, repoPath, isActive, svgVersion, onOpen, onRename
         </span>
         <Popover
           isOpen={renameOpen}
-          onInteraction={(next) => { if (!next) setRenameOpen(false); }}
+          onInteraction={(next) => {
+            if (!next) setRenameOpen(false);
+          }}
           placement="bottom-end"
           content={
             <div style={{ padding: 12, width: 200 }} onClick={(e) => e.stopPropagation()}>
               <InputGroup
-                small autoFocus
+                small
+                autoFocus
                 value={renameValue}
                 onChange={(e) => setRenameValue(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") { onRename(diagram.name, renameValue); setRenameOpen(false); }
+                  if (e.key === "Enter") {
+                    onRename(diagram.name, renameValue);
+                    setRenameOpen(false);
+                  }
                   if (e.key === "Escape") setRenameOpen(false);
                 }}
               />
               <div style={{ marginTop: 8, display: "flex", gap: 4, justifyContent: "flex-end" }}>
                 <Button small text="Cancel" onClick={() => setRenameOpen(false)} />
-                <Button small intent="primary" text="Rename" onClick={() => { onRename(diagram.name, renameValue); setRenameOpen(false); }} />
+                <Button
+                  small
+                  intent="primary"
+                  text="Rename"
+                  onClick={() => {
+                    onRename(diagram.name, renameValue);
+                    setRenameOpen(false);
+                  }}
+                />
               </div>
             </div>
           }
         >
           <Tooltip content="Rename" placement="bottom" disabled={renameOpen}>
             <Button
-              small variant="minimal" icon="edit"
-              onClick={(e) => { e.stopPropagation(); setRenameValue(diagram.name); setRenameOpen(true); }}
+              small
+              variant="minimal"
+              icon="edit"
+              onClick={(e) => {
+                e.stopPropagation();
+                setRenameValue(diagram.name);
+                setRenameOpen(true);
+              }}
               style={{ minWidth: 0, flexShrink: 0 }}
             />
           </Tooltip>
         </Popover>
         <Tooltip content="Copy SVG path" placement="bottom">
           <Button
-            small variant="minimal" icon="clipboard"
-            onClick={(e) => { e.stopPropagation(); onCopyPath(diagram.name); }}
+            small
+            variant="minimal"
+            icon="clipboard"
+            onClick={(e) => {
+              e.stopPropagation();
+              onCopyPath(diagram.name);
+            }}
             style={{ minWidth: 0, flexShrink: 0 }}
           />
         </Tooltip>
         <Popover
           isOpen={deleteOpen}
-          onInteraction={(next) => { if (!next) setDeleteOpen(false); }}
+          onInteraction={(next) => {
+            if (!next) setDeleteOpen(false);
+          }}
           placement="bottom-end"
           content={
             <div style={{ padding: 12 }} onClick={(e) => e.stopPropagation()}>
               <p style={{ margin: "0 0 8px", fontSize: 13 }}>Delete "{diagram.name}"?</p>
               <div style={{ display: "flex", gap: 4, justifyContent: "flex-end" }}>
                 <Button small text="Cancel" onClick={() => setDeleteOpen(false)} />
-                <Button small text="Delete" onClick={() => { onDelete(diagram.name); setDeleteOpen(false); }} />
+                <Button
+                  small
+                  text="Delete"
+                  onClick={() => {
+                    onDelete(diagram.name);
+                    setDeleteOpen(false);
+                  }}
+                />
               </div>
             </div>
           }
         >
           <Tooltip content="Delete" placement="bottom" disabled={deleteOpen}>
             <Button
-              small variant="minimal" icon="trash"
-              onClick={(e) => { e.stopPropagation(); setDeleteOpen(true); }}
+              small
+              variant="minimal"
+              icon="trash"
+              onClick={(e) => {
+                e.stopPropagation();
+                setDeleteOpen(true);
+              }}
               style={{ minWidth: 0, flexShrink: 0 }}
             />
           </Tooltip>

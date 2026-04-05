@@ -11,12 +11,21 @@ import { logger } from "../logger.ts";
 
 const CHECK_OUTPUT = z.object({
   passed: z.boolean().describe("True only if every step passed."),
-  steps: z.array(z.object({
-    name: z.string().describe("Step name: format | lint | typecheck | test | fallow"),
-    passed: z.boolean(),
-    errors: z.array(z.string()).optional().describe("Error lines. Only present when passed is false."),
-  })).describe("Only steps that were actually run (skipped if script absent)."),
-  summary: z.string().describe("One-line result, e.g. 'All 3 steps passed' or '1/3 failed: lint (5 errors)'."),
+  steps: z
+    .array(
+      z.object({
+        name: z.string().describe("Step name: format | lint | typecheck | test | fallow"),
+        passed: z.boolean(),
+        errors: z
+          .array(z.string())
+          .optional()
+          .describe("Error lines. Only present when passed is false."),
+      }),
+    )
+    .describe("Only steps that were actually run (skipped if script absent)."),
+  summary: z
+    .string()
+    .describe("One-line result, e.g. 'All 3 steps passed' or '1/3 failed: lint (5 errors)'."),
 });
 
 // JSON schema for --json-schema CLI flag — derived from Zod, no manual sync needed
@@ -49,9 +58,11 @@ CWD: pass the absolute path of the repo being validated — not necessarily this
 OUTPUT: check \`passed\` first. If false, inspect \`steps[n].errors\` for failing error lines. \`summary\` is a one-line human-readable result.
 STEPS: only runs scripts present in package.json — skips unavailable ones silently.`,
       inputSchema: {
-        cwd: z.string().describe(
-          "Absolute path to the git repo root to validate. Must be an existing git repository. Supports git worktrees."
-        ),
+        cwd: z
+          .string()
+          .describe(
+            "Absolute path to the git repo root to validate. Must be an existing git repository. Supports git worktrees.",
+          ),
       },
       outputSchema: CHECK_OUTPUT.shape,
       annotations: {
@@ -62,7 +73,9 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
     async ({ cwd }) => {
       if (!existsSync(cwd)) {
         return {
-          content: [{ type: "text", text: JSON.stringify({ error: `Directory not found: ${cwd}` }) }],
+          content: [
+            { type: "text", text: JSON.stringify({ error: `Directory not found: ${cwd}` }) },
+          ],
           isError: true,
         };
       }
@@ -91,7 +104,14 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
 
       if (!result.ok) {
         logger.error(
-          { event: "mcp.tool.end", tool: "check", project: cwd, passed: false, durationMs: Math.round(performance.now() - startMs), error: result.error },
+          {
+            event: "mcp.tool.end",
+            tool: "check",
+            project: cwd,
+            passed: false,
+            durationMs: Math.round(performance.now() - startMs),
+            error: result.error,
+          },
           "check failed",
         );
         return {
@@ -101,11 +121,18 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
       }
 
       logger.info(
-        { event: "mcp.tool.end", tool: "check", project: cwd, passed: result.data?.passed, durationMs: Math.round(performance.now() - startMs) },
+        {
+          event: "mcp.tool.end",
+          tool: "check",
+          project: cwd,
+          passed: result.data?.passed,
+          durationMs: Math.round(performance.now() - startMs),
+        },
         "check done",
       );
       return {
         content: [{ type: "text", text: JSON.stringify(result.data) }],
+        // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- result.data is guaranteed here: early return above handles result.error case
         structuredContent: result.data!,
       };
     },

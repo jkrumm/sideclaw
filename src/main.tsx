@@ -1,9 +1,4 @@
-import React, {
-  createContext,
-  useContext,
-  useEffect,
-  useState,
-} from "react";
+import React, { createContext, useContext, useEffect, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { Classes } from "@blueprintjs/core";
 import { App } from "./App";
@@ -80,8 +75,7 @@ function Root() {
 
   const toggle = () => {
     setMode((prev) => {
-      const next: ThemeMode =
-        prev === "light" ? "dark" : prev === "dark" ? "system" : "light";
+      const next: ThemeMode = prev === "light" ? "dark" : prev === "dark" ? "system" : "light";
       if (next === "system") {
         localStorage.removeItem("theme");
       } else {
@@ -98,7 +92,9 @@ function Root() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const rootEl = document.getElementById("root");
+if (!rootEl) throw new Error("Root element #root not found");
+ReactDOM.createRoot(rootEl).render(
   <React.StrictMode>
     <Root />
   </React.StrictMode>,

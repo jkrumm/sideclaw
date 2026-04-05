@@ -55,9 +55,7 @@ export function UsageTags() {
       >
         {fiveHourLabel}
       </Tag>
-      {usage.seven_day_pct != null && (
-        <Tag minimal>{usage.seven_day_pct}%/wk</Tag>
-      )}
+      {usage.seven_day_pct != null && <Tag minimal>{usage.seven_day_pct}%/wk</Tag>}
     </>
   );
 }

@@ -67,8 +67,7 @@ export const diagramsRoutes = new Elysia({ prefix: "/api" })
         diagrams.push({ name, hasSvg, modifiedAt });
       }
 
-      diagrams.sort((a, b) => b.modifiedAt - a.modifiedAt);
-      return { ok: true, data: diagrams } as const;
+      return { ok: true, data: diagrams.toSorted((a, b) => b.modifiedAt - a.modifiedAt) } as const;
     } catch {
       return { ok: true, data: [] as DiagramMeta[] } as const;
     }
@@ -96,10 +95,7 @@ export const diagramsRoutes = new Elysia({ prefix: "/api" })
     }
 
     try {
-      const [content, stat] = await Promise.all([
-        Bun.file(filePath).text(),
-        fs.stat(filePath),
-      ]);
+      const [content, stat] = await Promise.all([Bun.file(filePath).text(), fs.stat(filePath)]);
       return { ok: true, data: content, modifiedAt: stat.mtimeMs } as const;
     } catch {
       return { ok: true, data: "", modifiedAt: 0 } as const;
@@ -138,7 +134,10 @@ export const diagramsRoutes = new Elysia({ prefix: "/api" })
     }
 
     // Lock enforcement: if the file already exists, the caller must hold the lock.
-    const fileExists = await fs.access(excalidrawPath).then(() => true).catch(() => false);
+    const fileExists = await fs
+      .access(excalidrawPath)
+      .then(() => true)
+      .catch(() => false);
     if (fileExists) {
       const lockToken = request.headers.get("x-lock-token");
       if (!lockToken || !validateLock(path, safeName, lockToken)) {
@@ -220,10 +219,9 @@ export const diagramsRoutes = new Elysia({ prefix: "/api" })
     }
 
     await fs.rename(oldExcalidraw, newExcalidraw).catch(() => {});
-    await fs.rename(
-      resolve(join(dir, `${safeName}.svg`)),
-      resolve(join(dir, `${safeNewName}.svg`)),
-    ).catch(() => {});
+    await fs
+      .rename(resolve(join(dir, `${safeName}.svg`)), resolve(join(dir, `${safeNewName}.svg`)))
+      .catch(() => {});
 
     return { ok: true } as const;
   })

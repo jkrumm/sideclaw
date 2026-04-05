@@ -48,8 +48,15 @@ body.bp6-dark {
 
 /* Diagram status dot — save pulse animation */
 @keyframes dot-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.55; transform: scale(0.75); }
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(0.75);
+  }
 }
 
 /* CodeMirror 6 — Blueprint integration */
@@ -88,4 +95,3 @@ body.bp6-dark {
 .md-file-tree .bp6-tree-node-caret {
   min-width: 18px;
 }
-

@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "unicorn", "promise", "import"],
+  "env": {
+    "browser": true,
+    "node": true
+  },
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn"
+  },
+  "rules": {
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "warn",
+    "react/rules-of-hooks": "error",
+    "react/exhaustive-deps": "warn",
+    "react/react-in-jsx-scope": "off",
+    "eslint/no-console": "warn",
+    "eslint/no-unused-vars": "error",
+    "eslint/max-depth": ["warn", { "max": 5 }],
+    "eslint/complexity": "off",
+    "eslint/no-throw-literal": "error",
+    "eslint/no-useless-catch": "error",
+    "import/no-unassigned-import": "off",
+    "import/no-named-as-default": "off",
+    "promise/no-nesting": "warn",
+    "promise/always-return": "off"
+  },
+  "ignorePatterns": ["dist/**", "node_modules/**", ".out/**"]
+}

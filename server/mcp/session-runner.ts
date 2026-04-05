@@ -31,7 +31,7 @@ interface ClaudeJsonEnvelope {
   type?: string;
   subtype?: string;
   is_error?: boolean;
-  result?: string;             // text result (often "" when --json-schema is used)
+  result?: string; // text result (often "" when --json-schema is used)
   structured_output?: unknown; // parsed JSON object when --json-schema is provided
   errors?: string[];
   session_id?: string;
@@ -41,9 +41,7 @@ interface ClaudeJsonEnvelope {
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
-export async function runSession<T = unknown>(
-  opts: SessionOptions,
-): Promise<SessionResult<T>> {
+export async function runSession<T = unknown>(opts: SessionOptions): Promise<SessionResult<T>> {
   const {
     cwd,
     prompt,
@@ -54,14 +52,20 @@ export async function runSession<T = unknown>(
   } = opts;
 
   const args: string[] = [
-    "-p", prompt,
+    "-p",
+    prompt,
     "--dangerously-skip-permissions",
-    "--output-format", "json",
-    "--setting-sources", "user,project",
+    "--output-format",
+    "json",
+    "--setting-sources",
+    "user,project",
     "--strict-mcp-config",
-    "--mcp-config", '{"mcpServers": {}}',
-    "--max-turns", String(maxTurns),
-    "--model", model,
+    "--mcp-config",
+    '{"mcpServers": {}}',
+    "--max-turns",
+    String(maxTurns),
+    "--model",
+    model,
   ];
 
   if (jsonSchema) {
@@ -79,7 +83,10 @@ export async function runSession<T = unknown>(
   // No ANTHROPIC_API_KEY — preserves Max subscription billing
 
   const startMs = performance.now();
-  logger.info({ event: "session.spawn", project: cwd, model, maxTurns, jsonSchema: !!jsonSchema }, "session spawn");
+  logger.info(
+    { event: "session.spawn", project: cwd, model, maxTurns, jsonSchema: !!jsonSchema },
+    "session spawn",
+  );
 
   const proc = Bun.spawn([CLAUDE_BIN, ...args], {
     cwd,
@@ -157,21 +164,25 @@ export async function runSession<T = unknown>(
 
   if (envelope.is_error) {
     const errMsg = envelope.errors?.join("; ") ?? String(envelope.result ?? "Unknown error");
-    logger.error({ event: "session.error", project: cwd, subtype: envelope.subtype, error: errMsg }, "session is_error");
+    logger.error(
+      { event: "session.error", project: cwd, subtype: envelope.subtype, error: errMsg },
+      "session is_error",
+    );
     return { ok: false, error: errMsg };
   }
 
-  const logSessionEnd = () => logger.info(
-    {
-      event: "session.end",
-      project: cwd,
-      model,
-      durationMs: Math.round(performance.now() - startMs),
-      costUsd: envelope.total_cost_usd,
-      turns: envelope.num_turns,
-    },
-    "session end",
-  );
+  const logSessionEnd = () =>
+    logger.info(
+      {
+        event: "session.end",
+        project: cwd,
+        model,
+        durationMs: Math.round(performance.now() - startMs),
+        costUsd: envelope.total_cost_usd,
+        turns: envelope.num_turns,
+      },
+      "session end",
+    );
 
   // --json-schema puts the parsed object in structured_output; fall back to result string
   if (envelope.structured_output !== undefined) {

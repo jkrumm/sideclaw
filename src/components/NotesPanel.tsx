@@ -1,14 +1,13 @@
-import React, { use, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
-import {
-  Button,
-  Callout,
-  Menu,
-  MenuItem,
-  Popover,
-  Spinner,
-  Tag,
-  Tree,
-} from "@blueprintjs/core";
+import React, {
+  use,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { Button, Callout, Popover, Spinner, Tag, Tree } from "@blueprintjs/core";
 import type { TreeNodeInfo } from "@blueprintjs/core";
 import { api } from "../lib/api";
 import { MarkdownEditor } from "./MarkdownEditor";
@@ -45,14 +44,12 @@ function buildFileTree(
     for (let i = 0; i < parts.length - 1; i++) {
       const dir = parts[i];
       const dirPath = parts.slice(0, i + 1).join("/");
-      if (!current.children.has(dir)) {
-        current.children.set(dir, {
-          children: new Map(),
-          files: [],
-          path: dirPath,
-        });
+      let next = current.children.get(dir);
+      if (!next) {
+        next = { children: new Map(), files: [], path: dirPath };
+        current.children.set(dir, next);
       }
-      current = current.children.get(dir)!;
+      current = next;
     }
 
     current.files.push(file);
@@ -61,9 +58,7 @@ function buildFileTree(
   function toTreeNodes(node: DirNode): TreeNodeInfo[] {
     const nodes: TreeNodeInfo[] = [];
 
-    const dirs = [...node.children.entries()].sort((a, b) =>
-      a[0].localeCompare(b[0]),
-    );
+    const dirs = [...node.children.entries()].toSorted((a, b) => a[0].localeCompare(b[0]));
     for (const [name, child] of dirs) {
       const isExpanded = expandedFolders.has(child.path);
       nodes.push({
@@ -75,8 +70,8 @@ function buildFileTree(
       });
     }
 
-    for (const file of node.files.sort()) {
-      const fileName = file.split("/").pop()!;
+    for (const file of node.files.toSorted()) {
+      const fileName = file.split("/").at(-1) ?? "";
       nodes.push({
         id: file,
         label: fileName,
@@ -96,9 +91,12 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
   const tabId = useRef(`tab-${Math.random().toString(36).slice(2)}`).current;
   const [externallyChanged, setExternallyChanged] = useState(false);
 
-  const notifyExternal = useCallback((sourceTabId?: string) => {
-    if (sourceTabId !== tabId) setExternallyChanged(true);
-  }, [tabId]);
+  const notifyExternal = useCallback(
+    (sourceTabId?: string) => {
+      if (sourceTabId !== tabId) setExternallyChanged(true);
+    },
+    [tabId],
+  );
 
   useImperativeHandle(ref, () => ({ notifyExternal }), [notifyExternal]);
 
@@ -116,9 +114,7 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
 
   const [openTabs, setOpenTabs] = useState<string[]>(() => {
     try {
-      return JSON.parse(
-        localStorage.getItem(`${storagePrefix}:openTabs`) ?? "[]",
-      );
+      return JSON.parse(localStorage.getItem(`${storagePrefix}:openTabs`) ?? "[]");
     } catch {
       return [];
     }
@@ -136,11 +132,9 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
 
   // Eagerly fetch markdown files to detect README and populate tree
   useEffect(() => {
-    api.api["markdown-files"]
-      .get({ query: { path: repoPath } })
-      .then((res) => {
-        if (res.data?.ok) setMdFiles(res.data.data as string[]);
-      });
+    api.api["markdown-files"].get({ query: { path: repoPath } }).then((res) => {
+      if (res.data?.ok) setMdFiles(res.data.data as string[]);
+    });
   }, [repoPath]);
 
   const readmeFile = useMemo(
@@ -180,9 +174,7 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
 
   const handleSwitchToCnote = async () => {
     if (!selectedFile) return;
-    const res = await api.api.notes
-      .get({ query: { path: repoPath } })
-      .catch(() => null);
+    const res = await api.api.notes.get({ query: { path: repoPath } }).catch(() => null);
     const content = res?.data?.ok ? (res.data.data as string) : "";
     setSelectedFile(null);
     setEditorContent(content);
@@ -192,9 +184,7 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
   const handleCloseTab = async (file: string) => {
     saveOpenTabs(openTabs.filter((f) => f !== file));
     if (selectedFile === file) {
-      const res = await api.api.notes
-        .get({ query: { path: repoPath } })
-        .catch(() => null);
+      const res = await api.api.notes.get({ query: { path: repoPath } }).catch(() => null);
       const content = res?.data?.ok ? (res.data.data as string) : "";
       setSelectedFile(null);
       setEditorContent(content);
@@ -203,9 +193,7 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
   };
 
   const handleCnoteReload = async () => {
-    const res = await api.api.notes
-      .get({ query: { path: repoPath } })
-      .catch(() => null);
+    const res = await api.api.notes.get({ query: { path: repoPath } }).catch(() => null);
     if (res?.data?.ok) {
       const d = res.data as { ok: true; data: string; modifiedAt: number };
       setEditorContent(d.data);
@@ -218,10 +206,7 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
 
   const persistExpansion = (next: Set<string>) => {
     setExpandedFolders(next);
-    localStorage.setItem(
-      `${storagePrefix}:mdTreeExpanded`,
-      JSON.stringify([...next]),
-    );
+    localStorage.setItem(`${storagePrefix}:mdTreeExpanded`, JSON.stringify([...next]));
   };
 
   const handleTreeNodeClick = (node: TreeNodeInfo) => {
@@ -248,19 +233,13 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
   };
 
   const treeNodes = useMemo(
-    () =>
-      mdFiles
-        ? buildFileTree(mdFiles, expandedFolders, selectedFile)
-        : [],
+    () => (mdFiles ? buildFileTree(mdFiles, expandedFolders, selectedFile) : []),
     [mdFiles, expandedFolders, selectedFile],
   );
 
   const editorSave = selectedFile
     ? (content: string) =>
-        api.api["markdown-file"].put(
-          { content },
-          { query: { path: repoPath, file: selectedFile } },
-        )
+        api.api["markdown-file"].put({ content }, { query: { path: repoPath, file: selectedFile } })
     : async (content: string) => {
         const params = new URLSearchParams({
           path: repoPath,
@@ -286,9 +265,7 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
         }
       };
 
-  const contentKey = selectedFile
-    ? `${selectedFile}:${fileVersion}`
-    : `sc-note:${cnoteVersion}`;
+  const contentKey = selectedFile ? `${selectedFile}:${fileVersion}` : `sc-note:${cnoteVersion}`;
 
   // Tabs to show in the strip (exclude readme from openTabs since it's pinned)
   const closableTabs = openTabs.filter((f) => f !== readmeFile);
@@ -358,7 +335,7 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
 
               {/* Closeable tabs */}
               {closableTabs.map((file) => {
-                const name = file.split("/").pop()!;
+                const name = file.split("/").at(-1) ?? "";
                 const isActive = selectedFile === file;
                 return (
                   <Tag
@@ -458,9 +435,7 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
           content={editorContent}
           contentKey={contentKey}
           onSave={editorSave}
-          placeholder={
-            selectedFile ? `Editing ${selectedFile}...` : "Session notes..."
-          }
+          placeholder={selectedFile ? `Editing ${selectedFile}...` : "Session notes..."}
         />
       </div>
     </div>

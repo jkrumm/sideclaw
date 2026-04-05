@@ -1,16 +1,14 @@
 ---
-description: sideclaw git workflow — direct-to-master, no PR, no release process, no check step
+description: sideclaw git workflow — direct-to-master, no PR, no release process
 ---
 
 # Git Workflow
 
-sideclaw is a personal infra tool (config-as-code). No PR flow, no release process, no validation step.
+sideclaw is a personal infra tool (config-as-code). No PR flow, no release process.
 
 ## Ship flow
 
-`/ship` runs: `/review` → `/commit` → `git push` — done.
-
-Skip `/check` entirely — there is no lint, format, or typecheck configured in this repo.
+`/ship` runs: `/check` → `/review` → `/commit` → `git push` — done.
 
 ## Rules
 

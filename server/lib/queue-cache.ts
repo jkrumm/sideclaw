@@ -9,10 +9,7 @@ const cache = new Map<string, QueueTask[]>();
  * (stop hook pops from top), insert it into the completed_tasks table.
  * Always updates the cache afterward.
  */
-export function detectCompletion(
-  repoPath: string,
-  newTasks: QueueTask[],
-): void {
+export function detectCompletion(repoPath: string, newTasks: QueueTask[]): void {
   const oldTasks = cache.get(repoPath);
   cache.set(repoPath, newTasks);
 

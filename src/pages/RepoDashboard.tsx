@@ -111,9 +111,7 @@ function RepoDashboardInner() {
     };
 
     const connect = () => {
-      const evtSource = new EventSource(
-        `/api/events?path=${encodeURIComponent(repoPath)}`,
-      );
+      const evtSource = new EventSource(`/api/events?path=${encodeURIComponent(repoPath)}`);
       evtSourceRef.current = evtSource;
 
       evtSource.addEventListener("connected", (e: MessageEvent) => {
@@ -143,7 +141,7 @@ function RepoDashboardInner() {
         else if (payload.file === "notes") notesRef.current?.notifyExternal(payload.sourceTabId);
       });
 
-      evtSource.onerror = () => {
+      evtSource.addEventListener("error", () => {
         if (!isActive) return;
         if (watchdogTimer) {
           clearTimeout(watchdogTimer);
@@ -161,7 +159,7 @@ function RepoDashboardInner() {
             connect();
           }
         }, 5000);
-      };
+      });
     };
 
     connect();
@@ -188,14 +186,8 @@ function RepoDashboardInner() {
     <div>
       <Navbar>
         <NavbarGroup align={Alignment.START}>
-          <Button
-            variant="minimal"
-            icon="arrow-left"
-            onClick={() => navigate("/")}
-          />
-          <NavbarHeading
-            style={{ fontFamily: "var(--bp-typography-family-mono)" }}
-          >
+          <Button variant="minimal" icon="arrow-left" onClick={() => navigate("/")} />
+          <NavbarHeading style={{ fontFamily: "var(--bp-typography-family-mono)" }}>
             {repoName}
           </NavbarHeading>
         </NavbarGroup>
@@ -216,9 +208,7 @@ function RepoDashboardInner() {
           <UsageTags />
           <Button
             variant="minimal"
-            icon={
-              mode === "light" ? "moon" : mode === "dark" ? "desktop" : "flash"
-            }
+            icon={mode === "light" ? "moon" : mode === "dark" ? "desktop" : "flash"}
             onClick={toggle}
           />
         </NavbarGroup>
@@ -233,12 +223,7 @@ function RepoDashboardInner() {
         }}
       >
         <Suspense fallback={<PanelSkeleton height={100} />}>
-          <GitPanel
-            key={repoPath}
-            ref={gitRef}
-            repoPath={repoPath}
-            initialPromise={gitPromise}
-          />
+          <GitPanel key={repoPath} ref={gitRef} repoPath={repoPath} initialPromise={gitPromise} />
         </Suspense>
         <Suspense fallback={<PanelSkeleton height={160} />}>
           <QueuePanel

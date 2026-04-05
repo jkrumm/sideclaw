@@ -1,5 +1,15 @@
 import React, { use, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { AnchorButton, Button, Callout, H6, Icon, Intent, Popover, Tag, Tooltip } from "@blueprintjs/core";
+import {
+  AnchorButton,
+  Button,
+  Callout,
+  H6,
+  Icon,
+  Intent,
+  Popover,
+  Tag,
+  Tooltip,
+} from "@blueprintjs/core";
 import type { GitFile, GitCommit, GitStatus, GithubData, WorkflowRun, Worktree } from "../types";
 import { ChainDrawer } from "./ChainDrawer";
 
@@ -32,9 +42,7 @@ function truncate(s: string, max: number): string {
 }
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <H6 style={{ margin: "0 0 6px", opacity: 0.65, fontSize: 12 }}>{children}</H6>
-  );
+  return <H6 style={{ margin: "0 0 6px", opacity: 0.65, fontSize: 12 }}>{children}</H6>;
 }
 
 const mono: React.CSSProperties = {
@@ -47,15 +55,32 @@ type FileTreeNode =
   | { type: "dir"; name: string; path: string; children: FileTreeNode[] }
   | { type: "file"; name: string; path: string; file: GitFile };
 
+function sortNodes(nodes: FileTreeNode[]): FileTreeNode[] {
+  const sorted = nodes.toSorted((a, b) => {
+    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  for (const node of sorted) {
+    if (node.type === "dir") node.children = sortNodes(node.children);
+  }
+  return sorted;
+}
+
 function buildFileTree(files: GitFile[]): FileTreeNode[] {
   const dirMap = new Map<string, Extract<FileTreeNode, { type: "dir" }>>();
   const roots: FileTreeNode[] = [];
   function ensureDir(dirPath: string): Extract<FileTreeNode, { type: "dir" }> {
-    if (dirMap.has(dirPath)) return dirMap.get(dirPath)!;
+    const existing = dirMap.get(dirPath);
+    if (existing) return existing;
     const parts = dirPath.split("/");
-    const name = parts[parts.length - 1]!;
+    const name = parts.at(-1) ?? "";
     const parentPath = parts.slice(0, -1).join("/");
-    const node: Extract<FileTreeNode, { type: "dir" }> = { type: "dir", name, path: dirPath, children: [] };
+    const node: Extract<FileTreeNode, { type: "dir" }> = {
+      type: "dir",
+      name,
+      path: dirPath,
+      children: [],
+    };
     dirMap.set(dirPath, node);
     if (parentPath) ensureDir(parentPath).children.push(node);
     else roots.push(node);
@@ -63,18 +88,13 @@ function buildFileTree(files: GitFile[]): FileTreeNode[] {
   }
   for (const file of files) {
     const parts = file.path.split("/");
-    const filename = parts[parts.length - 1]!;
+    const filename = parts.at(-1) ?? "";
     const dirPath = parts.slice(0, -1).join("/");
     const leaf: FileTreeNode = { type: "file", name: filename, path: file.path, file };
     if (dirPath) ensureDir(dirPath).children.push(leaf);
     else roots.push(leaf);
   }
-  function sortNodes(nodes: FileTreeNode[]) {
-    nodes.sort((a, b) => { if (a.type !== b.type) return a.type === "dir" ? -1 : 1; return a.name.localeCompare(b.name); });
-    for (const node of nodes) { if (node.type === "dir") sortNodes(node.children); }
-  }
-  sortNodes(roots);
-  return roots;
+  return sortNodes(roots);
 }
 
 function fileStatusColor(status: GitFile["status"]): string {
@@ -90,7 +110,19 @@ function renderNodes(nodes: FileTreeNode[], depth: number): React.ReactElement[]
     const indent = 10 + depth * 14;
     if (node.type === "dir") {
       return [
-        <div key={`dir-${node.path}`} style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 12px 2px", paddingLeft: indent, opacity: 0.5, fontSize: 11, ...mono }}>
+        <div
+          key={`dir-${node.path}`}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 5,
+            padding: "3px 12px 2px",
+            paddingLeft: indent,
+            opacity: 0.5,
+            fontSize: 11,
+            ...mono,
+          }}
+        >
           <Icon icon="folder-close" size={11} />
           <span>{node.name}</span>
         </div>,
@@ -98,10 +130,42 @@ function renderNodes(nodes: FileTreeNode[], depth: number): React.ReactElement[]
       ];
     }
     return [
-      <div key={`file-${node.path}`} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 12px", paddingLeft: indent }}>
-        <span style={{ fontSize: 10, fontWeight: 700, color: fileStatusColor(node.file.status), width: 10, textAlign: "center", ...mono }}>{node.file.status}</span>
+      <div
+        key={`file-${node.path}`}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "2px 12px",
+          paddingLeft: indent,
+        }}
+      >
+        <span
+          style={{
+            fontSize: 10,
+            fontWeight: 700,
+            color: fileStatusColor(node.file.status),
+            width: 10,
+            textAlign: "center",
+            ...mono,
+          }}
+        >
+          {node.file.status}
+        </span>
         <span style={{ fontSize: 12, ...mono }}>{node.name}</span>
-        {node.file.staged && <span style={{ fontSize: 9, opacity: 0.45, border: "1px solid currentColor", borderRadius: 2, padding: "0 3px" }}>staged</span>}
+        {node.file.staged && (
+          <span
+            style={{
+              fontSize: 9,
+              opacity: 0.45,
+              border: "1px solid currentColor",
+              borderRadius: 2,
+              padding: "0 3px",
+            }}
+          >
+            staged
+          </span>
+        )}
       </div>,
     ];
   });
@@ -118,7 +182,15 @@ function FileTreePopover({ files }: { files: GitFile[] }) {
 
 // ─── Status dot ──────────────────────────────────────────────────────────────
 
-function StatusDot({ lastRefresh, githubLoading, onRefresh }: { lastRefresh: Date | null; githubLoading: boolean; onRefresh: () => void }) {
+function StatusDot({
+  lastRefresh,
+  githubLoading,
+  onRefresh,
+}: {
+  lastRefresh: Date | null;
+  githubLoading: boolean;
+  onRefresh: () => void;
+}) {
   const [bright, setBright] = useState(false);
   const [, setTick] = useState(0);
   const prevLoadingRef = useRef(githubLoading);
@@ -138,15 +210,25 @@ function StatusDot({ lastRefresh, githubLoading, onRefresh }: { lastRefresh: Dat
   }, []);
 
   return (
-    <Tooltip content={lastRefresh ? `GitHub: ${timeAgo(lastRefresh.toISOString())} · click to refresh` : "GitHub: click to refresh"} placement="bottom">
+    <Tooltip
+      content={
+        lastRefresh
+          ? `GitHub: ${timeAgo(lastRefresh.toISOString())} · click to refresh`
+          : "GitHub: click to refresh"
+      }
+      placement="bottom"
+    >
       <div
         onClick={onRefresh}
         style={{
-          width: 7, height: 7, borderRadius: "50%",
+          width: 7,
+          height: 7,
+          borderRadius: "50%",
           background: lastRefresh ? "#23a26d" : "#738091",
           opacity: bright ? 1 : 0.5,
           transition: bright ? "none" : "opacity 1.5s ease-out",
-          cursor: "pointer", flexShrink: 0,
+          cursor: "pointer",
+          flexShrink: 0,
         }}
       />
     </Tooltip>
@@ -168,21 +250,40 @@ function LocalSection({ gitStatus }: { gitStatus: GitStatus }) {
       <SectionLabel>Local</SectionLabel>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
         <Tooltip content={`Current branch (main: ${mainBranch})`} placement="bottom">
-          <Tag minimal icon="git-branch" style={mono}>{branch}</Tag>
+          <Tag minimal icon="git-branch" style={mono}>
+            {branch}
+          </Tag>
         </Tooltip>
         {ahead > 0 && (
-          <Tooltip content={`${ahead} commit${ahead !== 1 ? "s" : ""} ahead of remote`} placement="bottom">
-            <Tag intent={Intent.SUCCESS} minimal>↑{ahead}</Tag>
+          <Tooltip
+            content={`${ahead} commit${ahead !== 1 ? "s" : ""} ahead of remote`}
+            placement="bottom"
+          >
+            <Tag intent={Intent.SUCCESS} minimal>
+              ↑{ahead}
+            </Tag>
           </Tooltip>
         )}
         {behind > 0 && (
-          <Tooltip content={`${behind} commit${behind !== 1 ? "s" : ""} behind remote`} placement="bottom">
-            <Tag intent={Intent.DANGER} minimal>↓{behind}</Tag>
+          <Tooltip
+            content={`${behind} commit${behind !== 1 ? "s" : ""} behind remote`}
+            placement="bottom"
+          >
+            <Tag intent={Intent.DANGER} minimal>
+              ↓{behind}
+            </Tag>
           </Tooltip>
         )}
         {totalChanged > 0 && (
-          <Popover content={<FileTreePopover files={changedFiles} />} interactionKind="click" placement="bottom-start">
-            <Tooltip content={`${modified > 0 ? `M:${modified} ` : ""}${added > 0 ? `A:${added} ` : ""}${deleted > 0 ? `D:${deleted} ` : ""}${untracked > 0 ? `?:${untracked}` : ""}`.trim()} placement="bottom">
+          <Popover
+            content={<FileTreePopover files={changedFiles} />}
+            interactionKind="click"
+            placement="bottom-start"
+          >
+            <Tooltip
+              content={`${modified > 0 ? `M:${modified} ` : ""}${added > 0 ? `A:${added} ` : ""}${deleted > 0 ? `D:${deleted} ` : ""}${untracked > 0 ? `?:${untracked}` : ""}`.trim()}
+              placement="bottom"
+            >
               <Tag minimal intent={Intent.WARNING} style={{ cursor: "pointer" }} icon="document">
                 {totalChanged} file{totalChanged !== 1 ? "s" : ""}
               </Tag>
@@ -202,7 +303,10 @@ function WorktreesSection({ worktrees }: { worktrees: Worktree[] }) {
     <div style={{ padding: "8px 12px", minWidth: 200 }}>
       <SectionLabel>Worktrees</SectionLabel>
       {worktrees.map((w) => (
-        <div key={w.path} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+        <div
+          key={w.path}
+          style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}
+        >
           <Icon icon={w.isMain ? "home" : "git-branch"} size={12} style={{ opacity: 0.55 }} />
           <span style={{ fontSize: 12, ...mono }}>{w.branch}</span>
           {w.isMain && <span style={{ fontSize: 10, opacity: 0.45 }}>main</span>}
@@ -216,9 +320,13 @@ function WorktreesSection({ worktrees }: { worktrees: Worktree[] }) {
       <SectionLabel>Worktrees</SectionLabel>
       <Popover content={content} interactionKind="click" placement="bottom-start">
         <div style={{ display: "flex", gap: 5, alignItems: "center", cursor: "pointer" }}>
-          <Tag minimal icon="layers">{worktrees.length}</Tag>
+          <Tag minimal icon="layers">
+            {worktrees.length}
+          </Tag>
           {nonMain.slice(0, 2).map((w) => (
-            <Tag key={w.path} minimal style={mono}>{truncate(w.branch, 20)}</Tag>
+            <Tag key={w.path} minimal style={mono}>
+              {truncate(w.branch, 20)}
+            </Tag>
           ))}
           {nonMain.length > 2 && <Tag minimal>+{nonMain.length - 2}</Tag>}
         </div>
@@ -227,7 +335,7 @@ function WorktreesSection({ worktrees }: { worktrees: Worktree[] }) {
   );
 }
 
-function PRsSection({ githubData, gitStatus }: { githubData: GithubData | null; gitStatus: GitStatus }) {
+function PRsSection({ githubData }: { githubData: GithubData | null }) {
   if (!githubData) return null;
   const { currentPR, openPRs } = githubData;
   if (!currentPR && openPRs.length === 0) return null;
@@ -239,16 +347,45 @@ function PRsSection({ githubData, gitStatus }: { githubData: GithubData | null; 
     if (!pr) return null;
     const { checks } = pr;
     if (checks.total === 0) return null;
-    if (checks.failing > 0) return <Tag intent={Intent.DANGER} minimal icon="error">{checks.failing} failing</Tag>;
-    if (checks.pending > 0) return <Tag intent={Intent.WARNING} minimal icon="time">{checks.passing}/{checks.total}</Tag>;
-    return <Tag intent={Intent.SUCCESS} minimal icon="tick-circle">{checks.passing}/{checks.total}</Tag>;
+    if (checks.failing > 0)
+      return (
+        <Tag intent={Intent.DANGER} minimal icon="error">
+          {checks.failing} failing
+        </Tag>
+      );
+    if (checks.pending > 0)
+      return (
+        <Tag intent={Intent.WARNING} minimal icon="time">
+          {checks.passing}/{checks.total}
+        </Tag>
+      );
+    return (
+      <Tag intent={Intent.SUCCESS} minimal icon="tick-circle">
+        {checks.passing}/{checks.total}
+      </Tag>
+    );
   }
 
   function reviewTag(pr: typeof currentPR) {
     if (!pr?.reviewDecision) return null;
-    if (pr.reviewDecision === "APPROVED") return <Tag intent={Intent.SUCCESS} minimal icon="endorsed">Approved</Tag>;
-    if (pr.reviewDecision === "CHANGES_REQUESTED") return <Tag intent={Intent.DANGER} minimal icon="comment">Changes</Tag>;
-    if (pr.reviewDecision === "REVIEW_REQUIRED") return <Tag minimal icon="comment">Review needed</Tag>;
+    if (pr.reviewDecision === "APPROVED")
+      return (
+        <Tag intent={Intent.SUCCESS} minimal icon="endorsed">
+          Approved
+        </Tag>
+      );
+    if (pr.reviewDecision === "CHANGES_REQUESTED")
+      return (
+        <Tag intent={Intent.DANGER} minimal icon="comment">
+          Changes
+        </Tag>
+      );
+    if (pr.reviewDecision === "REVIEW_REQUIRED")
+      return (
+        <Tag minimal icon="comment">
+          Review needed
+        </Tag>
+      );
     return null;
   }
 
@@ -259,7 +396,13 @@ function PRsSection({ githubData, gitStatus }: { githubData: GithubData | null; 
         {currentPR && (
           <>
             <Tooltip content={currentPR.title} placement="bottom">
-              <AnchorButton variant="minimal" small href={currentPR.url} target="_blank" style={{ padding: "0 6px", fontSize: 12 }}>
+              <AnchorButton
+                variant="minimal"
+                small
+                href={currentPR.url}
+                target="_blank"
+                style={{ padding: "0 6px", fontSize: 12 }}
+              >
                 #{currentPR.number} {truncate(currentPR.title, 28)}
               </AnchorButton>
             </Tooltip>
@@ -269,7 +412,13 @@ function PRsSection({ githubData, gitStatus }: { githubData: GithubData | null; 
         )}
         {otherPRs.slice(0, 3).map((pr) => (
           <Tooltip key={pr.number} content={pr.title} placement="bottom">
-            <AnchorButton variant="minimal" small href={pr.url} target="_blank" style={{ padding: "0 6px", fontSize: 12, opacity: 0.65 }}>
+            <AnchorButton
+              variant="minimal"
+              small
+              href={pr.url}
+              target="_blank"
+              style={{ padding: "0 6px", fontSize: 12, opacity: 0.65 }}
+            >
               #{pr.number}
             </AnchorButton>
           </Tooltip>
@@ -279,7 +428,13 @@ function PRsSection({ githubData, gitStatus }: { githubData: GithubData | null; 
   );
 }
 
-function VersionSection({ gitStatus, githubData }: { gitStatus: GitStatus; githubData: GithubData | null }) {
+function VersionSection({
+  gitStatus,
+  githubData,
+}: {
+  gitStatus: GitStatus;
+  githubData: GithubData | null;
+}) {
   const { lastTag, distanceFromTag } = gitStatus;
   if (!lastTag) return null;
 
@@ -291,16 +446,30 @@ function VersionSection({ gitStatus, githubData }: { gitStatus: GitStatus; githu
       <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
         <Tooltip content={releaseUrl ? "Latest release" : "Latest tag"} placement="bottom">
           {releaseUrl ? (
-            <AnchorButton variant="minimal" small href={releaseUrl} target="_blank" icon="tag" style={{ ...mono, padding: "0 6px", fontSize: 12 }}>
+            <AnchorButton
+              variant="minimal"
+              small
+              href={releaseUrl}
+              target="_blank"
+              icon="tag"
+              style={{ ...mono, padding: "0 6px", fontSize: 12 }}
+            >
               {lastTag}
             </AnchorButton>
           ) : (
-            <Tag minimal icon="tag" style={mono}>{lastTag}</Tag>
+            <Tag minimal icon="tag" style={mono}>
+              {lastTag}
+            </Tag>
           )}
         </Tooltip>
         {distanceFromTag > 0 && (
-          <Tooltip content={`${distanceFromTag} commit${distanceFromTag !== 1 ? "s" : ""} on ${gitStatus.mainBranch} not yet released`} placement="bottom">
-            <Tag minimal intent={Intent.WARNING}>+{distanceFromTag}</Tag>
+          <Tooltip
+            content={`${distanceFromTag} commit${distanceFromTag !== 1 ? "s" : ""} on ${gitStatus.mainBranch} not yet released`}
+            placement="bottom"
+          >
+            <Tag minimal intent={Intent.WARNING}>
+              +{distanceFromTag}
+            </Tag>
           </Tooltip>
         )}
       </div>
@@ -329,7 +498,12 @@ function HistorySection({ gitStatus }: { gitStatus: GitStatus }) {
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   function toggle(sha: string) {
-    setExpanded((prev) => { const next = new Set(prev); if (next.has(sha)) next.delete(sha); else next.add(sha); return next; });
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(sha)) next.delete(sha);
+      else next.add(sha);
+      return next;
+    });
   }
 
   return (
@@ -348,19 +522,67 @@ function HistorySection({ gitStatus }: { gitStatus: GitStatus }) {
             return (
               <div key={commit.sha}>
                 <div
-                  style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 0", cursor: hasBody ? "pointer" : "default" }}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "2px 0",
+                    cursor: hasBody ? "pointer" : "default",
+                  }}
                   onClick={() => hasBody && toggle(commit.sha)}
                 >
-                  <span style={{ fontSize: 10, opacity: 0.5, width: 42, flexShrink: 0, ...mono }}>{commit.sha}</span>
-                  <Tag minimal style={{ fontSize: 10, flexShrink: 0, ...mono, opacity: isMain ? 0.55 : 1, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span style={{ fontSize: 10, opacity: 0.5, width: 42, flexShrink: 0, ...mono }}>
+                    {commit.sha}
+                  </span>
+                  <Tag
+                    minimal
+                    style={{
+                      fontSize: 10,
+                      flexShrink: 0,
+                      ...mono,
+                      opacity: isMain ? 0.55 : 1,
+                      maxWidth: 120,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
                     {truncate(label, 16)}
                   </Tag>
-                  <span style={{ fontSize: 12, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{commit.subject}</span>
-                  <span style={{ fontSize: 10, opacity: 0.4, flexShrink: 0, whiteSpace: "nowrap" }}>{commit.relativeTime}</span>
-                  {hasBody && <Icon icon={isExp ? "chevron-up" : "chevron-down"} size={11} style={{ opacity: 0.5, flexShrink: 0 }} />}
+                  <span
+                    style={{
+                      fontSize: 12,
+                      flex: 1,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {commit.subject}
+                  </span>
+                  <span style={{ fontSize: 10, opacity: 0.4, flexShrink: 0, whiteSpace: "nowrap" }}>
+                    {commit.relativeTime}
+                  </span>
+                  {hasBody && (
+                    <Icon
+                      icon={isExp ? "chevron-up" : "chevron-down"}
+                      size={11}
+                      style={{ opacity: 0.5, flexShrink: 0 }}
+                    />
+                  )}
                 </div>
                 {hasBody && isExp && (
-                  <pre style={{ fontSize: 11, margin: "2px 0 4px 48px", opacity: 0.65, whiteSpace: "pre-wrap", ...mono }}>{commit.body}</pre>
+                  <pre
+                    style={{
+                      fontSize: 11,
+                      margin: "2px 0 4px 48px",
+                      opacity: 0.65,
+                      whiteSpace: "pre-wrap",
+                      ...mono,
+                    }}
+                  >
+                    {commit.body}
+                  </pre>
                 )}
               </div>
             );
@@ -373,7 +595,10 @@ function HistorySection({ gitStatus }: { gitStatus: GitStatus }) {
 
 // ─── Row 2 right: Workflows ──────────────────────────────────────────────────
 
-function WorkflowsSection({ githubData, gitStatus }: {
+function WorkflowsSection({
+  githubData,
+  gitStatus,
+}: {
   githubData: GithubData | null;
   gitStatus: GitStatus;
 }) {
@@ -381,7 +606,8 @@ function WorkflowsSection({ githubData, gitStatus }: {
 
   function runIcon(run: WorkflowRun) {
     if (run.status !== "completed") return <Icon icon="time" size={12} style={{ opacity: 0.6 }} />;
-    if (run.conclusion === "success") return <Icon icon="tick-circle" size={12} intent={Intent.SUCCESS} />;
+    if (run.conclusion === "success")
+      return <Icon icon="tick-circle" size={12} intent={Intent.SUCCESS} />;
     return <Icon icon="error" size={12} intent={Intent.DANGER} />;
   }
 
@@ -392,9 +618,28 @@ function WorkflowsSection({ githubData, gitStatus }: {
         {githubData.workflowRuns.map((run) => (
           <div key={run.id} style={{ display: "flex", alignItems: "center", gap: 6 }}>
             {runIcon(run)}
-            <span style={{ fontSize: 12, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{truncate(run.name, 22)}</span>
-            <span style={{ fontSize: 10, opacity: 0.4, whiteSpace: "nowrap" }}>{timeAgo(run.createdAt)}</span>
-            <AnchorButton variant="minimal" icon="share" small href={run.url} target="_blank" style={{ padding: "0 2px", flexShrink: 0 }} />
+            <span
+              style={{
+                fontSize: 12,
+                flex: 1,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {truncate(run.name, 22)}
+            </span>
+            <span style={{ fontSize: 10, opacity: 0.4, whiteSpace: "nowrap" }}>
+              {timeAgo(run.createdAt)}
+            </span>
+            <AnchorButton
+              variant="minimal"
+              icon="share"
+              small
+              href={run.url}
+              target="_blank"
+              style={{ padding: "0 2px", flexShrink: 0 }}
+            />
           </div>
         ))}
       </div>
@@ -404,7 +649,15 @@ function WorkflowsSection({ githubData, gitStatus }: {
 
 // ─── Row 3: Actions ──────────────────────────────────────────────────────────
 
-function BranchNameForm({ label, onSubmit, onClose }: { label: string; onSubmit: (name: string) => void; onClose: () => void }) {
+function BranchNameForm({
+  label,
+  onSubmit,
+  onClose,
+}: {
+  label: string;
+  onSubmit: (name: string) => void;
+  onClose: () => void;
+}) {
   const [value, setValue] = useState("");
   return (
     <div style={{ padding: 16, minWidth: 240 }}>
@@ -413,19 +666,48 @@ function BranchNameForm({ label, onSubmit, onClose }: { label: string; onSubmit:
         autoFocus
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && value.trim()) onSubmit(value.trim()); if (e.key === "Escape") onClose(); }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && value.trim()) onSubmit(value.trim());
+          if (e.key === "Escape") onClose();
+        }}
         placeholder="branch-name"
-        style={{ width: "100%", padding: "4px 8px", fontSize: 12, background: "var(--bp5-dark-gray5, #1c2127)", border: "1px solid var(--bp5-gray3, #5f6b7c)", borderRadius: 3, color: "inherit", ...mono, boxSizing: "border-box" }}
+        style={{
+          width: "100%",
+          padding: "4px 8px",
+          fontSize: 12,
+          background: "var(--bp5-dark-gray5, #1c2127)",
+          border: "1px solid var(--bp5-gray3, #5f6b7c)",
+          borderRadius: 3,
+          color: "inherit",
+          ...mono,
+          boxSizing: "border-box",
+        }}
       />
       <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-        <Button small intent={Intent.PRIMARY} disabled={!value.trim()} onClick={() => onSubmit(value.trim())}>Create</Button>
-        <Button small onClick={onClose}>Cancel</Button>
+        <Button
+          small
+          intent={Intent.PRIMARY}
+          disabled={!value.trim()}
+          onClick={() => onSubmit(value.trim())}
+        >
+          Create
+        </Button>
+        <Button small onClick={onClose}>
+          Cancel
+        </Button>
       </div>
     </div>
   );
 }
 
-function ActionButton({ label, intent, disabled, tooltip, popoverContent, onClick }: {
+function ActionButton({
+  label,
+  intent,
+  disabled,
+  tooltip,
+  popoverContent,
+  onClick,
+}: {
   label: string;
   intent?: Intent;
   disabled?: boolean;
@@ -450,7 +732,12 @@ function ActionButton({ label, intent, disabled, tooltip, popoverContent, onClic
   );
 
   const wrapped = tooltip ? (
-    <Tooltip content={tooltip} placement="top" targetTagName="div" targetProps={{ style: { flex: 1, minWidth: 0 } }}>
+    <Tooltip
+      content={tooltip}
+      placement="top"
+      targetTagName="div"
+      targetProps={{ style: { flex: 1, minWidth: 0 } }}
+    >
       {btn}
     </Tooltip>
   ) : (
@@ -600,13 +887,17 @@ function ActionsSection({
       />
 
       {error && (
-        <Callout intent={Intent.DANGER} style={{ marginBottom: 8, padding: "6px 10px", fontSize: 12 }}>
+        <Callout
+          intent={Intent.DANGER}
+          style={{ marginBottom: 8, padding: "6px 10px", fontSize: 12 }}
+        >
           {error}
         </Callout>
       )}
 
-      <div style={{ display: "flex", gap: 5, alignItems: "stretch", width: "100%", flexWrap: "wrap" }}>
-
+      <div
+        style={{ display: "flex", gap: 5, alignItems: "stretch", width: "100%", flexWrap: "wrap" }}
+      >
         <ActionButton
           label="New Branch"
           tooltip="Create a new branch from origin/default"
@@ -614,7 +905,9 @@ function ActionsSection({
           popoverContent={
             <BranchNameForm
               label="New Branch Name"
-              onSubmit={(name) => { void runGitOp("new-branch", name); }}
+              onSubmit={(name) => {
+                void runGitOp("new-branch", name);
+              }}
               onClose={() => {}}
             />
           }
@@ -627,7 +920,9 @@ function ActionsSection({
           popoverContent={
             <BranchNameForm
               label="Worktree Branch Name"
-              onSubmit={(name) => { void runGitOp("new-worktree", name); }}
+              onSubmit={(name) => {
+                void runGitOp("new-worktree", name);
+              }}
               onClose={() => {}}
             />
           }
@@ -641,12 +936,18 @@ function ActionsSection({
               : `Already up to date with ${mainBranch}`
           }
           disabled={onMain || behind === 0 || busy}
-          onClick={() => { void runGitOp("rebase"); }}
+          onClick={() => {
+            void runGitOp("rebase");
+          }}
         />
 
         <ActionButton
           label={ahead > 0 ? `Push (${ahead})` : "Push"}
-          tooltip={ahead > 0 ? `Push ${ahead} commit${ahead !== 1 ? "s" : ""} → ${branch}` : "Nothing to push"}
+          tooltip={
+            ahead > 0
+              ? `Push ${ahead} commit${ahead !== 1 ? "s" : ""} → ${branch}`
+              : "Nothing to push"
+          }
           disabled={ahead === 0 || busy}
           popoverContent={
             <div style={{ padding: 16, minWidth: 220 }}>
@@ -654,7 +955,13 @@ function ActionsSection({
               <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 12 }}>
                 {ahead} commit{ahead !== 1 ? "s" : ""} → <span style={mono}>{branch}</span>
               </div>
-              <Button small intent={Intent.PRIMARY} onClick={() => { void runGitOp("push"); }}>
+              <Button
+                small
+                intent={Intent.PRIMARY}
+                onClick={() => {
+                  void runGitOp("push");
+                }}
+              >
                 Push
               </Button>
             </div>
@@ -665,7 +972,9 @@ function ActionsSection({
           label="GitCleanup"
           tooltip="Squash and group noisy commits into logical units"
           disabled={onMain || busy}
-          onClick={() => { void runChain("/git-cleanup"); }}
+          onClick={() => {
+            void runChain("/git-cleanup");
+          }}
         />
 
         <ActionButton
@@ -673,7 +982,9 @@ function ActionsSection({
           intent={Intent.SUCCESS}
           tooltip="Run format, lint, typecheck, and tests"
           disabled={busy}
-          onClick={() => { void runChain("/check"); }}
+          onClick={() => {
+            void runChain("/check");
+          }}
         />
 
         <ActionButton
@@ -681,14 +992,24 @@ function ActionsSection({
           intent={Intent.SUCCESS}
           tooltip="AI code review of branch changes"
           disabled={busy}
-          onClick={() => { void runChain("/review"); }}
+          onClick={() => {
+            void runChain("/review");
+          }}
         />
 
         <ActionButton
           label="Create PR"
           disabled={onMain || !!pr || busy}
-          tooltip={pr ? `PR #${pr.number} already open` : onMain ? "Switch to a feature branch first" : "Run full PR chain: validate → review → create PR"}
-          onClick={() => { void runChain("/pr create"); }}
+          tooltip={
+            pr
+              ? `PR #${pr.number} already open`
+              : onMain
+                ? "Switch to a feature branch first"
+                : "Run full PR chain: validate → review → create PR"
+          }
+          onClick={() => {
+            void runChain("/pr create");
+          }}
         />
 
         {pr && (
@@ -702,7 +1023,13 @@ function ActionsSection({
                 <div style={{ fontSize: 12, opacity: 0.7, marginBottom: 12 }}>
                   #{pr.number} {truncate(pr.title, 32)}
                 </div>
-                <Button small intent={Intent.PRIMARY} onClick={() => { void runChain("/pr merge"); }}>
+                <Button
+                  small
+                  intent={Intent.PRIMARY}
+                  onClick={() => {
+                    void runChain("/pr merge");
+                  }}
+                >
                   Merge
                 </Button>
               </div>
@@ -726,7 +1053,6 @@ function ActionsSection({
             }
           />
         )}
-
       </div>
 
       <ChainDrawer
@@ -796,22 +1122,21 @@ export function GitPanel({ repoPath, initialPromise, ref }: Props) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-
       {/* Row 1: Status sections */}
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
         <LocalSection gitStatus={gitStatus} />
-        {gitStatus.worktrees.length > 1 && (
-          <WorktreesSection worktrees={gitStatus.worktrees} />
-        )}
+        {gitStatus.worktrees.length > 1 && <WorktreesSection worktrees={gitStatus.worktrees} />}
         {githubData && (githubData.currentPR || githubData.openPRs.length > 0) && (
           <PRsSection githubData={githubData} gitStatus={gitStatus} />
         )}
-        {gitStatus.lastTag && (
-          <VersionSection gitStatus={gitStatus} githubData={githubData} />
-        )}
+        {gitStatus.lastTag && <VersionSection gitStatus={gitStatus} githubData={githubData} />}
         {gitStatus.githubRepo && (
           <div style={{ marginLeft: "auto", alignSelf: "center" }}>
-            <StatusDot lastRefresh={lastGithubRefresh} githubLoading={githubLoading} onRefresh={refresh} />
+            <StatusDot
+              lastRefresh={lastGithubRefresh}
+              githubLoading={githubLoading}
+              onRefresh={refresh}
+            />
           </div>
         )}
       </div>
@@ -824,7 +1149,6 @@ export function GitPanel({ repoPath, initialPromise, ref }: Props) {
 
       {/* Row 3: Actions */}
       <ActionsSection repoPath={repoPath} gitStatus={gitStatus} githubData={githubData} />
-
     </div>
   );
 }

@@ -77,10 +77,10 @@ export function ChainDrawer({ jobId, skill, onClose }: Props) {
       es.close();
     });
 
-    es.onerror = () => {
+    es.addEventListener("error", () => {
       // Stream ended (job done or connection error)
       es.close();
-    };
+    });
 
     return () => {
       es.close();
@@ -97,15 +97,18 @@ export function ChainDrawer({ jobId, skill, onClose }: Props) {
   const title = skillLabel(skill);
   const isOpen = !!jobId;
 
-  const statusCallout = status !== "running" ? (
-    <Callout
-      intent={status === "pass" ? Intent.SUCCESS : Intent.DANGER}
-      icon={status === "pass" ? "tick-circle" : "error"}
-      style={{ marginBottom: 12, flexShrink: 0 }}
-    >
-      {status === "pass" ? `${title} completed successfully` : `${title} failed — review output above`}
-    </Callout>
-  ) : null;
+  const statusCallout =
+    status !== "running" ? (
+      <Callout
+        intent={status === "pass" ? Intent.SUCCESS : Intent.DANGER}
+        icon={status === "pass" ? "tick-circle" : "error"}
+        style={{ marginBottom: 12, flexShrink: 0 }}
+      >
+        {status === "pass"
+          ? `${title} completed successfully`
+          : `${title} failed — review output above`}
+      </Callout>
+    ) : null;
 
   return (
     <Drawer
@@ -123,9 +126,7 @@ export function ChainDrawer({ jobId, skill, onClose }: Props) {
             />
           )}
           <span>{title}</span>
-          {status === "running" && (
-            <span style={{ fontSize: 12, opacity: 0.55 }}>{elapsed}s</span>
-          )}
+          {status === "running" && <span style={{ fontSize: 12, opacity: 0.55 }}>{elapsed}s</span>}
         </div>
       }
       hasBackdrop={false}

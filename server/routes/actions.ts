@@ -14,7 +14,13 @@ async function gitNewBranch(repoPath: string, name: string): Promise<GitOpResult
   const defaultBranch = gitDefaultBranch(repoPath);
 
   const result = Bun.spawnSync([
-    "git", "-C", repoPath, "checkout", "-b", name, `origin/${defaultBranch}`,
+    "git",
+    "-C",
+    repoPath,
+    "checkout",
+    "-b",
+    name,
+    `origin/${defaultBranch}`,
   ]);
   if (result.exitCode !== 0) {
     return { ok: false, error: new TextDecoder().decode(result.stderr).trim() };
@@ -42,9 +48,9 @@ async function gitPush(worktreePath: string): Promise<GitOpResult> {
     if (stderr.includes("no upstream") || stderr.includes("set-upstream")) {
       const branch = gitCurrentBranch(worktreePath);
       if (branch) {
-        result = Bun.spawnSync([
-          "git", "-C", worktreePath, "push", "-u", "origin", branch,
-        ], { stderr: "pipe" });
+        result = Bun.spawnSync(["git", "-C", worktreePath, "push", "-u", "origin", branch], {
+          stderr: "pipe",
+        });
       }
     }
     if (result.exitCode !== 0) {
@@ -57,22 +63,26 @@ async function gitPush(worktreePath: string): Promise<GitOpResult> {
 async function gitRebase(worktreePath: string): Promise<GitOpResult> {
   Bun.spawnSync(["git", "-C", worktreePath, "fetch", "--quiet", "origin"], { stderr: "ignore" });
   const defaultBranch = gitDefaultBranch(worktreePath);
-  const result = Bun.spawnSync([
-    "git", "-C", worktreePath, "rebase", `origin/${defaultBranch}`,
-  ], { stderr: "pipe" });
+  const result = Bun.spawnSync(["git", "-C", worktreePath, "rebase", `origin/${defaultBranch}`], {
+    stderr: "pipe",
+  });
   if (result.exitCode !== 0) {
     const err = new TextDecoder().decode(result.stderr).trim();
     // Abort rebase on failure to leave clean state
     Bun.spawnSync(["git", "-C", worktreePath, "rebase", "--abort"], { stderr: "ignore" });
-    return { ok: false, error: err || "Rebase failed — conflicts detected. Use Claude chain for assisted rebase." };
+    return {
+      ok: false,
+      error: err || "Rebase failed — conflicts detected. Use Claude chain for assisted rebase.",
+    };
   }
   return { ok: true };
 }
 
 function gitDefaultBranch(repoPath: string): string {
-  const result = Bun.spawnSync([
-    "git", "-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD",
-  ], { stderr: "ignore" });
+  const result = Bun.spawnSync(
+    ["git", "-C", repoPath, "symbolic-ref", "refs/remotes/origin/HEAD"],
+    { stderr: "ignore" },
+  );
   if (result.exitCode === 0) {
     const ref = new TextDecoder().decode(result.stdout).trim();
     return ref.split("/").pop() ?? "main";
@@ -81,9 +91,9 @@ function gitDefaultBranch(repoPath: string): string {
 }
 
 function gitCurrentBranch(repoPath: string): string | null {
-  const result = Bun.spawnSync([
-    "git", "-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD",
-  ], { stderr: "ignore" });
+  const result = Bun.spawnSync(["git", "-C", repoPath, "rev-parse", "--abbrev-ref", "HEAD"], {
+    stderr: "ignore",
+  });
   if (result.exitCode !== 0) return null;
   return new TextDecoder().decode(result.stdout).trim() || null;
 }
@@ -95,14 +105,14 @@ export const actionsRoutes = new Elysia({ prefix: "/api/actions" })
   // Start a Claude skill chain job
   .post(
     "/chain",
-    async ({ body, set }) => {
+    async ({ body }) => {
       const hostPath = toContainerPath(body.worktreePath);
       const jobId = await startJob(body.skill, hostPath);
       return { ok: true, jobId };
     },
     {
       body: t.Object({
-        skill: t.String(),        // e.g. "/check" or "/pr create"
+        skill: t.String(), // e.g. "/check" or "/pr create"
         worktreePath: t.String(), // display path e.g. "/SourceRoot/cbbi-blueprint"
       }),
     },

@@ -117,7 +117,8 @@ export async function getGitStatus(repoPath: string): Promise<GitStatus | null> 
 
   // Phase 1 — all independent, run in parallel (fetch included)
   const [
-    , // fetch — side effect only, updates remote tracking refs
+    ,
+    // fetch — side effect only, updates remote tracking refs
     branch,
     shortstat,
     stagedOutput,
@@ -170,9 +171,7 @@ export async function getGitStatus(repoPath: string): Promise<GitStatus | null> 
   }
 
   const stagedCount =
-    stagedOutput && stagedOutput.length > 0
-      ? stagedOutput.split("\n").filter(Boolean).length
-      : 0;
+    stagedOutput && stagedOutput.length > 0 ? stagedOutput.split("\n").filter(Boolean).length : 0;
 
   const changedFiles = parseChangedFiles(statusOutput);
   const branchCommits = parseCommits(logOutput);
@@ -186,13 +185,13 @@ export async function getGitStatus(repoPath: string): Promise<GitStatus | null> 
     const blocks = worktreeOutput.split("\n\n").filter(Boolean);
     const mainWorktreePath = blocks[0]?.match(/^worktree (.+)/m)?.[1] ?? null;
     for (const block of blocks) {
-      const pathMatch = block.match(/^worktree (.+)/m);
-      const branchMatch = block.match(/^branch refs\/heads\/(.+)/m);
-      if (pathMatch && branchMatch) {
+      const pathMatch = block.match(/^worktree (?<path>.+)/m);
+      const branchMatch = block.match(/^branch refs\/heads\/(?<branch>.+)/m);
+      if (pathMatch?.groups && branchMatch?.groups) {
         worktrees.push({
-          path: pathMatch[1]!,
-          branch: branchMatch[1]!,
-          isMain: pathMatch[1] === mainWorktreePath,
+          path: pathMatch.groups.path,
+          branch: branchMatch.groups.branch,
+          isMain: pathMatch.groups.path === mainWorktreePath,
         });
       }
     }

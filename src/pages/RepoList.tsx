@@ -108,11 +108,7 @@ export function RepoList() {
   if (fetchError) {
     return (
       <div style={{ padding: 40 }}>
-        <NonIdealState
-          icon="error"
-          title="Failed to load repos"
-          description={fetchError}
-        />
+        <NonIdealState icon="error" title="Failed to load repos" description={fetchError} />
       </div>
     );
   }
@@ -127,9 +123,7 @@ export function RepoList() {
             sideclaw
           </NavbarHeading>
           <NavbarDivider />
-          <span style={{ opacity: 0.6, fontSize: 13 }}>
-            Claude Code task queue dashboard
-          </span>
+          <span style={{ opacity: 0.6, fontSize: 13 }}>Claude Code task queue dashboard</span>
         </NavbarGroup>
         <NavbarGroup align={Alignment.END}>
           <UsageTags />
@@ -161,10 +155,7 @@ export function RepoList() {
               to={repo.path}
               style={{ textDecoration: "none", display: "block", marginBottom: 12 }}
             >
-              <Card
-                interactive
-                style={{ display: "flex", alignItems: "center", gap: 12 }}
-              >
+              <Card interactive style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <span
                   style={{
                     fontFamily: "var(--bp-typography-family-mono)",
@@ -199,12 +190,7 @@ export function RepoList() {
       </div>
 
       {/* Init repo dialog */}
-      <Dialog
-        isOpen={initOpen}
-        onClose={() => setInitOpen(false)}
-        title="Init repo"
-        icon="add"
-      >
+      <Dialog isOpen={initOpen} onClose={() => setInitOpen(false)} title="Init repo" icon="add">
         <DialogBody style={{ padding: "12px 16px 4px" }}>
           <InputGroup
             placeholder="Filter folders…"
@@ -228,9 +214,7 @@ export function RepoList() {
           >
             {(() => {
               const filtered = query
-                ? candidates.filter((c) =>
-                    c.name.toLowerCase().includes(query.toLowerCase()),
-                  )
+                ? candidates.filter((c) => c.name.toLowerCase().includes(query.toLowerCase()))
                 : candidates;
               if (filtered.length === 0) {
                 return <MenuItem disabled text="No folders found" roleStructure="listoption" />;
@@ -240,10 +224,7 @@ export function RepoList() {
                   key={`${item.workspace}/${item.name}`}
                   text={item.name}
                   label={item.workspace}
-                  active={
-                    selected?.name === item.name &&
-                    selected.workspace === item.workspace
-                  }
+                  active={selected?.name === item.name && selected.workspace === item.workspace}
                   onClick={() => setSelected(item)}
                   roleStructure="listoption"
                 />

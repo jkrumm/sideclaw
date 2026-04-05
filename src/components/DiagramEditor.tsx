@@ -27,21 +27,22 @@ const ExcalidrawComponent = React.lazy(() =>
   }),
 );
 
-export const DiagramEditor = React.forwardRef<DiagramEditorHandle, Props>(function DiagramEditor({
-  name,
-  initialData,
-  isDark,
-  onSave,
-  onStatusChange,
-}: Props, ref) {
+export const DiagramEditor = React.forwardRef<DiagramEditorHandle, Props>(function DiagramEditor(
+  { name, initialData, isDark, onSave, onStatusChange }: Props,
+  ref,
+) {
   const excalidrawAPIRef = useRef<ExcalidrawImperativeAPI | null>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Fingerprint of element ids+versions — changes only when actual drawing content changes,
   // not when the user scrolls/zooms/selects (appState-only changes).
   const elementsHashRef = useRef<string>("");
   const pendingSaveRef = useRef<{
-    elements: Parameters<NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>>[0];
-    appState: Parameters<NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>>[1];
+    elements: Parameters<
+      NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>
+    >[0];
+    appState: Parameters<
+      NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>
+    >[1];
     files: Parameters<NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>>[2];
   } | null>(null);
   const statusRef = useRef<SaveStatus>("idle");
@@ -59,7 +60,12 @@ export const DiagramEditor = React.forwardRef<DiagramEditorHandle, Props>(functi
 
   const parsedInitialData = useMemo(() => {
     if (!initialData) {
-      return { elements: [], appState: { viewBackgroundColor: "#ffffff" }, files: {}, scrollToContent: true };
+      return {
+        elements: [],
+        appState: { viewBackgroundColor: "#ffffff" },
+        files: {},
+        scrollToContent: true,
+      };
     }
     try {
       const parsed = JSON.parse(initialData) as {
@@ -116,6 +122,7 @@ export const DiagramEditor = React.forwardRef<DiagramEditorHandle, Props>(functi
         if (statusRef.current === "synced") setStatus("idle");
       }, 2000);
     } catch (err) {
+      // eslint-disable-next-line no-console -- browser-only error handler, structured logger unavailable in frontend
       console.error("[DiagramEditor] save failed:", err);
       setStatus("dirty");
     }
@@ -161,9 +168,15 @@ export const DiagramEditor = React.forwardRef<DiagramEditorHandle, Props>(functi
 
   const handleChange = useCallback(
     (
-      elements: Parameters<NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>>[0],
-      appState: Parameters<NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>>[1],
-      files: Parameters<NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>>[2],
+      elements: Parameters<
+        NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>
+      >[0],
+      appState: Parameters<
+        NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>
+      >[1],
+      files: Parameters<
+        NonNullable<React.ComponentProps<typeof ExcalidrawComponent>["onChange"]>
+      >[2],
     ) => {
       // Always keep pendingSaveRef current so appState (viewport) is included in the next save.
       pendingSaveRef.current = { elements, appState, files };
@@ -187,7 +200,9 @@ export const DiagramEditor = React.forwardRef<DiagramEditorHandle, Props>(functi
 
   // Flush on window blur, tab hide (app switch), or Cmd/Ctrl+S
   useEffect(() => {
-    const onVisibility = () => { if (document.hidden) flushSave(); };
+    const onVisibility = () => {
+      if (document.hidden) flushSave();
+    };
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();

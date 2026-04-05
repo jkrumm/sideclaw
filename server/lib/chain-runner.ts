@@ -18,10 +18,10 @@ export type JobStatus = "pending" | "running" | "pass" | "fail";
 
 export interface ChainJob {
   id: string;
-  skill: string;        // e.g. "/check" or "/pr create"
+  skill: string; // e.g. "/check" or "/pr create"
   worktreePath: string; // host path of target worktree
   status: JobStatus;
-  output: string[];     // accumulated stdout lines
+  output: string[]; // accumulated stdout lines
   startedAt: Date;
   completedAt?: Date;
   exitCode?: number;
@@ -39,7 +39,7 @@ function pruneJobs() {
   const completed = [...jobs.entries()].filter(([, j]) => j.status !== "running");
   if (completed.length <= MAX_COMPLETED_JOBS) return;
   completed
-    .sort((a, b) => (a[1].completedAt?.getTime() ?? 0) - (b[1].completedAt?.getTime() ?? 0))
+    .toSorted((a, b) => (a[1].completedAt?.getTime() ?? 0) - (b[1].completedAt?.getTime() ?? 0))
     .slice(0, completed.length - MAX_COMPLETED_JOBS)
     .forEach(([id]) => jobs.delete(id));
 }
@@ -98,10 +98,7 @@ export async function startJob(skill: string, worktreePath: string): Promise<str
 }
 
 async function runJob(job: ChainJob) {
-  const args: string[] = [
-    "-p", job.skill,
-    "--dangerously-skip-permissions",
-  ];
+  const args: string[] = ["-p", job.skill, "--dangerously-skip-permissions"];
 
   if (isPersonalRepo(job.worktreePath)) {
     args.push("--plugin-dir", PLUGIN_DIR);
@@ -166,21 +163,31 @@ function notify(job: ChainJob) {
     ? Math.round((job.completedAt.getTime() - job.startedAt.getTime()) / 1000)
     : 0;
 
-  const message = job.status === "pass"
-    ? `${skillLabel} passed (${elapsed}s)`
-    : `${skillLabel} failed — check sideclaw`;
+  const message =
+    job.status === "pass"
+      ? `${skillLabel} passed (${elapsed}s)`
+      : `${skillLabel} failed — check sideclaw`;
 
   const priority = job.status === "pass" ? "2" : "4";
   const tag = job.status === "pass" ? "white_check_mark" : "x";
 
-  Bun.spawnSync([
-    "ntfy-mac", "notify",
-    "-t", `sideclaw ${statusLabel}`,
-    "-m", message,
-    "-p", priority,
-    "--tag", tag,
-    "--url", "http://sideclaw.local",
-  ], { stderr: "ignore" });
+  Bun.spawnSync(
+    [
+      "ntfy-mac",
+      "notify",
+      "-t",
+      `sideclaw ${statusLabel}`,
+      "-m",
+      message,
+      "-p",
+      priority,
+      "--tag",
+      tag,
+      "--url",
+      "http://sideclaw.local",
+    ],
+    { stderr: "ignore" },
+  );
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -208,8 +215,12 @@ export function subscribeToJob(id: string): ReadableStream<string> | null {
         return;
       }
       // Register for live events
-      if (!subscribers.has(id)) subscribers.set(id, new Set());
-      subscribers.get(id)!.add(ctrl);
+      let subs = subscribers.get(id);
+      if (!subs) {
+        subs = new Set();
+        subscribers.set(id, subs);
+      }
+      subs.add(ctrl);
     },
     cancel(ctrl) {
       subscribers.get(id)?.delete(ctrl as SseController);

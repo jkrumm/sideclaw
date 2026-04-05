@@ -15,10 +15,7 @@ export const notesRoutes = new Elysia({ prefix: "/api" })
     const notesPath = join(toContainerPath(path), "sc-note.md");
 
     try {
-      const [content, stat] = await Promise.all([
-        Bun.file(notesPath).text(),
-        fs.stat(notesPath),
-      ]);
+      const [content, stat] = await Promise.all([Bun.file(notesPath).text(), fs.stat(notesPath)]);
       return { ok: true, data: content, modifiedAt: stat.mtimeMs } as const;
     } catch {
       return { ok: true, data: "", modifiedAt: 0 } as const;

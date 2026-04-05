@@ -36,10 +36,9 @@ export function insertCompleted(
   const now = Date.now();
 
   // Previous running task becomes done
-  db.run(
-    "UPDATE completed_tasks SET is_running = 0 WHERE repo_path = ? AND is_running = 1",
-    [repoPath],
-  );
+  db.run("UPDATE completed_tasks SET is_running = 0 WHERE repo_path = ? AND is_running = 1", [
+    repoPath,
+  ]);
 
   // Insert new task as running
   db.run(
@@ -58,16 +57,13 @@ export function insertCompleted(
 
 /** Mark all running tasks as done for a repo (queue emptied → no more work). */
 export function markAllDone(repoPath: string): void {
-  db.run(
-    "UPDATE completed_tasks SET is_running = 0 WHERE repo_path = ? AND is_running = 1",
-    [repoPath],
-  );
+  db.run("UPDATE completed_tasks SET is_running = 0 WHERE repo_path = ? AND is_running = 1", [
+    repoPath,
+  ]);
 }
 
 export function getCompleted(repoPath: string): CompletedTask[] {
-  db.run("DELETE FROM completed_tasks WHERE completed_at < ?", [
-    Date.now() - TWO_HOURS_MS,
-  ]);
+  db.run("DELETE FROM completed_tasks WHERE completed_at < ?", [Date.now() - TWO_HOURS_MS]);
 
   return db
     .query<CompletedTask, [string]>(

@@ -58,10 +58,8 @@ export async function getGithubData(
 
     // Resolve PR with checks + reviews
     let currentPR: PullRequest | null = null;
-    if (
-      prsResult.status === "fulfilled" &&
-      prsResult.value.data.length > 0
-    ) {
+    if (prsResult.status === "fulfilled" && prsResult.value.data.length > 0) {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- data.length > 0 checked above; TS doesn't narrow array index access from length guard
       const pr = prsResult.value.data[0]!;
 
       const [checksResult, reviewsResult] = await Promise.allSettled([
@@ -75,10 +73,7 @@ export async function getGithubData(
         checks.total = checkRuns.length;
         for (const run of checkRuns) {
           if (run.conclusion === "success") checks.passing++;
-          else if (
-            run.conclusion === "failure" ||
-            run.conclusion === "action_required"
-          )
+          else if (run.conclusion === "failure" || run.conclusion === "action_required")
             checks.failing++;
           else checks.pending++;
         }
@@ -94,10 +89,8 @@ export async function getGithubData(
           }
         }
         const states = [...latestByReviewer.values()];
-        if (states.some((s) => s === "CHANGES_REQUESTED"))
-          reviewDecision = "CHANGES_REQUESTED";
-        else if (states.some((s) => s === "APPROVED"))
-          reviewDecision = "APPROVED";
+        if (states.some((s) => s === "CHANGES_REQUESTED")) reviewDecision = "CHANGES_REQUESTED";
+        else if (states.some((s) => s === "APPROVED")) reviewDecision = "APPROVED";
         else reviewDecision = "REVIEW_REQUIRED";
       }
 
@@ -154,11 +147,7 @@ export async function getGithubData(
   }
 }
 
-export async function triggerRelease(
-  owner: string,
-  repo: string,
-  ref: string,
-): Promise<void> {
+export async function triggerRelease(owner: string, repo: string, ref: string): Promise<void> {
   if (!octokit) throw new Error("No GitHub token configured");
   await octokit.actions.createWorkflowDispatch({
     owner,
