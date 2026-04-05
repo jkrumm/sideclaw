@@ -28,6 +28,22 @@ tail -f /tmp/sideclaw.err   # stderr
 
 The LaunchAgent starts automatically on login and restarts on crash.
 
+## MCP Server
+
+sideclaw exposes workflow tools (check, review, ship) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
+
+Entry point: `server/mcp.ts`. Tools live in `server/mcp/tools/`, skill prompts in `server/skills/`.
+
+```bash
+# Register at user scope (one-time, already done)
+claude mcp add --scope user sideclaw -- bun run /Users/johannes.krumm/SourceRoot/sideclaw/server/mcp.ts
+
+# Logs (MCP process writes here)
+tail -f /tmp/sideclaw-mcp.log
+```
+
+Inner sessions spawned by MCP tools use `claude -p` with `--setting-sources user,project` and Max subscription billing (no API key). See `.claude/rules/mcp-tools.md` for authoring conventions.
+
 ## Git Workflow
 
 Direct-to-master repo — no PRs, no releases.

@@ -66,8 +66,8 @@ All flags for `claude -p` (non-interactive/headless mode). Current as of v2.1.88
 
 | Flag | Type | Default | Description |
 |-|-|-|-|
-| `--mcp-config` | string (path or JSON) | auto | Additional MCP server configurations. |
-| `--strict-mcp-config` | boolean | false | Only use MCP from `--mcp-config`, ignore all others. |
+| `--mcp-config` | string (path or JSON) | auto | Additional MCP server configurations. JSON must have `mcpServers` key — `{}` is invalid, use `'{"mcpServers": {}}'` for empty. |
+| `--strict-mcp-config` | boolean | false | Only use MCP from `--mcp-config`, ignore all others. Use with `--mcp-config '{"mcpServers": {}}'` to prevent inner sessions from loading any MCP servers (avoids circular MCP loops). |
 
 ## Streaming
 
