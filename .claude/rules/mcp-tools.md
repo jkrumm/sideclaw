@@ -112,6 +112,30 @@ Key requirements (already handled by the runner):
 - Delete `CLAUDE_SESSION_ID`, `CLAUDE_PARENT_SESSION_ID`, set `CLAUDE_ENTRYPOINT=worker`
 - `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used
 
+## Progress Heartbeat (timeout prevention)
+
+The MCP SDK has a **60-second default client timeout** (`DEFAULT_REQUEST_TIMEOUT_MSEC`). Any tool that spawns a `claude -p` session will exceed this. The session runner sends `notifications/progress` every 15 seconds to reset the client timeout.
+
+This is handled centrally — pass `onProgress: mcpProgressCallback(extra)` when calling `runSession()`:
+
+```typescript
+import { runSession, mcpProgressCallback } from "../session-runner.ts";
+
+// In the tool handler — accept `extra` as second arg:
+async ({ cwd }, extra) => {
+  const result = await runSession<MyOutput>({
+    cwd,
+    prompt,
+    // ...
+    onProgress: mcpProgressCallback(extra),
+  });
+};
+```
+
+`mcpProgressCallback()` checks for `_meta.progressToken` and returns `undefined` if the client didn't request progress (safe no-op). The heartbeat fires every 15s with elapsed time. Errors are caught silently (client may disconnect before the session ends).
+
+**Every tool that calls `runSession()` must pass `onProgress`.** Without it, the MCP client will time out after 60s and kill the server.
+
 ## Logging
 
 Use `logger` from `"../logger.ts"` (which resolves to `server/mcp/logger.ts` from tool files).

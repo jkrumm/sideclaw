@@ -183,9 +183,7 @@ const markdownKeymap = keymap.of([
 
 const editorTheme = EditorView.theme({
   ".cm-gutters": { display: "none" },
-  ".cm-content": { padding: "8px 12px" },
-  ".cm-editor": { height: "100%" },
-  ".cm-scroller": { overflow: "auto" },
+  ".cm-content": { padding: "8px 12px", minHeight: "120px" },
   "&.cm-focused": { outline: "none" },
   ".cm-hr-line": {
     position: "relative",
@@ -290,7 +288,6 @@ export function MarkdownEditor({ content, contentKey, onSave, placeholder }: Pro
       extensions={extensions}
       onChange={onChange}
       placeholder={placeholder ?? "Start writing..."}
-      height="100%"
       basicSetup={{
         lineNumbers: false,
         foldGutter: false,

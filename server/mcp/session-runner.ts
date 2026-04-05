@@ -18,6 +18,8 @@ export interface SessionOptions {
   jsonSchema?: object;
   maxTurns?: number;
   timeoutMs?: number;
+  /** Called every 15s while the subprocess runs. Use to send MCP progress notifications and reset client timeout. */
+  onProgress?: (progress: number, total: number, message: string) => void;
 }
 
 export interface SessionResult<T = unknown> {
@@ -37,6 +39,31 @@ interface ClaudeJsonEnvelope {
   session_id?: string;
   total_cost_usd?: number;
   num_turns?: number;
+}
+
+// ── Progress helper ────────────────────────────────────────────────────────────
+
+/** Minimal shape of the MCP tool handler `extra` param — avoids importing SDK types. */
+interface McpExtra {
+  _meta?: { progressToken?: string | number };
+  sendNotification: (notification: {
+    method: string;
+    params: Record<string, unknown>;
+  }) => Promise<void>;
+}
+
+/** Build an onProgress callback from MCP extra. Returns undefined if the client didn't request progress. */
+export function mcpProgressCallback(extra: McpExtra): SessionOptions["onProgress"] | undefined {
+  const token = extra._meta?.progressToken;
+  if (token === undefined) return undefined;
+  return (progress, total, message) => {
+    extra
+      .sendNotification({
+        method: "notifications/progress",
+        params: { progressToken: token, progress, total, message },
+      })
+      .catch(() => {}); // best-effort, don't crash if client disconnected
+  };
 }
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
@@ -95,6 +122,18 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
     env,
   });
 
+  // Progress heartbeat: keeps MCP client timeout alive during long-running sessions
+  const HEARTBEAT_INTERVAL_MS = 15_000;
+  let heartbeatTick = 0;
+  const { onProgress } = opts;
+  const heartbeatHandle = onProgress
+    ? setInterval(() => {
+        heartbeatTick++;
+        const elapsedSec = heartbeatTick * 15;
+        onProgress(heartbeatTick, 0, `Session running (${elapsedSec}s elapsed)`);
+      }, HEARTBEAT_INTERVAL_MS)
+    : null;
+
   // Two-stage timeout: SIGTERM → wait 5s → SIGKILL
   let timedOut = false;
   let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
@@ -120,6 +159,7 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
   if (sigkillTimer !== null) clearTimeout(sigkillTimer);
 
   const exitCode = await proc.exited;
+  if (heartbeatHandle !== null) clearInterval(heartbeatHandle);
   const stderrTrimmed = stderr.trim();
 
   if (stderrTrimmed) {

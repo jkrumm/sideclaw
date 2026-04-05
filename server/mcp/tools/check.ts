@@ -2,7 +2,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { runSession } from "../session-runner.ts";
+import { runSession, mcpProgressCallback } from "../session-runner.ts";
 import { logger } from "../logger.ts";
 
 // ── Output schema — single source of truth ────────────────────────────────────
@@ -70,7 +70,7 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
         idempotentHint: true,
       },
     },
-    async ({ cwd }) => {
+    async ({ cwd }, extra) => {
       if (!existsSync(cwd)) {
         return {
           content: [
@@ -100,6 +100,7 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
         jsonSchema: CHECK_JSON_SCHEMA,
         maxTurns: 30,
         timeoutMs: 10 * 60 * 1000,
+        onProgress: mcpProgressCallback(extra),
       });
 
       if (!result.ok) {
