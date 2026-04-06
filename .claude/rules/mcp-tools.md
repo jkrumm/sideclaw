@@ -136,6 +136,8 @@ async ({ cwd }, extra) => {
 
 **Every tool that calls `runSession()` must pass `onProgress`.** Without it, the MCP client will time out after 60s and kill the server.
 
+**Exception — parallel sessions:** Tools that spawn multiple `runSession()` calls in parallel (e.g., `review.ts`) may use a centralized handler-level heartbeat instead of per-session `onProgress`. Create a `setInterval(15_000)` that sends `notifications/progress` via `mcpProgressCallback(extra)`, wrap the entire pipeline in `try-finally` to guarantee cleanup, and document the pattern in a code comment.
+
 ## Logging
 
 Use `logger` from `"../logger.ts"` (which resolves to `server/mcp/logger.ts` from tool files).
