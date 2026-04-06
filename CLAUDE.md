@@ -34,6 +34,17 @@ sideclaw exposes workflow tools (check, review, ship) as an MCP server — a **s
 
 Entry point: `server/mcp.ts`. Tools live in `server/mcp/tools/`, skill prompts in `server/skills/`.
 
+### Review Tool — Multi-Angle Pipeline
+
+The `review` tool runs a 3-phase parallel pipeline (see `server/skills/review/README.md` for full docs):
+
+1. **Data gathering** (parallel): git diff, fallow audit, CodeRabbit CLI
+2. **Angle reviews** (parallel haiku sessions): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
+3. **Synthesis** (sonnet): deduplicates, classifies into `blocking` / `improvements` / `discussions` / `testGaps`
+
+Output `outcome`: `"clean"` (ship it), `"actionable"` (apply fixes), `"needs-human"` (has discussions).
+Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fetches `elysiajs.com/llms.txt`.
+
 ```bash
 # Register at user scope (one-time, already done)
 claude mcp add --scope user sideclaw -- bun run /Users/johannes.krumm/SourceRoot/sideclaw/server/mcp.ts
