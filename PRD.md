@@ -118,7 +118,7 @@ interface QueueTask {
 }
 ```
 
-`parse-queue.ts` lives in `sideclaw/server/lib/` and is used only by the web server. The `cq` CLI (`scripts/queue.ts` in claude-local) remains a separate implementation — sharing the parser module is not worth the coupling given they live in different scopes.
+`parse-queue.ts` lives in `sideclaw/server/lib/` and is used only by the web server. The `cq` CLI (`scripts/queue.ts` in dotfiles) remains a separate implementation — sharing the parser module is not worth the coupling given they live in different scopes.
 
 ---
 
@@ -255,7 +255,7 @@ EasyMDE with:
 ## Docker Setup
 
 ```
-claude-local/sideclaw/
+dotfiles/sideclaw/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── Makefile

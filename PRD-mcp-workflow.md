@@ -2,7 +2,7 @@
 
 ## Problem
 
-Claude Code skills today are scattered across `claude-local/skills/` with no enforcement layer. Any Claude Code session can bypass workflow rules, skip validation, or produce inconsistent output. Specific issues:
+Claude Code skills today are scattered across `dotfiles/skills/` with no enforcement layer. Any Claude Code session can bypass workflow rules, skip validation, or produce inconsistent output. Specific issues:
 
 - **No structured output** — skills return free-text, making programmatic consumption unreliable
 - **No lifecycle tracking** — no way to know if a workflow is pending, running, waiting for input, or done
@@ -10,11 +10,11 @@ Claude Code skills today are scattered across `claude-local/skills/` with no enf
 - **No enforcement** — skills are advisory; sessions can run raw git/gh commands directly
 - **Naming inconsistencies** — browse vs chrome, otel vs observe, read-drawing vs read-diagram
 - **Missing metadata** — skills that should run in isolation lack `context: fork` declarations. Model references are inconsistent across skills.
-- **Duplicate maintenance** — skills in claude-local serve both as instructions and execution, with no separation
+- **Duplicate maintenance** — skills in dotfiles serve both as instructions and execution, with no separation
 
 ## Solution
 
-Sideclaw becomes the **workflow gateway** via an MCP server. Workflow skills (check, review, ship and sub-skills) move from claude-local into sideclaw, exposed as MCP tools with structured output contracts, lifecycle states, and HITL gates.
+Sideclaw becomes the **workflow gateway** via an MCP server. Workflow skills (check, review, ship and sub-skills) move from dotfiles into sideclaw, exposed as MCP tools with structured output contracts, lifecycle states, and HITL gates.
 
 ### Architecture (proven in Phase 1)
 
@@ -60,7 +60,7 @@ Every MCP tool accepts `cwd` as the target repo path. The calling Claude Code se
 
 ## Non-Goals
 
-- Replacing non-workflow skills (grill, implement, ralph, research, etc.) — those stay in claude-local
+- Replacing non-workflow skills (grill, implement, ralph, research, etc.) — those stay in dotfiles
 - Building a full agent orchestration framework — this is a thin wrapper, not claude-flow
 - Multi-user or remote access — local only, single user
 - Replacing the sideclaw dashboard — MCP is a parallel interface, not a replacement
@@ -120,7 +120,7 @@ bun add @modelcontextprotocol/sdk zod pino
 
 **Deliverables:**
 - `server/mcp/tools/review.ts` — follow check.ts patterns exactly
-- `server/skills/review.md` — migrated from claude-local, adapted for structured JSON
+- `server/skills/review.md` — migrated from dotfiles, adapted for structured JSON
 - Validation: run against a repo with known issues, verify structured findings
 
 ---
@@ -193,9 +193,9 @@ bun add @modelcontextprotocol/sdk zod pino
 
 ## Phase 4: Skill Cleanup & Migration
 
-**Goal:** Rename inconsistent skills, fix metadata, remove duplicates from claude-local, update all references.
+**Goal:** Rename inconsistent skills, fix metadata, remove duplicates from dotfiles, update all references.
 
-**Renames in claude-local:**
+**Renames in dotfiles:**
 
 | Current | New | Reason |
 |-|-|-|
@@ -205,12 +205,12 @@ bun add @modelcontextprotocol/sdk zod pino
 | `git-cleanup` | `commit-cleanup` | Matches diagram and ship workflow |
 | `code-quality` | (delete) | Deprecated, replaced by MCP check |
 
-**Metadata fixes in claude-local:**
+**Metadata fixes in dotfiles:**
 - Add `context: fork` to: analyze, read-diagram, observe
 - Fix model references where inconsistent
 - Update cross-references to use new skill names
 
-**Removals from claude-local (now MCP-only via sideclaw):**
+**Removals from dotfiles (now MCP-only via sideclaw):**
 - `check/`, `review/`, `ship/`, `commit/`, `pr/`, `git-cleanup/`
 
 **Reference updates:**
@@ -249,8 +249,8 @@ bun add @modelcontextprotocol/sdk zod pino
 1. Claude Code session in any repo can call check, review, or ship via MCP and get structured results
 2. Ship workflow pauses for human input and resumes correctly via context injection
 3. Ship detects repo workflow rules and chooses direct-to-master vs PR automatically
-4. No workflow skills remain in claude-local — MCP is the single path
-5. All remaining claude-local skills have correct names, metadata, and cross-references
+4. No workflow skills remain in dotfiles — MCP is the single path
+5. All remaining dotfiles skills have correct names, metadata, and cross-references
 6. Sideclaw dashboard can trigger and monitor workflows with HITL interaction
 
 ## Technical Risks

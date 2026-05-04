@@ -79,15 +79,15 @@ Each agent loads project context via `--setting-sources user,project`:
 ### Framework-Specific Rules
 
 **Frontend Expert** loads (when triggered):
-- `claude-local/rules/react-best-practices.md` — 69 Vercel React rules
-- `claude-local/rules/tanstack-query.md` — query keys, caching, mutations
-- `claude-local/rules/tanstack-router.md` — type-safe routing, loaders
-- `claude-local/rules/tanstack-start.md` — server functions, SSR, middleware
+- `dotfiles/rules/react-best-practices.md` — 69 Vercel React rules
+- `dotfiles/rules/tanstack-query.md` — query keys, caching, mutations
+- `dotfiles/rules/tanstack-router.md` — type-safe routing, loaders
+- `dotfiles/rules/tanstack-start.md` — server functions, SSR, middleware
 
 **Backend Expert** loads (when triggered):
-- `claude-local/rules/elysia.md` — method chaining, encapsulation, validation
+- `dotfiles/rules/elysia.md` — method chaining, encapsulation, validation
 - `elysiajs.com/llms.txt` — fetched live for latest API patterns
-- Selective reference files from `claude-local/reference/elysia/` based on what the diff touches
+- Selective reference files from `dotfiles/reference/elysia/` based on what the diff touches
 
 ## Cost Profile
 

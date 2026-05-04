@@ -18,9 +18,9 @@ If no changes found, return `{ "findings": [] }`.
 ### Elysia-specific rules
 
 If Elysia is detected:
-1. Read the Elysia index rules — glob for `elysia.md` in the user's rules directory (typically `~/.claude/rules/` or a `claude-local/rules/` path)
+1. Read the Elysia index rules — glob for `elysia.md` in the user's rules directory (typically `~/.claude/rules/` or a `dotfiles/rules/` path)
 2. Fetch `https://elysiajs.com/llms.txt` for the latest API patterns and recommendations
-3. Read relevant reference files from `~/SourceRoot/claude-local/reference/elysia/`:
+3. Read relevant reference files from `~/SourceRoot/dotfiles/reference/elysia/`:
    - If changes touch routes → read `references/route.md`
    - If changes touch validation/schemas → read `references/validation.md`
    - If changes touch middleware/hooks → read `references/lifecycle.md`

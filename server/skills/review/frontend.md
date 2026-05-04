@@ -11,7 +11,7 @@ If no changes found, return `{ "findings": [] }`.
 1. Read `CLAUDE.md` at the repo root for framework/styling conventions
 2. Scan `.claude/rules/` for relevant rules
 3. **Read the frontend reference rules** — these contain detailed patterns with code examples:
-   - Glob for `react-best-practices.md` in the user's rules directory (typically `~/.claude/rules/` or a `claude-local/rules/` path)
+   - Glob for `react-best-practices.md` in the user's rules directory (typically `~/.claude/rules/` or a `dotfiles/rules/` path)
    - Glob for `tanstack-query.md`, `tanstack-router.md`, `tanstack-start.md` if the project uses TanStack
    - If any of these files reference a `reference/` or `references/` subdirectory, read those files too
    - Detection: check `package.json` dependencies for `@tanstack/react-query`, `@tanstack/react-router`, `@tanstack/start`
