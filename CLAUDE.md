@@ -8,6 +8,22 @@ Served on `http://sideclaw.local` (localias proxy → port 7705).
 Bun loads `.env` automatically from the `sideclaw/` directory — all env vars
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`) live there.
 
+### GitHub API caching
+
+All Octokit calls go through an ETag + soft-TTL cache installed as request
+hooks (`server/lib/github-cache.ts`). Two layers:
+
+1. **Soft-TTL fan-out (10s default, 5min for `/contents/`)** — repeat
+   requests within the window return cached data without touching GitHub.
+2. **ETag revalidation** — past soft-TTL, `If-None-Match` is sent;
+   304 responses are converted back to cached payloads (free against the
+   primary 5,000/hr rate limit).
+
+Cache keys are the fully resolved request URL (`octokit.request.endpoint()`),
+so per-repo isolation is enforced. Frontend polling (`GitPanel.tsx`) runs at
+30s and pauses while the tab is hidden. Observe via
+`jq 'select(.event | startswith("github.cache"))' /tmp/sideclaw.jsonl`.
+
 ## Running sideclaw
 
 **sideclaw runs exclusively via LaunchAgent. Never start it standalone.**

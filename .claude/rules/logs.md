@@ -38,6 +38,8 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `session.end` | mcp | Session completed successfully (carries `costUsd`, `turns`, `durationMs`) |
 | `session.timeout` | mcp | Session hit timeout |
 | `session.error` | mcp | Session returned `is_error` or produced no output |
+| `github.cache.hit` | app | Octokit request served from cache (carries `kind: "soft" \| "304"`, `url`) |
+| `github.cache.miss` | app | Octokit response stored to cache (carries `url`, `status`) |
 
 ## Query patterns
 
