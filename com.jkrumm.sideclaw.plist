@@ -12,7 +12,7 @@
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/johannes.krumm/SourceRoot/sideclaw</string>
+  <string>/Users/jkrumm/SourceRoot/sideclaw</string>
 
   <!-- Bun auto-loads .env from WorkingDirectory — no need to repeat vars here -->
 
