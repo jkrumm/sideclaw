@@ -1,5 +1,6 @@
 import { Octokit } from "@octokit/rest";
 import { appLogger as logger } from "../logger.ts";
+import { installEtagCache } from "./github-cache.ts";
 
 // Silence the built-in request-log plugin — 404s for repos without releases
 // are expected and handled via allSettled; real errors bubble to our catch.
@@ -9,6 +10,8 @@ const octokit = process.env.GITHUB_TOKEN
       log: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
     })
   : null;
+
+if (octokit) installEtagCache(octokit);
 
 export interface PullRequest {
   number: number;

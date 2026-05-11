@@ -1112,10 +1112,36 @@ export function GitPanel({ repoPath, initialPromise, ref }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 15s polling
+  // 30s polling, paused while the tab is hidden. Refreshes immediately on
+  // return-to-visible so a wake-up doesn't have to wait a full interval.
   useEffect(() => {
-    const id = setInterval(refresh, 15_000);
-    return () => clearInterval(id);
+    let id: ReturnType<typeof setInterval> | null = null;
+
+    const start = () => {
+      if (id !== null) return;
+      id = setInterval(refresh, 30_000);
+    };
+    const stop = () => {
+      if (id === null) return;
+      clearInterval(id);
+      id = null;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        refresh();
+        start();
+      } else {
+        stop();
+      }
+    };
+
+    if (document.visibilityState === "visible") start();
+    document.addEventListener("visibilitychange", onVisibility);
+
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [refresh]);
 
   if (!gitStatus) return null;
