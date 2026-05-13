@@ -1,9 +1,10 @@
 import { existsSync } from "fs";
+import { homedir } from "os";
 import { join } from "path";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const HOME = process.env.HOME ?? "/Users/johannes.krumm";
+const HOME = process.env.HOME ?? homedir();
 const PERSONAL_REPOS_PATH = process.env.PERSONAL_REPOS_PATH ?? "";
 const PLUGIN_DIR = join(HOME, "SourceRoot/.claude");
 

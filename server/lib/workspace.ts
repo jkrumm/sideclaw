@@ -2,7 +2,7 @@ import { basename } from "path";
 
 interface Workspace {
   name: string; // "SourceRoot" — derived from env var basename
-  root: string; // host path: "/Users/johannes.krumm/SourceRoot"
+  root: string; // host path: "~/SourceRoot"
 }
 
 function buildWorkspaces(): Workspace[] {

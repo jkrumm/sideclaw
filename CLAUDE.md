@@ -62,8 +62,9 @@ Output `outcome`: `"clean"` (ship it), `"actionable"` (apply fixes), `"needs-hum
 Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fetches `elysiajs.com/llms.txt`.
 
 ```bash
-# Register at user scope (one-time, already done)
-claude mcp add --scope user sideclaw -- bun run /Users/johannes.krumm/SourceRoot/sideclaw/server/mcp.ts
+# Register at user scope — handled by `make setup` in ~/SourceRoot/dotfiles.
+# Manual fallback:
+claude mcp add --scope user sideclaw -- bun run "$HOME/SourceRoot/sideclaw/server/mcp.ts"
 
 # Structured logs (both HTTP + MCP processes write here)
 tail -f /tmp/sideclaw.jsonl | jq .
