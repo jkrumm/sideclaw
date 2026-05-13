@@ -63,6 +63,12 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
           .describe(
             "Absolute path to the git repo root to validate. Must be an existing git repository. Supports git worktrees.",
           ),
+        authMode: z
+          .enum(["max", "iu", "auto"])
+          .optional()
+          .describe(
+            'Auth strategy for the spawned worker. "max" = inherit parent Max subscription. "iu" = route to the IU-hosted Anthropic-compatible endpoint via keychain creds. "auto" (default) = pick "iu" when Max quota >= 70% (per /tmp/claude_sl/usage_api.json), else "max".',
+          ),
       },
       outputSchema: CHECK_OUTPUT.shape,
       annotations: {
@@ -70,7 +76,7 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
         idempotentHint: true,
       },
     },
-    async ({ cwd }, extra) => {
+    async ({ cwd, authMode }, extra) => {
       if (!existsSync(cwd)) {
         return {
           content: [
@@ -100,6 +106,7 @@ STEPS: only runs scripts present in package.json — skips unavailable ones sile
         jsonSchema: CHECK_JSON_SCHEMA,
         maxTurns: 30,
         timeoutMs: 10 * 60 * 1000,
+        authMode: authMode ?? "auto",
         onProgress: mcpProgressCallback(extra),
       });
 

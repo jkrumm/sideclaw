@@ -1,6 +1,7 @@
-import { existsSync } from "fs";
+import { existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { resolveAuthMode, type AuthMode, type ResolvedAuthMode } from "../lib/quota.ts";
 import { logger } from "./logger.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -8,6 +9,8 @@ import { logger } from "./logger.ts";
 const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
   ? join(homedir(), ".local/bin/claude")
   : "claude";
+
+const CLAUDE_OFFLOAD_DIR = join(homedir(), ".claude-offload");
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -18,6 +21,15 @@ export interface SessionOptions {
   jsonSchema?: object;
   maxTurns?: number;
   timeoutMs?: number;
+  /**
+   * Auth strategy for the spawned worker.
+   * - `"max"`: inherit parent Max subscription (no env injection).
+   * - `"iu"`: inject ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL + CLAUDE_CONFIG_DIR
+   *   to route to the custom IU-hosted Anthropic-compatible endpoint.
+   * - `"auto"` (default): consult `/tmp/claude_sl/usage_api.json`; pick `iu` when
+   *   peak 5h/7d utilization >= 70%, else `max`. Missing/stale cache → `max`.
+   */
+  authMode?: AuthMode;
   /** Called every 15s while the subprocess runs. Use to send MCP progress notifications and reset client timeout. */
   onProgress?: (progress: number, total: number, message: string) => void;
 }
@@ -66,6 +78,69 @@ export function mcpProgressCallback(extra: McpExtra): SessionOptions["onProgress
   };
 }
 
+// ── Keychain helpers ───────────────────────────────────────────────────────────
+
+async function readKeychain(service: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["security", "find-generic-password", "-s", service, "-w"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    if (exitCode !== 0) return null;
+    const trimmed = stdout.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  } catch (err) {
+    logger.error(
+      { event: "keychain.read_fail", service, error: String(err) },
+      "keychain read threw",
+    );
+    return null;
+  }
+}
+
+// ── IU env injection ───────────────────────────────────────────────────────────
+
+interface IuEnv {
+  ANTHROPIC_AUTH_TOKEN: string;
+  ANTHROPIC_BASE_URL: string;
+  CLAUDE_CONFIG_DIR: string;
+}
+
+async function buildIuEnv(): Promise<IuEnv | null> {
+  const [token, baseUrl] = await Promise.all([
+    readKeychain("claude-sdk-api-key"),
+    readKeychain("claude-sdk-base-url"),
+  ]);
+  if (!token || !baseUrl) {
+    logger.error(
+      {
+        event: "iu_env.unavailable",
+        hasToken: !!token,
+        hasBaseUrl: !!baseUrl,
+      },
+      "IU keychain entries missing — falling back to max",
+    );
+    return null;
+  }
+  try {
+    if (!existsSync(CLAUDE_OFFLOAD_DIR)) {
+      mkdirSync(CLAUDE_OFFLOAD_DIR, { recursive: true });
+    }
+  } catch (err) {
+    logger.error(
+      { event: "iu_env.dir_create_fail", dir: CLAUDE_OFFLOAD_DIR, error: String(err) },
+      "failed to create CLAUDE_CONFIG_DIR — falling back to max",
+    );
+    return null;
+  }
+  return {
+    ANTHROPIC_AUTH_TOKEN: token,
+    ANTHROPIC_BASE_URL: baseUrl,
+    CLAUDE_CONFIG_DIR: CLAUDE_OFFLOAD_DIR,
+  };
+}
+
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
 export async function runSession<T = unknown>(opts: SessionOptions): Promise<SessionResult<T>> {
@@ -76,6 +151,7 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
     jsonSchema,
     maxTurns = 30,
     timeoutMs = 10 * 60 * 1000,
+    authMode = "auto",
   } = opts;
 
   const args: string[] = [
@@ -99,19 +175,48 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
     args.push("--json-schema", JSON.stringify(jsonSchema));
   }
 
-  // Env hygiene: strip parent session identifiers, mark as worker
+  // Resolve auth mode (auto → max/iu based on quota cache) and build env.
+  const resolved = await resolveAuthMode(authMode);
+  let resolvedMode: ResolvedAuthMode = resolved.mode;
+  let authReason = resolved.reason;
+
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined) env[k] = v;
   }
+
+  if (resolvedMode === "iu") {
+    const iuEnv = await buildIuEnv();
+    if (iuEnv) {
+      env.ANTHROPIC_AUTH_TOKEN = iuEnv.ANTHROPIC_AUTH_TOKEN;
+      env.ANTHROPIC_BASE_URL = iuEnv.ANTHROPIC_BASE_URL;
+      env.CLAUDE_CONFIG_DIR = iuEnv.CLAUDE_CONFIG_DIR;
+      // Defensive: ANTHROPIC_API_KEY would be rejected by claude v2.x ("Not logged in"),
+      // and any inherited value would shadow ANTHROPIC_AUTH_TOKEN.
+      delete env.ANTHROPIC_API_KEY;
+    } else {
+      // Keychain or dir setup failed — fall back to max rather than crash.
+      resolvedMode = "max";
+      authReason = `${authReason}; iu setup failed — fell back to max`;
+    }
+  }
+  // For "max" mode: no env injection — preserves Max subscription billing via inherited OAuth.
+
   delete env.CLAUDE_SESSION_ID;
   delete env.CLAUDE_PARENT_SESSION_ID;
   env.CLAUDE_ENTRYPOINT = "worker";
-  // No ANTHROPIC_API_KEY — preserves Max subscription billing
 
   const startMs = performance.now();
   logger.info(
-    { event: "session.spawn", project: cwd, model, maxTurns, jsonSchema: !!jsonSchema },
+    {
+      event: "session.spawn",
+      project: cwd,
+      model,
+      maxTurns,
+      jsonSchema: !!jsonSchema,
+      authMode: resolvedMode,
+      authReason,
+    },
     "session spawn",
   );
 

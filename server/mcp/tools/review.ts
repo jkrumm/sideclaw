@@ -3,6 +3,7 @@ import { join } from "path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { runSession, mcpProgressCallback } from "../session-runner.ts";
+import type { AuthMode } from "../../lib/quota.ts";
 import { logger } from "../logger.ts";
 
 // ── Output schema — single source of truth ────────────────────────────────────
@@ -231,6 +232,12 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
           .describe(
             'Factual description of the changes\' intent (e.g. "add MCP review tool"). Helps catch goal-mismatch bugs. Omit if the diff is self-explanatory.',
           ),
+        authMode: z
+          .enum(["max", "iu", "auto"])
+          .optional()
+          .describe(
+            'Auth strategy for spawned workers. "max" = inherit parent Max subscription. "iu" = route to the IU-hosted Anthropic-compatible endpoint via keychain creds. "auto" (default) = pick "iu" when Max quota >= 70% (per /tmp/claude_sl/usage_api.json), else "max".',
+          ),
       },
       outputSchema: REVIEW_OUTPUT.shape,
       annotations: {
@@ -238,7 +245,8 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
         idempotentHint: true,
       },
     },
-    async ({ cwd, scope, context }, extra) => {
+    async ({ cwd, scope, context, authMode }, extra) => {
+      const resolvedAuthMode: AuthMode = authMode ?? "auto";
       if (!existsSync(cwd)) {
         return {
           content: [
@@ -386,6 +394,7 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
             jsonSchema: ANGLE_JSON_SCHEMA,
             maxTurns: 10,
             timeoutMs: 5 * 60 * 1000,
+            authMode: resolvedAuthMode,
           });
 
           if (!result.ok) {
@@ -437,6 +446,7 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
           jsonSchema: REVIEW_JSON_SCHEMA,
           maxTurns: 5,
           timeoutMs: 5 * 60 * 1000,
+          authMode: resolvedAuthMode,
         });
 
         if (!synthesisResult.ok) {
