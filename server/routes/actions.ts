@@ -1,6 +1,7 @@
 import { Elysia, t } from "elysia";
 import { startJob, getJob, subscribeToJob } from "../lib/chain-runner";
 import { toContainerPath } from "../lib/workspace";
+import { gitDisabled } from "../lib/feature-flags";
 
 // ── Git operations ────────────────────────────────────────────────────────────
 
@@ -105,10 +106,14 @@ export const actionsRoutes = new Elysia({ prefix: "/api/actions" })
   // Start a Claude skill chain job
   .post(
     "/chain",
-    async ({ body }) => {
+    async ({ body, set }) => {
+      if (gitDisabled) {
+        set.status = 503;
+        return { ok: false as const, error: "Git integration disabled" };
+      }
       const hostPath = toContainerPath(body.worktreePath);
       const jobId = await startJob(body.skill, hostPath);
-      return { ok: true, jobId };
+      return { ok: true as const, jobId };
     },
     {
       body: t.Object({
@@ -145,6 +150,10 @@ export const actionsRoutes = new Elysia({ prefix: "/api/actions" })
   .post(
     "/git",
     async ({ body, set }) => {
+      if (gitDisabled) {
+        set.status = 503;
+        return { ok: false, error: "Git integration disabled" };
+      }
       const hostPath = toContainerPath(body.worktreePath);
       let result: GitOpResult;
 

@@ -20,6 +20,8 @@ import type { QueuePanelHandle } from "../components/QueuePanel";
 import type { NotesPanelHandle } from "../components/NotesPanel";
 import type { GitStatus, RepoData } from "../types";
 
+const GIT_DISABLED = import.meta.env.VITE_SIDECLAW_GIT_DISABLED === "true";
+
 async function fetchRepoData(path: string): Promise<RepoData> {
   const res = await fetch(`/api/repo?path=${encodeURIComponent(path)}`);
   const json = (await res.json()) as { ok: boolean; data: RepoData };
@@ -80,7 +82,12 @@ function RepoDashboardInner() {
     [repoPath],
   );
   const gitPromise = useMemo(
-    () => (repoPath ? fetchGitData(repoPath) : Promise.reject(new Error("No path"))),
+    () =>
+      GIT_DISABLED
+        ? Promise.resolve(null)
+        : repoPath
+          ? fetchGitData(repoPath)
+          : Promise.reject(new Error("No path")),
     [repoPath],
   );
 
@@ -125,7 +132,7 @@ function RepoDashboardInner() {
         }
         // Refresh panels to catch any events missed during a disconnect gap
         queueRef.current?.refresh();
-        gitRef.current?.refresh();
+        if (!GIT_DISABLED) gitRef.current?.refresh();
         resetWatchdog(evtSource);
       });
 
@@ -222,9 +229,11 @@ function RepoDashboardInner() {
           padding: 24,
         }}
       >
-        <Suspense fallback={<PanelSkeleton height={100} />}>
-          <GitPanel key={repoPath} ref={gitRef} repoPath={repoPath} initialPromise={gitPromise} />
-        </Suspense>
+        {!GIT_DISABLED && (
+          <Suspense fallback={<PanelSkeleton height={100} />}>
+            <GitPanel key={repoPath} ref={gitRef} repoPath={repoPath} initialPromise={gitPromise} />
+          </Suspense>
+        )}
         <Suspense fallback={<PanelSkeleton height={160} />}>
           <QueuePanel
             key={repoPath}

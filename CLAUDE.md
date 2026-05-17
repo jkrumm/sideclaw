@@ -24,6 +24,13 @@ so per-repo isolation is enforced. Frontend polling (`GitPanel.tsx`) runs at
 30s and pauses while the tab is hidden. Observe via
 `jq 'select(.event | startswith("github.cache"))' /tmp/sideclaw.jsonl`.
 
+### Disabling the GitPanel
+
+Set `SIDECLAW_GIT_DISABLED=true` + `VITE_SIDECLAW_GIT_DISABLED=true` in `.env`
+to turn off the whole git surface — GitPanel doesn't render, `/api/repo/git`
+and `/api/github` return `data: null`, and `/api/actions/{chain,git}` return
+503. Use this when GitHub rate-limit pressure outweighs the dashboard value.
+
 ## Running sideclaw
 
 **sideclaw runs exclusively via LaunchAgent. Never start it standalone.**

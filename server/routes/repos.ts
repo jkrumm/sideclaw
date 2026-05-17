@@ -6,6 +6,7 @@ import { scanRepos } from "../lib/repo-scanner";
 import { parseQueue } from "../lib/parse-queue";
 import { getGitStatus } from "../lib/git";
 import { toContainerPath, toDisplayPath, WORKSPACES } from "../lib/workspace";
+import { gitDisabled } from "../lib/feature-flags";
 
 async function ensureFile(filePath: string): Promise<string> {
   if (!existsSync(filePath)) {
@@ -88,6 +89,8 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
     return { ok: true };
   })
   .get("/repo/git", async ({ query, set }) => {
+    if (gitDisabled) return { ok: true, data: null };
+
     const path = query.path;
     if (!path) {
       set.status = 400;
