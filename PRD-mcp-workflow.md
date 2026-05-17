@@ -162,9 +162,10 @@ bun add @modelcontextprotocol/sdk zod pino
 
 **Smart workflow detection:**
 1. Read repo's `.claude/rules/` for git-workflow declarations
-2. Check CLAUDE.md for direct-to-master repo lists
-3. Accept caller hints as override
-4. Default to PR flow if no signal found
+2. Check CLAUDE.md for the PR-required denylist (default is direct-to-master)
+3. Treat any repo under `~/IuRoot/` as PR-required (against `main`)
+4. Accept caller hints as override
+5. Default to direct-to-master if no signal found
 
 **Ship sub-workflows (internal, not separate MCP tools):**
 - **Commit**: detect uncommitted changes, generate conventional commit
