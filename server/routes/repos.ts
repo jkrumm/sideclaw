@@ -6,7 +6,7 @@ import { scanRepos } from "../lib/repo-scanner";
 import { parseQueue } from "../lib/parse-queue";
 import { getGitStatus } from "../lib/git";
 import { toContainerPath, toDisplayPath, WORKSPACES } from "../lib/workspace";
-import { gitDisabled } from "../lib/feature-flags";
+import { gitDisabled, queueDisabled } from "../lib/feature-flags";
 
 async function ensureFile(filePath: string): Promise<string> {
   if (!existsSync(filePath)) {
@@ -65,7 +65,9 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
       if (!existsSync(repoPath)) {
         await fs.mkdir(repoPath, { recursive: true });
       }
-      await Bun.write(join(repoPath, "sc-queue.md"), "");
+      if (!queueDisabled) {
+        await Bun.write(join(repoPath, "sc-queue.md"), "");
+      }
       await Bun.write(join(repoPath, "sc-note.md"), `# ${name} — Notes\n`);
       return { ok: true as const, data: { name, path: toDisplayPath(repoPath) } };
     },
@@ -123,18 +125,18 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
     const notesPath = join(containerPath, "sc-note.md");
 
     const [queueRaw, notes, notesStat] = await Promise.all([
-      ensureFile(queuePath),
+      queueDisabled ? Promise.resolve("") : ensureFile(queuePath),
       ensureFile(notesPath),
       fs.stat(notesPath).catch(() => null),
     ]);
 
-    const queue = parseQueue(queueRaw);
+    const queue = queueDisabled ? [] : parseQueue(queueRaw);
 
     const repo = {
       name: path.split("/").pop() ?? path,
       path,
       containerPath,
-      hasQueue: existsSync(queuePath),
+      hasQueue: queueDisabled ? false : existsSync(queuePath),
       hasNotes: existsSync(notesPath),
     };
 

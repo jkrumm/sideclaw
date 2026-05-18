@@ -31,6 +31,15 @@ to turn off the whole git surface — GitPanel doesn't render, `/api/repo/git`
 and `/api/github` return `data: null`, and `/api/actions/{chain,git}` return
 503. Use this when GitHub rate-limit pressure outweighs the dashboard value.
 
+### Disabling the QueuePanel
+
+Set `SIDECLAW_QUEUE_DISABLED=true` + `VITE_SIDECLAW_QUEUE_DISABLED=true` in
+`.env` to turn off the whole queue surface — QueuePanel doesn't render, `GET
+/api/queue` and `/api/completed-tasks` return empty arrays, `PUT /api/queue`
+returns 503, `/api/repo` returns `queue: []`, the SSE watcher skips
+`sc-queue.md`, and repo init no longer creates the file. Use this when the
+task-queue workflow (Stop-hook injection from dotfiles) isn't in play.
+
 ## Running sideclaw
 
 **sideclaw runs exclusively via LaunchAgent. Never start it standalone.**

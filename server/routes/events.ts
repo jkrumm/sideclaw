@@ -5,6 +5,7 @@ import { join } from "path";
 import { toContainerPath } from "../lib/workspace";
 import { subscribeDiagrams } from "../lib/diagram-bus";
 import { getNotesWriteSource } from "../lib/notes-bus";
+import { queueDisabled } from "../lib/feature-flags";
 
 // Stable identity for this process lifetime.
 // Clients compare this on reconnect — a change means the server restarted
@@ -44,7 +45,7 @@ export const eventsRoutes = new Elysia({ prefix: "/api" }).get(
 
     const watchers: ReturnType<typeof watch>[] = [];
 
-    if (existsSync(queuePath)) {
+    if (!queueDisabled && existsSync(queuePath)) {
       watchers.push(watch(queuePath, () => push({ file: "queue" })));
     }
     if (existsSync(notesPath)) {

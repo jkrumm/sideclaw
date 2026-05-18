@@ -21,6 +21,7 @@ import type { NotesPanelHandle } from "../components/NotesPanel";
 import type { GitStatus, RepoData } from "../types";
 
 const GIT_DISABLED = import.meta.env.VITE_SIDECLAW_GIT_DISABLED === "true";
+const QUEUE_DISABLED = import.meta.env.VITE_SIDECLAW_QUEUE_DISABLED === "true";
 
 async function fetchRepoData(path: string): Promise<RepoData> {
   const res = await fetch(`/api/repo?path=${encodeURIComponent(path)}`);
@@ -131,7 +132,7 @@ function RepoDashboardInner() {
           knownServerStart = data.serverStart;
         }
         // Refresh panels to catch any events missed during a disconnect gap
-        queueRef.current?.refresh();
+        if (!QUEUE_DISABLED) queueRef.current?.refresh();
         if (!GIT_DISABLED) gitRef.current?.refresh();
         resetWatchdog(evtSource);
       });
@@ -144,8 +145,9 @@ function RepoDashboardInner() {
           file: "queue" | "notes" | "diagram";
           sourceTabId?: string;
         };
-        if (payload.file === "queue") queueRef.current?.refresh();
-        else if (payload.file === "notes") notesRef.current?.notifyExternal(payload.sourceTabId);
+        if (payload.file === "queue") {
+          if (!QUEUE_DISABLED) queueRef.current?.refresh();
+        } else if (payload.file === "notes") notesRef.current?.notifyExternal(payload.sourceTabId);
       });
 
       evtSource.addEventListener("error", () => {
@@ -234,14 +236,16 @@ function RepoDashboardInner() {
             <GitPanel key={repoPath} ref={gitRef} repoPath={repoPath} initialPromise={gitPromise} />
           </Suspense>
         )}
-        <Suspense fallback={<PanelSkeleton height={160} />}>
-          <QueuePanel
-            key={repoPath}
-            ref={queueRef}
-            repoPath={repoPath}
-            initialPromise={repoPromise}
-          />
-        </Suspense>
+        {!QUEUE_DISABLED && (
+          <Suspense fallback={<PanelSkeleton height={160} />}>
+            <QueuePanel
+              key={repoPath}
+              ref={queueRef}
+              repoPath={repoPath}
+              initialPromise={repoPromise}
+            />
+          </Suspense>
+        )}
         <DiagramPanel repoPath={repoPath} />
         <Suspense fallback={<PanelSkeleton height={200} />}>
           <NotesPanel
