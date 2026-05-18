@@ -168,6 +168,12 @@ interface AgentConfig {
   label: string;
 }
 
+interface AngleResult {
+  angle: string;
+  findings: AngleOutput["findings"];
+  failureReason?: string;
+}
+
 function selectAgents(changedFiles: string[], hasTestScript: boolean): AgentConfig[] {
   const agents: AgentConfig[] = [
     { angle: "architect", label: "Architect" },
@@ -371,7 +377,7 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
       try {
         // ── Phase 2 + 3 wrapped in try-finally to guarantee heartbeat cleanup ──
 
-        const anglePromises = agents.map(async (agent) => {
+        const anglePromises: Promise<AngleResult>[] = agents.map(async (agent) => {
           let prompt: string;
           try {
             prompt = await loadAnglePrompt(agent.angle);
@@ -380,7 +386,11 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
               { tool: "review", angle: agent.angle, error: String(err) },
               "prompt load failed",
             );
-            return { angle: agent.angle, findings: [] as AngleOutput["findings"] };
+            return {
+              angle: agent.angle,
+              findings: [],
+              failureReason: `prompt load failed: ${String(err)}`,
+            };
           }
 
           // Inject the git diff command into the prompt
@@ -392,8 +402,8 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
             prompt,
             model: "claude-haiku-4-5-20251001",
             jsonSchema: ANGLE_JSON_SCHEMA,
-            maxTurns: 10,
-            timeoutMs: 5 * 60 * 1000,
+            maxTurns: 60,
+            timeoutMs: 15 * 60 * 1000,
             authMode: resolvedAuthMode,
           });
 
@@ -402,7 +412,11 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
               { tool: "review", angle: agent.angle, error: result.error },
               "angle session failed",
             );
-            return { angle: agent.angle, findings: [] as AngleOutput["findings"] };
+            return {
+              angle: agent.angle,
+              findings: [],
+              failureReason: result.error ?? "unknown error",
+            };
           }
 
           logger.info(
@@ -413,15 +427,53 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
         });
 
         const angleResults = await Promise.all(anglePromises);
+        const failedAngles = angleResults.filter((r) => r.failureReason);
+
+        // ── Short-circuit: if EVERY angle failed, don't pretend a synthesis is meaningful ─
+        if (failedAngles.length === agents.length) {
+          const failedResult: ReviewOutput = {
+            outcome: "needs-human",
+            blocking: [],
+            improvements: [],
+            discussions: failedAngles.map((r) => ({
+              file: "(review pipeline)",
+              message: `${r.angle} session failed: ${r.failureReason}`,
+              angle: r.angle,
+            })),
+            testGaps: [],
+            summary: `All ${agents.length} specialist reviewers failed — no review was actually performed. Causes: ${failedAngles.map((r) => `${r.angle}: ${r.failureReason}`).join("; ")}. Do NOT treat this as approval.`,
+          };
+          logger.error(
+            {
+              event: "mcp.tool.end",
+              tool: "review",
+              project: cwd,
+              passed: false,
+              outcome: "needs-human",
+              failedAngles: failedAngles.length,
+              totalAngles: agents.length,
+              durationMs: Math.round(performance.now() - startMs),
+            },
+            "review aborted — all angle sessions failed",
+          );
+          return {
+            content: [{ type: "text", text: JSON.stringify(failedResult) }],
+            structuredContent: failedResult,
+          };
+        }
 
         // ── Phase 3: Synthesis (sonnet session) ───────────────────────────
 
         const synthesisPrompt = await loadAnglePrompt("synthesis");
 
-        // Build angle results block
+        // Build angle results block — distinguish failed sessions from genuine clean passes
         const angleBlock = angleResults
           .map((r) => {
-            if (r.findings.length === 0) return `**${r.angle}**: No findings.`;
+            if (r.failureReason) {
+              return `**${r.angle}**: ⚠️ SESSION FAILED — ${r.failureReason}. This reviewer did NOT examine the diff. Treat as missing input, not as approval.`;
+            }
+            if (r.findings.length === 0)
+              return `**${r.angle}**: No findings (reviewer ran successfully and approved).`;
             return `**${r.angle}**:\n${JSON.stringify(r.findings, null, 2)}`;
           })
           .join("\n\n");
@@ -444,8 +496,8 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
           prompt: finalPrompt,
           model: "claude-sonnet-4-6",
           jsonSchema: REVIEW_JSON_SCHEMA,
-          maxTurns: 5,
-          timeoutMs: 5 * 60 * 1000,
+          maxTurns: 20,
+          timeoutMs: 10 * 60 * 1000,
           authMode: resolvedAuthMode,
         });
 
@@ -469,18 +521,36 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
 
         // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- guaranteed by ok check + early return above
         const data = synthesisResult.data!;
+
+        // Safety net: synthesis must not return "clean" when one or more angles failed
+        // (otherwise missing input gets laundered into approval). Force needs-human and
+        // append a discussion entry per failed angle.
+        if (failedAngles.length > 0 && data.outcome === "clean") {
+          data.outcome = "needs-human";
+          for (const f of failedAngles) {
+            data.discussions.push({
+              file: "(review pipeline)",
+              message: `${f.angle} session failed: ${f.failureReason} — this angle did not actually review the diff.`,
+              angle: f.angle,
+            });
+          }
+          data.summary = `Partial review: ${failedAngles.length}/${agents.length} reviewers failed (${failedAngles.map((r) => r.angle).join(", ")}). ${data.summary}`;
+        }
+
         const hasBlocking = data.blocking.length > 0;
         logger.info(
           {
             event: "mcp.tool.end",
             tool: "review",
             project: cwd,
-            passed: !hasBlocking,
+            passed: !hasBlocking && failedAngles.length === 0,
             outcome: data.outcome,
             blocking: data.blocking.length,
             improvements: data.improvements.length,
             discussions: data.discussions.length,
             testGaps: data.testGaps.length,
+            failedAngles: failedAngles.length,
+            totalAngles: agents.length,
             durationMs: Math.round(performance.now() - startMs),
           },
           "review done",

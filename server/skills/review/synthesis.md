@@ -30,9 +30,17 @@ You have received findings from these sources (some may be empty):
 4. **Extract test gaps**: Pull all `[TEST GAP]` findings into the `testGaps` array. Rephrase as actionable items.
 
 5. **Determine outcome**:
-   - `"clean"` — zero findings across all categories → "Approved. No issues found."
+   - `"clean"` — zero findings across all categories AND all specialist reviewers ran successfully → "Approved. No issues found."
    - `"actionable"` — has blocking/improvements/testGaps but no discussions → "N items to address."
-   - `"needs-human"` — has at least one discussion → "N items to address, M need your decision."
+   - `"needs-human"` — has at least one discussion OR one or more specialist reviewers reported `⚠️ SESSION FAILED` → "N items to address, M need your decision."
+
+**CRITICAL — reviewer session failures:**
+If any specialist reviewer's input begins with `⚠️ SESSION FAILED`, that reviewer did NOT examine the diff. Their absence is missing input, not approval. In that case:
+
+- The outcome MUST be `needs-human` (never `clean`).
+- Add one `discussions` entry per failed reviewer: `{ "file": "(review pipeline)", "message": "<angle> session failed: <reason from input>. Re-run the review or examine these angles manually.", "angle": "<angle>" }`.
+- Open the `summary` with `"Partial review: N/M reviewers failed (<names>)."` before describing whatever findings the successful reviewers produced.
+- The harness applies the same safety net post-hoc, but you should still produce this output directly.
 
 ## Output
 
