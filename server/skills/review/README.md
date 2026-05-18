@@ -27,16 +27,17 @@ Phase 3 — Synthesis (single sonnet session, ~15s)
 
 Detection is automatic based on changed file extensions:
 
-| Agent | Trigger | Focus |
-|-|-|-|
-| Architect | always | Structure, coupling, deep modules, ports & adapters, DDD, layer violations |
-| Senior Dev | always | Readability, complexity, nesting, Sandi Metz rules, KISS, dead code |
-| Frontend | `.tsx/.jsx/.css` | React patterns, re-renders, a11y, UX, SEO, TanStack Query/Router/Start |
-| Backend | `api/**/*.ts`, `server/**/*.ts` | Elysia patterns (method chaining, encapsulation, guards), API design, validation |
-| TypeScript | `.ts/.tsx` | Type safety, generics, async, race conditions, null safety |
-| QA | `test` script in package.json | Test coverage gaps (unit/integration/e2e), edge cases, regression risk |
+| Agent      | Trigger                         | Focus                                                                            |
+| ---------- | ------------------------------- | -------------------------------------------------------------------------------- |
+| Architect  | always                          | Structure, coupling, deep modules, ports & adapters, DDD, layer violations       |
+| Senior Dev | always                          | Readability, complexity, nesting, Sandi Metz rules, KISS, dead code              |
+| Frontend   | `.tsx/.jsx/.css`                | React patterns, re-renders, a11y, UX, SEO, TanStack Query/Router/Start           |
+| Backend    | `api/**/*.ts`, `server/**/*.ts` | Elysia patterns (method chaining, encapsulation, guards), API design, validation |
+| TypeScript | `.ts/.tsx`                      | Type safety, generics, async, race conditions, null safety                       |
+| QA         | `test` script in package.json   | Test coverage gaps (unit/integration/e2e), edge cases, regression risk           |
 
 External tools run in parallel with agents:
+
 - **fallow audit** — dead code, complexity, duplication (if installed + remote)
 - **CodeRabbit CLI** — additional static analysis (if installed)
 
@@ -55,47 +56,50 @@ External tools run in parallel with agents:
 
 ### Three-Tier Action Classification
 
-| Category | Meaning | Who acts |
-|-|-|-|
-| `blocking` | Bugs, security, type errors, data loss | Must fix — implementation agent |
+| Category       | Meaning                                    | Who acts                               |
+| -------------- | ------------------------------------------ | -------------------------------------- |
+| `blocking`     | Bugs, security, type errors, data loss     | Must fix — implementation agent        |
 | `improvements` | Code quality, readability, small refactors | Recommended fix — implementation agent |
-| `discussions` | Big refactors, arch changes, tech choices | Human decides |
-| `testGaps` | Missing test coverage | Implementation agent writes tests |
+| `discussions`  | Big refactors, arch changes, tech choices  | Human decides                          |
+| `testGaps`     | Missing test coverage                      | Implementation agent writes tests      |
 
 ### Outcome Values
 
-| Outcome | Means | Action |
-|-|-|-|
-| `clean` | Zero findings | Ship it |
-| `actionable` | Has blocking/improvements/testGaps, no discussions | Apply fixes, then ship |
-| `needs-human` | Has discussions | Human reviews discussions first |
+| Outcome       | Means                                              | Action                          |
+| ------------- | -------------------------------------------------- | ------------------------------- |
+| `clean`       | Zero findings                                      | Ship it                         |
+| `actionable`  | Has blocking/improvements/testGaps, no discussions | Apply fixes, then ship          |
+| `needs-human` | Has discussions                                    | Human reviews discussions first |
 
 ## Rule Loading
 
 Each agent loads project context via `--setting-sources user,project`:
+
 - `CLAUDE.md` and `.claude/rules/` at the repo root
 - User-level rules with `paths:` frontmatter auto-load based on file types
 
 ### Framework-Specific Rules
 
 **Frontend Expert** loads (when triggered):
+
 - `dotfiles/rules/react-best-practices.md` — 69 Vercel React rules
 - `dotfiles/rules/tanstack-query.md` — query keys, caching, mutations
 - `dotfiles/rules/tanstack-router.md` — type-safe routing, loaders
 - `dotfiles/rules/tanstack-start.md` — server functions, SSR, middleware
 
 **Backend Expert** loads (when triggered):
+
 - `dotfiles/rules/elysia.md` — method chaining, encapsulation, validation
 - `elysiajs.com/llms.txt` — fetched live for latest API patterns
 - Selective reference files from `dotfiles/reference/elysia/` based on what the diff touches
 
 ## Cost Profile
 
-| Component | Model | Cost |
-|-|-|-|
-| 2-6 angle sessions (parallel) | haiku | ~$0.01-0.03 |
-| 1 synthesis session | sonnet | ~$0.02 |
-| **Total** | | **~$0.03-0.05 per review** |
+| Component                     | Model  | Cost                       |
+| ----------------------------- | ------ | -------------------------- |
+| 2-6 angle sessions (parallel) | haiku  | ~$0.01-0.03                |
+| 1 synthesis session           | sonnet | ~$0.02                     |
+| **Total**                     |        | **~$0.03-0.05 per review** |
 
 Wall time: ~45-90s (phases 2+3 dominate, phase 2 is parallel).
 
