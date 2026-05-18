@@ -78,6 +78,72 @@ export function mcpProgressCallback(extra: McpExtra): SessionOptions["onProgress
   };
 }
 
+// ── Lenient JSON extraction ───────────────────────────────────────────────────
+//
+// Haiku reviewers sometimes ignore --json-schema and emit text that contains a
+// ```json fence followed by prose commentary. The strict "whole string must be
+// JSON" parser then rejects what is semantically a successful result. This
+// extractor tries, in order:
+//   1. parse the whole trimmed string
+//   2. parse the contents of the first ```json fenced block
+//   3. parse the contents of the first ``` (unlabeled) fenced block
+//   4. brace-scan for the first top-level {...} that parses (skipping strings)
+// Returns the parsed value, or undefined if nothing parses.
+
+function extractJson<T>(raw: string): T | undefined {
+  const text = raw.trim();
+
+  const tryParse = (s: string): T | undefined => {
+    try {
+      return JSON.parse(s) as T;
+    } catch {
+      return undefined;
+    }
+  };
+
+  let parsed = tryParse(text);
+  if (parsed !== undefined) return parsed;
+
+  const jsonFence = text.match(/```json\s*\n([\s\S]*?)\n```/);
+  if (jsonFence) {
+    parsed = tryParse(jsonFence[1].trim());
+    if (parsed !== undefined) return parsed;
+  }
+
+  const anyFence = text.match(/```[a-zA-Z]*\s*\n([\s\S]*?)\n```/);
+  if (anyFence) {
+    parsed = tryParse(anyFence[1].trim());
+    if (parsed !== undefined) return parsed;
+  }
+
+  // Brace scan: find the first balanced {...} that parses, respecting strings.
+  const start = text.indexOf("{");
+  if (start === -1) return undefined;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        parsed = tryParse(text.slice(start, i + 1));
+        if (parsed !== undefined) return parsed;
+        return undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
 // ── Keychain helpers ───────────────────────────────────────────────────────────
 
 async function readKeychain(service: string): Promise<string | null> {
@@ -337,16 +403,13 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
 
   const raw = envelope.result;
   if (typeof raw === "string" && raw.trim()) {
-    try {
-      // Strip markdown code block fences the model sometimes adds around JSON
-      const stripped = raw.replace(/^```(?:json)?\n?([\s\S]*?)\n?```\s*$/, "$1").trim();
-      const data = JSON.parse(stripped) as T;
+    const data = extractJson<T>(raw);
+    if (data !== undefined) {
       logSessionEnd();
       return { ok: true, data };
-    } catch {
-      logger.error({ raw: raw.slice(0, 500) }, "result JSON parse failed");
-      return { ok: false, error: `result field is not valid JSON: ${raw.slice(0, 500)}` };
     }
+    logger.error({ raw: raw.slice(0, 500) }, "result JSON parse failed");
+    return { ok: false, error: `result field is not valid JSON: ${raw.slice(0, 500)}` };
   }
 
   logger.error({ event: "session.error", project: cwd }, "session no usable output");
