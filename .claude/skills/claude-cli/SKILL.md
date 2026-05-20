@@ -318,10 +318,15 @@ has no repo-specific context.
 - **Subscription (Max/Pro)**: Default when `ANTHROPIC_API_KEY` is NOT set. The `claude` CLI
   uses OAuth from the user's login.
 - **API billing**: Activated when `ANTHROPIC_API_KEY` IS set. Pay-per-token.
+- **Custom gateway (e.g. IU endpoint)**: Set `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` and
+  `delete env.ANTHROPIC_API_KEY`. `AUTH_TOKEN` forces `Authorization: Bearer <token>`, which the
+  gateway accepts. **Do not use `ANTHROPIC_API_KEY` here**: with a logged-in Max session it does
+  NOT override the Max OAuth bearer — the CLI sends the Max bearer to the custom base URL → 401.
+  This is the `runSession({authMode:"iu"})` path (see `server/mcp/session-runner.ts`).
 - **`--bare` mode**: Forces API key auth (skips OAuth/keychain).
 
-For MCP server subprocess spawning: never set `ANTHROPIC_API_KEY` in the child env.
-This ensures all spawned sessions use the Max subscription.
+For MCP server subprocess spawning: don't set `ANTHROPIC_API_KEY` in the child env. Default →
+Max subscription (inherited OAuth); for IU routing the runner injects `ANTHROPIC_AUTH_TOKEN` instead.
 
 ---
 

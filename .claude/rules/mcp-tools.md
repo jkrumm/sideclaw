@@ -106,7 +106,7 @@ Treat verdict "pass" or "warn" as passed. Treat verdict "fail" as a failed step.
 All tools spawn inner `claude -p` sessions via `runSession()` from `server/mcp/session-runner.ts`.
 
 Key requirements (already handled by the runner):
-- No `ANTHROPIC_API_KEY` — preserves Max subscription billing
+- No `ANTHROPIC_API_KEY` — `max` mode inherits the OAuth subscription; `iu` mode injects `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` (never `ANTHROPIC_API_KEY`, which the CLI ignores in favor of the Max bearer → 401)
 - `--strict-mcp-config --mcp-config '{"mcpServers": {}}'` — prevents circular MCP (empty `{}` is invalid schema)
 - `--setting-sources user,project` — loads repo's CLAUDE.md for context
 - Delete `CLAUDE_SESSION_ID`, `CLAUDE_PARENT_SESSION_ID`, set `CLAUDE_ENTRYPOINT=worker`
