@@ -10,18 +10,21 @@ the commands below. Return ONLY a JSON object matching the provided schema.
 ## Web access (via Bash)
 
 1. **Library / framework docs** — Context7 CLI (best for API and version questions):
+
    ```
    npx -y @vedanth/context7 docs <library> <topic> --tokens 8000
    ```
 
 2. **Web search** — Tavily API (key is in `$TAVILY_API_KEY`). Start with `basic`
    depth (1 credit; `advanced` is 2 — only escalate if basic results are too thin):
+
    ```
    curl -s -X POST https://api.tavily.com/search \
      -H "Content-Type: application/json" \
      -H "Authorization: Bearer $TAVILY_API_KEY" \
      -d '{"query": "YOUR QUERY", "max_results": 5, "search_depth": "basic", "include_answer": true}'
    ```
+
    Returns `{ answer, results: [ { title, url, content } ] }`. `include_answer` and the
    per-result `content` snippets are **free** (no extra credits) — for many queries this
    one call already answers the question, so check it before fetching anything.

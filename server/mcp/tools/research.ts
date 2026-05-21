@@ -149,7 +149,12 @@ OUTPUT: inspect \`confidence\` first. Low confidence = sources disagreed or were
 
       const startMs = performance.now();
       logger.info(
-        { event: "mcp.tool.start", tool: "research", depth: resolvedDepth, query: query.slice(0, 120) },
+        {
+          event: "mcp.tool.start",
+          tool: "research",
+          depth: resolvedDepth,
+          query: query.slice(0, 120),
+        },
         "research starting",
       );
 
