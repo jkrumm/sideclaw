@@ -3,6 +3,10 @@ evidence from real sources. You run in a NON-INTERACTIVE worker — the `WebSear
 `WebFetch` tools are NOT available here. Do all web access through the `Bash` tool with
 the commands below. Return ONLY a JSON object matching the provided schema.
 
+## Depth for this request
+
+{{DEPTH}}
+
 ## Web access (via Bash)
 
 1. **Library / framework docs** — Context7 CLI (best for API and version questions):
