@@ -10,14 +10,17 @@ the commands below. Return ONLY a JSON object matching the provided schema.
    npx -y @vedanth/context7 docs <library> <topic> --tokens 8000
    ```
 
-2. **Web search** — Tavily API (key is in `$TAVILY_API_KEY`):
+2. **Web search** — Tavily API (key is in `$TAVILY_API_KEY`). Start with `basic`
+   depth (1 credit; `advanced` is 2 — only escalate if basic results are too thin):
    ```
    curl -s -X POST https://api.tavily.com/search \
      -H "Content-Type: application/json" \
      -H "Authorization: Bearer $TAVILY_API_KEY" \
-     -d '{"query": "YOUR QUERY", "max_results": 5, "search_depth": "advanced", "include_answer": true}'
+     -d '{"query": "YOUR QUERY", "max_results": 5, "search_depth": "basic", "include_answer": true}'
    ```
-   Returns JSON: `{ answer, results: [ { title, url, content } ] }`.
+   Returns `{ answer, results: [ { title, url, content } ] }`. `include_answer` and the
+   per-result `content` snippets are **free** (no extra credits) — for many queries this
+   one call already answers the question, so check it before fetching anything.
 
 3. **Fetch a page's main content** — `readability-cli` (Mozilla Readability, the same
    engine as Firefox Reader View). Strips nav/ads/boilerplate, so you get clean article
@@ -25,23 +28,30 @@ the commands below. Return ONLY a JSON object matching the provided schema.
    ```
    npx -y readability-cli "URL" --properties text-content --quiet
    ```
-   Use `--properties title,text-content` if you need the title too. Fallbacks for
-   paywalled or heavily-JS pages: Tavily Extract, then raw curl.
+   Use `--properties title,text-content` if you need the title too. If it fails
+   (paywalled or heavily-JS page), try raw curl, and only then Tavily Extract:
+   ```
+   curl -sL "URL" | sed 's/<[^>]*>//g' | tr -s ' \n' | head -c 6000
+   ```
+   Last resort — Tavily Extract (costs 1 credit per 5 URLs, so batch URLs and use it
+   sparingly):
    ```
    curl -s -X POST https://api.tavily.com/extract \
      -H "Content-Type: application/json" \
      -H "Authorization: Bearer $TAVILY_API_KEY" \
      -d '{"urls": ["URL"]}'
    ```
-   Last resort: `curl -sL "URL" | sed 's/<[^>]*>//g' | tr -s ' \n' | head -c 6000`
 
-## Research pattern
+## Research pattern (cost-aware — minimize Tavily credits)
 
-1. If the query is about a library/framework API or version, run Context7 first.
-2. Tavily-search the query; pick the 2-3 most relevant, recent URLs.
-3. Extract/fetch those URLs for detail.
+1. If the query is about a library/framework API or version, run Context7 first (free).
+2. Run **one basic Tavily search**. Read its `answer` + per-result `content` snippets —
+   if they already settle the question across 2+ results, you're done; skip fetching.
+3. Only if you need more depth: `readability-cli` (free) on the 2-3 most relevant URLs.
 4. Cross-verify across 2+ sources. If they disagree, note it and lower `confidence`.
 5. Synthesize a recommendation with specific versions / code.
+
+Reserve `advanced` search and Tavily Extract for when the free path genuinely falls short.
 
 ## Anti-patterns
 
