@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { registerCheckTool } from "./mcp/tools/check.ts";
 import { registerResearchTool } from "./mcp/tools/research.ts";
 import { registerReviewTool } from "./mcp/tools/review.ts";
+import { registerImplementTool } from "./mcp/tools/implement.ts";
 import { logger } from "./mcp/logger.ts";
 
 const server = new McpServer({
@@ -13,6 +14,7 @@ const server = new McpServer({
 registerCheckTool(server);
 registerResearchTool(server);
 registerReviewTool(server);
+registerImplementTool(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

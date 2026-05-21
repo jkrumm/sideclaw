@@ -1,7 +1,6 @@
-import { existsSync, mkdirSync } from "fs";
+import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
-import { resolveAuthMode, type AuthMode, type ResolvedAuthMode } from "../lib/quota.ts";
 import { logger } from "./logger.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -10,26 +9,44 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
   ? join(homedir(), ".local/bin/claude")
   : "claude";
 
-const CLAUDE_OFFLOAD_DIR = join(homedir(), ".claude-offload");
+// All worker sessions route through the LiteLLM bridge (dotfiles litellm/), which
+// translates Anthropic Messages → OpenAI chat/completions against the IU unified
+// endpoint. Primary model Kimi-K2.6 (EU/GDPR), with claude-sonnet-4-6-eu failover
+// configured inside LiteLLM. The Max subscription is never used by workers — it is
+// reserved for the orchestrator. See docs/kimi-litellm-bridge.md in dotfiles.
+const BRIDGE_URL = process.env.SIDECLAW_BRIDGE_URL ?? "http://localhost:4000";
+// LiteLLM runs unauthenticated (localhost-bound), but claude requires a non-empty
+// auth token — send a static dummy the proxy ignores.
+const BRIDGE_TOKEN = process.env.SIDECLAW_BRIDGE_TOKEN ?? "sk-litellm-master-key";
+const DEFAULT_MODEL = "Kimi-K2.6";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export interface SessionOptions {
   cwd: string;
   prompt: string;
+  /** Bridge model id (LiteLLM model_name): "Kimi-K2.6" | "claude-sonnet-4-6-eu" | "gpt-5-mini". */
   model?: string;
   jsonSchema?: object;
   maxTurns?: number;
   timeoutMs?: number;
   /**
-   * Auth strategy for the spawned worker.
-   * - `"max"`: inherit parent Max subscription (no env injection).
-   * - `"iu"`: inject ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL + CLAUDE_CONFIG_DIR
-   *   to route to the custom IU-hosted Anthropic-compatible endpoint.
-   * - `"auto"` (default): consult `/tmp/claude_sl/usage_api.json`; pick `iu` when
-   *   peak 5h/7d utilization >= 70%, else `max`. Missing/stale cache → `max`.
+   * `--setting-sources` value. Default "project" (repo CLAUDE.md only) keeps the
+   * uncached system prompt small — bridge calls lose prompt caching, so global
+   * rules are paid on every turn. Use "user,project" for tools that benefit from
+   * the global code-style/typescript rules (review, implement).
    */
-  authMode?: AuthMode;
+  settingSources?: string;
+  /**
+   * Read-only worker: removes Edit/Write/NotebookEdit from the tool set via
+   * `--allowedTools`. Kimi is eager and will "helpfully" edit files under
+   * `--dangerously-skip-permissions` (it once auto-fixed lint during a `check`),
+   * so check/review/research must opt in. Bash stays available (needed to run
+   * validators / curl), so prompts must also instruct "report only".
+   */
+  readOnly?: boolean;
+  /** Extra env vars merged into the worker (e.g. TAVILY_API_KEY for research). */
+  extraEnv?: Record<string, string>;
   /** Called every 15s while the subprocess runs. Use to send MCP progress notifications and reset client timeout. */
   onProgress?: (progress: number, total: number, message: string) => void;
 }
@@ -49,7 +66,7 @@ interface ClaudeJsonEnvelope {
   structured_output?: unknown; // parsed JSON object when --json-schema is provided
   errors?: string[];
   session_id?: string;
-  total_cost_usd?: number;
+  total_cost_usd?: number; // unreliable through the bridge — see logSessionEnd
   num_turns?: number;
 }
 
@@ -80,10 +97,10 @@ export function mcpProgressCallback(extra: McpExtra): SessionOptions["onProgress
 
 // ── Lenient JSON extraction ───────────────────────────────────────────────────
 //
-// Haiku reviewers sometimes ignore --json-schema and emit text that contains a
-// ```json fence followed by prose commentary. The strict "whole string must be
-// JSON" parser then rejects what is semantically a successful result. This
-// extractor tries, in order:
+// Workers sometimes ignore --json-schema and emit text that contains a ```json
+// fence followed by prose commentary. The strict "whole string must be JSON"
+// parser then rejects what is semantically a successful result. This extractor
+// tries, in order:
 //   1. parse the whole trimmed string
 //   2. parse the contents of the first ```json fenced block
 //   3. parse the contents of the first ``` (unlabeled) fenced block
@@ -144,67 +161,18 @@ function extractJson<T>(raw: string): T | undefined {
   return undefined;
 }
 
-// ── Keychain helpers ───────────────────────────────────────────────────────────
+// ── Bridge health ────────────────────────────────────────────────────────────
 
-async function readKeychain(service: string): Promise<string | null> {
+/** Quick liveness probe so a down bridge produces a clear error, not an opaque claude failure. */
+async function bridgeReachable(): Promise<boolean> {
   try {
-    const proc = Bun.spawn(["security", "find-generic-password", "-s", service, "-w"], {
-      stdout: "pipe",
-      stderr: "pipe",
+    const res = await fetch(`${BRIDGE_URL}/health/liveliness`, {
+      signal: AbortSignal.timeout(3000),
     });
-    const [stdout, exitCode] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
-    if (exitCode !== 0) return null;
-    const trimmed = stdout.trim();
-    return trimmed.length > 0 ? trimmed : null;
-  } catch (err) {
-    logger.error(
-      { event: "keychain.read_fail", service, error: String(err) },
-      "keychain read threw",
-    );
-    return null;
+    return res.ok;
+  } catch {
+    return false;
   }
-}
-
-// ── IU env injection ───────────────────────────────────────────────────────────
-
-interface IuEnv {
-  ANTHROPIC_AUTH_TOKEN: string;
-  ANTHROPIC_BASE_URL: string;
-  CLAUDE_CONFIG_DIR: string;
-}
-
-async function buildIuEnv(): Promise<IuEnv | null> {
-  const [token, baseUrl] = await Promise.all([
-    readKeychain("claude-sdk-api-key"),
-    readKeychain("claude-sdk-base-url"),
-  ]);
-  if (!token || !baseUrl) {
-    logger.error(
-      {
-        event: "iu_env.unavailable",
-        hasToken: !!token,
-        hasBaseUrl: !!baseUrl,
-      },
-      "IU keychain entries missing — falling back to max",
-    );
-    return null;
-  }
-  try {
-    if (!existsSync(CLAUDE_OFFLOAD_DIR)) {
-      mkdirSync(CLAUDE_OFFLOAD_DIR, { recursive: true });
-    }
-  } catch (err) {
-    logger.error(
-      { event: "iu_env.dir_create_fail", dir: CLAUDE_OFFLOAD_DIR, error: String(err) },
-      "failed to create CLAUDE_CONFIG_DIR — falling back to max",
-    );
-    return null;
-  }
-  return {
-    ANTHROPIC_AUTH_TOKEN: token,
-    ANTHROPIC_BASE_URL: baseUrl,
-    CLAUDE_CONFIG_DIR: CLAUDE_OFFLOAD_DIR,
-  };
 }
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
@@ -213,12 +181,25 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
   const {
     cwd,
     prompt,
-    model = "claude-haiku-4-5-20251001",
+    model = DEFAULT_MODEL,
     jsonSchema,
     maxTurns = 30,
     timeoutMs = 10 * 60 * 1000,
-    authMode = "auto",
+    settingSources = "project",
+    readOnly = false,
+    extraEnv,
   } = opts;
+
+  if (!(await bridgeReachable())) {
+    logger.error(
+      { event: "session.bridge_down", project: cwd, url: BRIDGE_URL },
+      "LiteLLM bridge unreachable",
+    );
+    return {
+      ok: false,
+      error: `LiteLLM bridge unreachable at ${BRIDGE_URL}. Run 'make litellm-restart' in dotfiles (see docs/kimi-litellm-bridge.md).`,
+    };
+  }
 
   const args: string[] = [
     "-p",
@@ -227,7 +208,7 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
     "--output-format",
     "json",
     "--setting-sources",
-    "user,project",
+    settingSources,
     "--strict-mcp-config",
     "--mcp-config",
     '{"mcpServers": {}}',
@@ -237,40 +218,33 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
     model,
   ];
 
+  // Read-only tools: allowlist read + run tools only, so Edit/Write/NotebookEdit
+  // are unavailable even under --dangerously-skip-permissions. Bash stays (needed
+  // to run validators / curl); prompts enforce "report only" for Bash-level writes.
+  if (readOnly) {
+    args.push("--allowedTools", "Read,Bash,Grep,Glob");
+  }
+
   if (jsonSchema) {
     args.push("--json-schema", JSON.stringify(jsonSchema));
   }
 
-  // Resolve auth mode (auto → max/iu based on quota cache) and build env.
-  const resolved = await resolveAuthMode(authMode);
-  let resolvedMode: ResolvedAuthMode = resolved.mode;
-  let authReason = resolved.reason;
-
+  // Route the worker through the LiteLLM bridge. ANTHROPIC_API_KEY is deleted: it
+  // is rejected by claude v2.x ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
+  // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 is required or the IU gateway 400s on
+  // Anthropic beta headers.
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined) env[k] = v;
   }
-
-  if (resolvedMode === "iu") {
-    const iuEnv = await buildIuEnv();
-    if (iuEnv) {
-      env.ANTHROPIC_AUTH_TOKEN = iuEnv.ANTHROPIC_AUTH_TOKEN;
-      env.ANTHROPIC_BASE_URL = iuEnv.ANTHROPIC_BASE_URL;
-      env.CLAUDE_CONFIG_DIR = iuEnv.CLAUDE_CONFIG_DIR;
-      // Defensive: ANTHROPIC_API_KEY would be rejected by claude v2.x ("Not logged in"),
-      // and any inherited value would shadow ANTHROPIC_AUTH_TOKEN.
-      delete env.ANTHROPIC_API_KEY;
-    } else {
-      // Keychain or dir setup failed — fall back to max rather than crash.
-      resolvedMode = "max";
-      authReason = `${authReason}; iu setup failed — fell back to max`;
-    }
-  }
-  // For "max" mode: no env injection — preserves Max subscription billing via inherited OAuth.
-
+  env.ANTHROPIC_BASE_URL = BRIDGE_URL;
+  env.ANTHROPIC_AUTH_TOKEN = BRIDGE_TOKEN;
+  env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
+  delete env.ANTHROPIC_API_KEY;
   delete env.CLAUDE_SESSION_ID;
   delete env.CLAUDE_PARENT_SESSION_ID;
   env.CLAUDE_ENTRYPOINT = "worker";
+  if (extraEnv) Object.assign(env, extraEnv);
 
   const startMs = performance.now();
   logger.info(
@@ -280,8 +254,9 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
       model,
       maxTurns,
       jsonSchema: !!jsonSchema,
-      authMode: resolvedMode,
-      authReason,
+      settingSources,
+      readOnly,
+      bridge: BRIDGE_URL,
     },
     "session spawn",
   );
@@ -382,6 +357,9 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
     return { ok: false, error: errMsg };
   }
 
+  // total_cost_usd is unreliable through the bridge (claude reads Anthropic usage
+  // fields the OpenAI→Anthropic translation does not populate). Real spend is
+  // visible in LiteLLM's logs, not here — kept only for rough comparison.
   const logSessionEnd = () =>
     logger.info(
       {

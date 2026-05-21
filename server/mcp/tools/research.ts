@@ -6,6 +6,22 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { runSession, mcpProgressCallback } from "../session-runner.ts";
 import { logger } from "../logger.ts";
 
+/** Resolve the Tavily key (env first, then the Keychain entry `make setup` caches). */
+async function readTavilyKey(): Promise<string | null> {
+  if (process.env.TAVILY_API_KEY) return process.env.TAVILY_API_KEY;
+  try {
+    const proc = Bun.spawn(["security", "find-generic-password", "-s", "tavily-api-key", "-w"], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [out, code] = await Promise.all([new Response(proc.stdout).text(), proc.exited]);
+    const trimmed = out.trim();
+    return code === 0 && trimmed ? trimmed : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Output schema — single source of truth ────────────────────────────────────
 
 const RESEARCH_OUTPUT = z.object({
@@ -66,12 +82,6 @@ OUTPUT: inspect \`confidence\` first. Low confidence = sources disagreed or were
           .describe(
             "Optional working directory for the spawned worker. Defaults to $HOME. Only matters if research touches project-local Context7 cache.",
           ),
-        authMode: z
-          .enum(["max", "iu", "auto"])
-          .optional()
-          .describe(
-            'Auth strategy. "max" = inherit parent Max subscription. "iu" = route to IU-hosted endpoint via keychain creds. "auto" (default) = pick "iu" at >=70% Max quota.',
-          ),
       },
       outputSchema: RESEARCH_OUTPUT.shape,
       annotations: {
@@ -79,7 +89,7 @@ OUTPUT: inspect \`confidence\` first. Low confidence = sources disagreed or were
         idempotentHint: false,
       },
     },
-    async ({ query, cwd, authMode }, extra) => {
+    async ({ query, cwd }, extra) => {
       const workDir = cwd ?? homedir();
       if (!existsSync(workDir)) {
         return {
@@ -106,14 +116,23 @@ OUTPUT: inspect \`confidence\` first. Low confidence = sources disagreed or were
         "research starting",
       );
 
+      const tavilyKey = await readTavilyKey();
+      if (!tavilyKey) {
+        logger.warn(
+          { tool: "research" },
+          "TAVILY_API_KEY not found (env or Keychain) — web search will be unavailable",
+        );
+      }
+
       const result = await runSession<ResearchOutput>({
         cwd: workDir,
         prompt,
-        model: "claude-sonnet-4-6",
+        model: "Kimi-K2.6",
         jsonSchema: RESEARCH_JSON_SCHEMA,
-        maxTurns: 15,
-        timeoutMs: 5 * 60 * 1000,
-        authMode: authMode ?? "auto",
+        maxTurns: 20,
+        timeoutMs: 8 * 60 * 1000,
+        readOnly: true,
+        extraEnv: tavilyKey ? { TAVILY_API_KEY: tavilyKey } : undefined,
         onProgress: mcpProgressCallback(extra),
       });
 

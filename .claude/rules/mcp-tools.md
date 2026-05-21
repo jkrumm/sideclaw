@@ -106,11 +106,14 @@ Treat verdict "pass" or "warn" as passed. Treat verdict "fail" as a failed step.
 All tools spawn inner `claude -p` sessions via `runSession()` from `server/mcp/session-runner.ts`.
 
 Key requirements (already handled by the runner):
-- No `ANTHROPIC_API_KEY` — `max` mode inherits the OAuth subscription; `iu` mode injects `ANTHROPIC_AUTH_TOKEN` + `ANTHROPIC_BASE_URL` (never `ANTHROPIC_API_KEY`, which the CLI ignores in favor of the Max bearer → 401)
+- **All workers route through the LiteLLM bridge** (`:4000`), never the Max subscription. The runner injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` (LiteLLM is unauthenticated, but claude requires a non-empty token) + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, and deletes `ANTHROPIC_API_KEY`. Default model `Kimi-K2.6` (failover `claude-sonnet-4-6-eu` inside LiteLLM). A bridge liveness check fails fast with a clear error if `:4000` is down.
 - `--strict-mcp-config --mcp-config '{"mcpServers": {}}'` — prevents circular MCP (empty `{}` is invalid schema)
-- `--setting-sources user,project` — loads repo's CLAUDE.md for context
+- `--setting-sources` defaults to `project` (small uncached system prompt — bridge calls have no prompt caching); pass `settingSources: "user,project"` where global rules matter (`review`, `implement`)
+- `readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"` so Edit/Write are unavailable. Required for read-only tools (`check`/`review`/`research`) — Kimi edits files under `--dangerously-skip-permissions` otherwise
+- `extraEnv` merges extra vars into the worker (e.g. `TAVILY_API_KEY` for `research`)
+- `WebSearch`/`WebFetch` do not work through the bridge (internal Anthropic-model calls) — do web access via Bash (Tavily/curl/Context7)
 - Delete `CLAUDE_SESSION_ID`, `CLAUDE_PARENT_SESSION_ID`, set `CLAUDE_ENTRYPOINT=worker`
-- `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used
+- `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used. `total_cost_usd` is unreliable through the bridge — read real spend from LiteLLM logs
 
 ## Progress Heartbeat (timeout prevention)
 

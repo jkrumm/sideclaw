@@ -3,8 +3,33 @@ import { join } from "path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { runSession, mcpProgressCallback } from "../session-runner.ts";
-import type { AuthMode } from "../../lib/quota.ts";
 import { logger } from "../logger.ts";
+
+// Max angle sessions in flight at once. Kimi-K2.6 is single-backend (Azure
+// Sweden) and 429s under burst load; capping keeps the LiteLLM Kimi→sonnet-eu
+// fallback from stampeding when 4–6 angles fire together.
+const ANGLE_CONCURRENCY = 3;
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight. Preserves input order.
+ */
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 // ── Output schema — single source of truth ────────────────────────────────────
 
@@ -238,12 +263,6 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
           .describe(
             'Factual description of the changes\' intent (e.g. "add MCP review tool"). Helps catch goal-mismatch bugs. Omit if the diff is self-explanatory.',
           ),
-        authMode: z
-          .enum(["max", "iu", "auto"])
-          .optional()
-          .describe(
-            'Auth strategy for spawned workers. "max" = inherit parent Max subscription. "iu" = route to the IU-hosted Anthropic-compatible endpoint via keychain creds. "auto" (default) = pick "iu" when Max quota >= 70% (per /tmp/claude_sl/usage_api.json), else "max".',
-          ),
       },
       outputSchema: REVIEW_OUTPUT.shape,
       annotations: {
@@ -251,8 +270,7 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
         idempotentHint: true,
       },
     },
-    async ({ cwd, scope, context, authMode }, extra) => {
-      const resolvedAuthMode: AuthMode = authMode ?? "auto";
+    async ({ cwd, scope, context }, extra) => {
       if (!existsSync(cwd)) {
         return {
           content: [
@@ -377,56 +395,60 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
       try {
         // ── Phase 2 + 3 wrapped in try-finally to guarantee heartbeat cleanup ──
 
-        const anglePromises: Promise<AngleResult>[] = agents.map(async (agent) => {
-          let prompt: string;
-          try {
-            prompt = await loadAnglePrompt(agent.angle);
-          } catch (err) {
-            logger.error(
-              { tool: "review", angle: agent.angle, error: String(err) },
-              "prompt load failed",
+        const angleResults = await mapWithConcurrency(
+          agents,
+          ANGLE_CONCURRENCY,
+          async (agent): Promise<AngleResult> => {
+            let prompt: string;
+            try {
+              prompt = await loadAnglePrompt(agent.angle);
+            } catch (err) {
+              logger.error(
+                { tool: "review", angle: agent.angle, error: String(err) },
+                "prompt load failed",
+              );
+              return {
+                angle: agent.angle,
+                findings: [],
+                failureReason: `prompt load failed: ${String(err)}`,
+              };
+            }
+
+            // Inject the git diff command into the prompt
+            prompt = prompt.replace("[GIT_DIFF_COMMAND]", `Run: \`${diffCmd}\``);
+            prompt += contextBlock;
+
+            const result = await runSession<AngleOutput>({
+              cwd,
+              prompt,
+              model: "Kimi-K2.6",
+              jsonSchema: ANGLE_JSON_SCHEMA,
+              maxTurns: 60,
+              timeoutMs: 15 * 60 * 1000,
+              readOnly: true,
+              settingSources: "user,project",
+            });
+
+            if (!result.ok) {
+              logger.error(
+                { tool: "review", angle: agent.angle, error: result.error },
+                "angle session failed",
+              );
+              return {
+                angle: agent.angle,
+                findings: [],
+                failureReason: result.error ?? "unknown error",
+              };
+            }
+
+            logger.info(
+              { tool: "review", angle: agent.angle, findings: result.data?.findings.length ?? 0 },
+              "angle session done",
             );
-            return {
-              angle: agent.angle,
-              findings: [],
-              failureReason: `prompt load failed: ${String(err)}`,
-            };
-          }
+            return { angle: agent.angle, findings: result.data?.findings ?? [] };
+          },
+        );
 
-          // Inject the git diff command into the prompt
-          prompt = prompt.replace("[GIT_DIFF_COMMAND]", `Run: \`${diffCmd}\``);
-          prompt += contextBlock;
-
-          const result = await runSession<AngleOutput>({
-            cwd,
-            prompt,
-            model: "claude-haiku-4-5-20251001",
-            jsonSchema: ANGLE_JSON_SCHEMA,
-            maxTurns: 60,
-            timeoutMs: 15 * 60 * 1000,
-            authMode: resolvedAuthMode,
-          });
-
-          if (!result.ok) {
-            logger.error(
-              { tool: "review", angle: agent.angle, error: result.error },
-              "angle session failed",
-            );
-            return {
-              angle: agent.angle,
-              findings: [],
-              failureReason: result.error ?? "unknown error",
-            };
-          }
-
-          logger.info(
-            { tool: "review", angle: agent.angle, findings: result.data?.findings.length ?? 0 },
-            "angle session done",
-          );
-          return { angle: agent.angle, findings: result.data?.findings ?? [] };
-        });
-
-        const angleResults = await Promise.all(anglePromises);
         const failedAngles = angleResults.filter((r) => r.failureReason);
 
         // ── Short-circuit: if EVERY angle failed, don't pretend a synthesis is meaningful ─
@@ -494,11 +516,12 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
         const synthesisResult = await runSession<ReviewOutput>({
           cwd,
           prompt: finalPrompt,
-          model: "claude-sonnet-4-6",
+          model: "Kimi-K2.6",
           jsonSchema: REVIEW_JSON_SCHEMA,
           maxTurns: 20,
           timeoutMs: 10 * 60 * 1000,
-          authMode: resolvedAuthMode,
+          readOnly: true,
+          settingSources: "user,project",
         });
 
         if (!synthesisResult.ok) {

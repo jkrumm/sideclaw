@@ -22,12 +22,4 @@ uninstall-agent:
 	rm ~/Library/LaunchAgents/com.jkrumm.sideclaw.plist
 	@echo "sideclaw LaunchAgent removed"
 
-# Bootstrap the isolated CLAUDE_CONFIG_DIR used when sideclaw routes workers
-# to the IU endpoint via ANTHROPIC_AUTH_TOKEN. A separate dir is required so
-# the cached Max OAuth bearer in ~/.claude/ does not override env-based auth.
-claude-offload:
-	@mkdir -p $$HOME/.claude-offload
-	@[ -f $$HOME/.claude-offload/settings.json ] || echo '{}' > $$HOME/.claude-offload/settings.json
-	@echo "claude-offload ready at $$HOME/.claude-offload"
-
-.PHONY: dev start build reload install-agent uninstall-agent claude-offload
+.PHONY: dev start build reload install-agent uninstall-agent

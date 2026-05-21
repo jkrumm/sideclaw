@@ -62,17 +62,25 @@ The LaunchAgent starts automatically on login and restarts on crash.
 
 ## MCP Server
 
-sideclaw exposes workflow tools (check, review, ship) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
+sideclaw exposes workflow tools (`check`, `review`, `research`, `implement`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
 
 Entry point: `server/mcp.ts`. Tools live in `server/mcp/tools/`, skill prompts in `server/skills/`.
+
+### Worker model — LiteLLM bridge (Kimi-K2.6, EU)
+
+Every worker session runs on the **IU unified endpoint via a local LiteLLM bridge**, never on the Max subscription (Max is reserved for the orchestrator). The bridge (`dotfiles/litellm/`, LaunchAgent on `:4000`) translates Anthropic Messages → OpenAI chat/completions and routes to **Kimi-K2.6** (EU/GDPR, Azure Sweden), with LiteLLM-native failover to `claude-sonnet-4-6-eu`. `session-runner.ts` injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`. Full background: `dotfiles/docs/kimi-litellm-bridge.md`.
+
+Two constraints the bridge imposes:
+- **No `WebSearch`/`WebFetch`** — they make internal Anthropic-model calls the bridge can't serve. `research` uses Tavily + `curl` + Context7 via Bash instead.
+- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Kimi will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review`/`research` are read-only; `implement` has full file access.
 
 ### Review Tool — Multi-Angle Pipeline
 
 The `review` tool runs a 3-phase parallel pipeline (see `server/skills/review/README.md` for full docs):
 
 1. **Data gathering** (parallel): git diff, fallow audit, CodeRabbit CLI
-2. **Angle reviews** (parallel haiku sessions): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
-3. **Synthesis** (sonnet): deduplicates, classifies into `blocking` / `improvements` / `discussions` / `testGaps`
+2. **Angle reviews** (parallel Kimi-K2.6 sessions, capped at `ANGLE_CONCURRENCY=3` so the single-backend model doesn't 429): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
+3. **Synthesis** (Kimi-K2.6): deduplicates, classifies into `blocking` / `improvements` / `discussions` / `testGaps`
 
 Output `outcome`: `"clean"` (ship it), `"actionable"` (apply fixes), `"needs-human"` (has discussions).
 Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fetches `elysiajs.com/llms.txt`.
@@ -87,7 +95,7 @@ tail -f /tmp/sideclaw.jsonl | jq .
 tail -f /tmp/sideclaw.jsonl | jq 'select(.source == "mcp")'
 ```
 
-Inner sessions spawned by MCP tools use `claude -p` with `--setting-sources user,project` and Max subscription billing (no API key). See `.claude/rules/mcp-tools.md` for authoring conventions.
+Inner sessions spawned by MCP tools use `claude -p` routed through the LiteLLM bridge (Kimi-K2.6, IU per-token billing — no Max quota). See `.claude/rules/mcp-tools.md` for authoring conventions.
 
 ## Git Workflow
 
