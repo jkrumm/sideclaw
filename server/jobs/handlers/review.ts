@@ -44,7 +44,7 @@ export const REVIEW_INPUT = z.object({
     .string()
     .optional()
     .describe(
-      'What to review. "uncommitted" (default) = staged + unstaged changes. "head" = last commit. Or a git ref like "HEAD~3" or a file path.',
+      'What to review. "uncommitted" (default) = staged + unstaged changes. "head" = last commit. A commit ref like "HEAD~3" or a SHA = the range from that ref up to HEAD (i.e. the last N commits, not the single commit). An explicit range like "main..HEAD" or a file path also work.',
     ),
   context: z
     .string()
@@ -149,6 +149,17 @@ function validateScope(scope: string): void {
 
 // ── Git diff helpers ───────────────────────────────────────────────────────────
 
+// A bare commit-ish ref (e.g. "HEAD~2", a SHA, a branch) is treated as the
+// range `<ref>..HEAD` — "everything from that ref up to HEAD" — which is what a
+// caller passing "HEAD~3" almost always means. `git show <ref>` (the single
+// commit) was a footgun: it silently reviewed one old commit instead of the
+// recent work. Explicit ranges ("main..HEAD") and paths pass through unchanged.
+function scopeDiffArgs(scope: string): string {
+  if (scope.includes("..")) return scope; // explicit range
+  if (scope.startsWith("/") || scope.includes(".")) return `-- ${scope}`; // file path
+  return `${scope} HEAD`; // bare ref → range up to HEAD
+}
+
 function gitDiffCommand(scope: string): string {
   switch (scope) {
     case "uncommitted":
@@ -156,10 +167,7 @@ function gitDiffCommand(scope: string): string {
     case "head":
       return "git show HEAD";
     default:
-      if (scope.startsWith("/") || scope.includes(".")) {
-        return `git diff -- ${scope}`;
-      }
-      return `git show ${scope}`;
+      return `git diff ${scopeDiffArgs(scope)}`;
   }
 }
 
@@ -170,10 +178,7 @@ function gitDiffFilesCommand(scope: string): string {
     case "head":
       return "git show HEAD --name-only --format=''";
     default:
-      if (scope.startsWith("/") || scope.includes(".")) {
-        return `git diff --name-only -- ${scope}`;
-      }
-      return `git show ${scope} --name-only --format=''`;
+      return `git diff --name-only ${scopeDiffArgs(scope)}`;
   }
 }
 
@@ -344,8 +349,9 @@ async function routeExtraAngles(cwd: string, diffCmd: string): Promise<AgentConf
 // ── Core ───────────────────────────────────────────────────────────────────────
 
 /** Multi-angle code review pipeline: data gather → parallel angle sessions →
- *  synthesis. Returns structured findings. Throws only on synthesis failure;
- *  no-changes and all-angles-failed are returned as valid ReviewOutput verdicts. */
+ *  synthesis. Returns structured findings. Throws on git-diff failure (bad
+ *  scope/not a repo) or synthesis failure; no-changes and all-angles-failed are
+ *  returned as valid ReviewOutput verdicts. */
 export async function runReview(rawParams: Record<string, unknown>): Promise<ReviewOutput> {
   const { cwd, scope, context, angles } = parseParams(REVIEW_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
@@ -384,7 +390,16 @@ export async function runReview(rawParams: Record<string, unknown>): Promise<Rev
       shell("cat package.json 2>/dev/null", cwd),
     ]);
 
-  if (!diffResult.ok || !diffResult.stdout) {
+  // A non-zero exit from `git diff` is a genuine failure (bad scope ref, not a
+  // git repo, git missing) — NOT "no changes". Surface it; otherwise the empty
+  // stdout below would be misread as a clean review (false positive).
+  if (!diffResult.ok) {
+    throw new Error(
+      `git diff failed for scope "${resolvedScope}": ${diffResult.stdout.trim() || "no output"}`,
+    );
+  }
+
+  if (!diffResult.stdout.trim()) {
     logger.info(
       {
         event: "review.done",
