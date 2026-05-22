@@ -1,6 +1,7 @@
 import { existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
+import { z } from "zod";
 import { logger } from "./logger.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -22,7 +23,7 @@ const DEFAULT_MODEL = "Kimi-K2.6";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
-export interface SessionOptions {
+export interface SessionOptions<T = unknown> {
   cwd: string;
   prompt: string;
   /** Bridge model id (LiteLLM model_name): "Kimi-K2.6" | "claude-sonnet-4-6-eu" | "gpt-5-mini". */
@@ -49,6 +50,30 @@ export interface SessionOptions {
   extraEnv?: Record<string, string>;
   /** Called every 15s while the subprocess runs. Use to send MCP progress notifications and reset client timeout. */
   onProgress?: (progress: number, total: number, message: string) => void;
+  /**
+   * Optional output validator. Kimi over the bridge ignores `--json-schema` and
+   * emits prose-fenced JSON that `extractJson` casts WITHOUT type-checking, so
+   * schema drift (e.g. a field of the wrong type) otherwise slips through to the
+   * MCP `outputSchema` boundary and fails the call opaquely. When provided, the
+   * extracted data (from `structured_output` or the result fence) is validated
+   * here first — a failure becomes a clear `{ ok: false }`. Build from the tool's
+   * Zod schema via `zodValidator(MY_OUTPUT)`.
+   */
+  validate?: (data: unknown) => { ok: true; value: T } | { ok: false; error: string };
+}
+
+/** Build a `SessionOptions.validate` from a Zod schema. Returns the parsed value or a flattened issue string. */
+export function zodValidator<T>(
+  schema: z.ZodType<T>,
+): (data: unknown) => { ok: true; value: T } | { ok: false; error: string } {
+  return (data) => {
+    const r = schema.safeParse(data);
+    if (r.success) return { ok: true, value: r.data };
+    const issues = r.error.issues
+      .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
+      .join("; ");
+    return { ok: false, error: `output failed schema validation: ${issues}` };
+  };
 }
 
 export interface SessionResult<T = unknown> {
@@ -177,7 +202,7 @@ async function bridgeReachable(): Promise<boolean> {
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
-export async function runSession<T = unknown>(opts: SessionOptions): Promise<SessionResult<T>> {
+export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<SessionResult<T>> {
   const {
     cwd,
     prompt,
@@ -188,6 +213,7 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
     settingSources = "project",
     readOnly = false,
     extraEnv,
+    validate,
   } = opts;
 
   if (!(await bridgeReachable())) {
@@ -373,18 +399,36 @@ export async function runSession<T = unknown>(opts: SessionOptions): Promise<Ses
       "session end",
     );
 
+  // Validate (if a validator was supplied) before returning, then log session end.
+  // extractJson casts without type-checking, so this is the only gate that catches
+  // worker output that drifts from the declared schema.
+  const finalize = (value: T): SessionResult<T> => {
+    if (validate) {
+      const v = validate(value);
+      if (!v.ok) {
+        logger.error(
+          { event: "session.invalid_output", project: cwd, error: v.error },
+          "session output failed validation",
+        );
+        return { ok: false, error: v.error };
+      }
+      logSessionEnd();
+      return { ok: true, data: v.value };
+    }
+    logSessionEnd();
+    return { ok: true, data: value };
+  };
+
   // --json-schema puts the parsed object in structured_output; fall back to result string
   if (envelope.structured_output !== undefined) {
-    logSessionEnd();
-    return { ok: true, data: envelope.structured_output as T };
+    return finalize(envelope.structured_output as T);
   }
 
   const raw = envelope.result;
   if (typeof raw === "string" && raw.trim()) {
     const data = extractJson<T>(raw);
     if (data !== undefined) {
-      logSessionEnd();
-      return { ok: true, data };
+      return finalize(data);
     }
     logger.error({ raw: raw.slice(0, 500) }, "result JSON parse failed");
     return { ok: false, error: `result field is not valid JSON: ${raw.slice(0, 500)}` };
