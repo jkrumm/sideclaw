@@ -64,7 +64,7 @@ Return ONLY a JSON object:
 ## Rules
 
 - `line` is optional — omit if not identifiable from the original finding
-- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `coderabbit`, `fallow`
+- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `coderabbit`, `fallow`
 - Preserve specificity from the original finding — don't generalize
 - Empty arrays are fine — not every review has blocking issues
 - Bias toward `improvement` over `discussion` — if the fix is obvious and low-risk, it's an improvement

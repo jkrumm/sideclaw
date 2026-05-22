@@ -10,6 +10,11 @@ import { logger } from "../logger.ts";
 // fallback from stampeding when 4–6 angles fire together.
 const ANGLE_CONCURRENCY = 3;
 
+// Hard cap on total angles per review. Floor angles (architect, senior-dev, +
+// file-type matches) are kept first; the router's extra angles fill remaining
+// slots. Bounds cost and wall time (more angles = more concurrency waves).
+const MAX_ANGLES = 8;
+
 /**
  * Run `fn` over `items` with at most `limit` in flight. Preserves input order.
  */
@@ -40,7 +45,7 @@ const FINDING = z.object({
   angle: z
     .string()
     .describe(
-      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | coderabbit | fallow",
+      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | coderabbit | fallow",
     ),
 });
 
@@ -230,6 +235,100 @@ function selectAgents(changedFiles: string[], hasTestScript: boolean): AgentConf
   return agents;
 }
 
+// ── Dynamic angle routing ────────────────────────────────────────────────────────
+
+// Router-only angles: content-driven reviewers that file extensions can't detect.
+// The triage router (router.md) picks from these based on what the diff actually does.
+const ROUTER_ANGLE_LABELS: Record<string, string> = {
+  security: "Security Reviewer",
+  performance: "Performance Reviewer",
+  concurrency: "Concurrency Reviewer",
+  "data-migration": "Data & Migration Reviewer",
+  "api-contract": "API Contract Reviewer",
+};
+
+// Every angle the caller may request explicitly via the `angles` input.
+const ALL_ANGLE_LABELS: Record<string, string> = {
+  architect: "Architect",
+  "senior-dev": "Senior Dev",
+  frontend: "Frontend Expert",
+  backend: "Backend Expert",
+  typescript: "TypeScript Expert",
+  qa: "QA Engineer",
+  ...ROUTER_ANGLE_LABELS,
+};
+
+const ROUTER_OUTPUT = z.object({
+  angles: z.array(z.string()),
+  rationale: z.string().optional(),
+});
+
+const ROUTER_JSON_SCHEMA = z.toJSONSchema(ROUTER_OUTPUT);
+
+/** Dedupe by angle key, preserving order, capped at `max`. Floor angles passed
+ *  first survive the cap; router extras fill the remaining slots. */
+function capAngles(agents: AgentConfig[], max: number): AgentConfig[] {
+  const seen = new Set<string>();
+  const out: AgentConfig[] = [];
+  for (const a of agents) {
+    if (seen.has(a.angle)) continue;
+    seen.add(a.angle);
+    out.push(a);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/** Resolve an explicit caller-provided angle list. Always keeps the baseline
+ *  (architect + senior-dev); ignores unknown keys. Skips the router entirely. */
+function resolveRequestedAngles(requested: string[], floor: AgentConfig[]): AgentConfig[] {
+  const baseline = floor.filter((a) => a.angle === "architect" || a.angle === "senior-dev");
+  const extra = requested
+    .filter((a) => a in ALL_ANGLE_LABELS)
+    .map((a) => ({ angle: a, label: ALL_ANGLE_LABELS[a] }));
+  return capAngles([...baseline, ...extra], MAX_ANGLES);
+}
+
+/** Run the triage router (one cheap Kimi session) to pick content-driven angles
+ *  beyond the deterministic floor. Returns [] on any failure — the floor still
+ *  reviews the diff, so a router failure degrades gracefully, never blocks. */
+async function routeExtraAngles(cwd: string, diffCmd: string): Promise<AgentConfig[]> {
+  let prompt: string;
+  try {
+    prompt = await loadAnglePrompt("router");
+  } catch (err) {
+    logger.error({ tool: "review", error: String(err) }, "router prompt load failed");
+    return [];
+  }
+  prompt = prompt.replace("[GIT_DIFF_COMMAND]", `Run: \`${diffCmd}\``);
+
+  const result = await runSession<z.infer<typeof ROUTER_OUTPUT>>({
+    cwd,
+    prompt,
+    model: "Kimi-K2.6",
+    jsonSchema: ROUTER_JSON_SCHEMA,
+    maxTurns: 8,
+    timeoutMs: 3 * 60 * 1000,
+    readOnly: true,
+    settingSources: "project",
+  });
+
+  if (!result.ok || !result.data) {
+    logger.warn(
+      { tool: "review", error: result.error },
+      "router failed — using deterministic angles only",
+    );
+    return [];
+  }
+
+  const picked = result.data.angles.filter((a) => a in ROUTER_ANGLE_LABELS);
+  logger.info(
+    { tool: "review", routerAngles: picked, rationale: result.data.rationale },
+    "router selected extra angles",
+  );
+  return picked.map((a) => ({ angle: a, label: ROUTER_ANGLE_LABELS[a] }));
+}
+
 // ── Tool registration ──────────────────────────────────────────────────────────
 
 export function registerReviewTool(server: McpServer): void {
@@ -237,13 +336,14 @@ export function registerReviewTool(server: McpServer): void {
     "review",
     {
       title: "Code Review",
-      description: `Run a deep multi-angle code review with specialist reviewers (architecture, code quality, TypeScript, frontend, backend, QA) and return structured findings classified by action level.
+      description: `Run a deep multi-angle code review with specialist reviewers and return structured findings classified by action level. Always runs architect + senior-dev, adds file-type reviewers (frontend/backend/typescript/qa) automatically, and a triage router picks extra content-driven angles (security, performance, concurrency, data-migration, api-contract) when the diff warrants them.
 
 WHEN TO CALL: before committing, before creating a PR, or when asked to review code quality.
 READ-ONLY: never modifies files. Safe to retry.
 CWD: absolute path of the repo to review — not necessarily this session's CWD.
 SCOPE: what to review — "uncommitted" (default, staged+unstaged), "head" (last commit), or a git ref/path.
 CONTEXT: optional background on what the changes are trying to accomplish. Helps catch "doesn't achieve the goal" issues.
+ANGLES: optional explicit reviewer list to force a fixed set and skip the router (e.g. re-running a review). Omit to let routing decide.
 OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (blocking + improvements + testGaps to apply), or "needs-human" (has discussions requiring decision). \`blocking\` must be fixed. \`improvements\` should be applied by the implementation agent. \`discussions\` need human review. \`testGaps\` list missing test scenarios.`,
       inputSchema: {
         cwd: z
@@ -263,6 +363,12 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
           .describe(
             'Factual description of the changes\' intent (e.g. "add MCP review tool"). Helps catch goal-mismatch bugs. Omit if the diff is self-explanatory.',
           ),
+        angles: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Explicit reviewer angles to run, overriding the router. Valid: architect, senior-dev, frontend, backend, typescript, qa, security, performance, concurrency, data-migration, api-contract. Baseline architect + senior-dev are always included. Omit to let the router pick based on the diff.",
+          ),
       },
       outputSchema: REVIEW_OUTPUT.shape,
       annotations: {
@@ -270,7 +376,7 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
         idempotentHint: true,
       },
     },
-    async ({ cwd, scope, context }, extra) => {
+    async ({ cwd, scope, context, angles }, extra) => {
       if (!existsSync(cwd)) {
         return {
           content: [
@@ -359,26 +465,16 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
         // no package.json or invalid — skip QA agent
       }
 
-      const agents = selectAgents(changedFiles, hasTestScript);
-      logger.info(
-        {
-          tool: "review",
-          project: cwd,
-          agents: agents.map((a) => a.angle),
-          changedFiles: changedFiles.length,
-          hasFallow: !!fallowResult.stdout,
-          hasCoderabbit: !!coderabbitResult.stdout,
-        },
-        "review agents selected",
-      );
+      // Deterministic floor: architect + senior-dev + file-type matches.
+      const floorAgents = selectAgents(changedFiles, hasTestScript);
 
-      // ── Phase 2: Angle reviews (parallel haiku sessions) ────────────────
+      // ── Phase 2: Angle reviews (parallel sessions) ──────────────────────
 
       const onProgress = mcpProgressCallback(extra);
-      // Centralized heartbeat — one interval for the entire pipeline (phases 2+3).
-      // Individual runSession() calls intentionally omit onProgress because this
-      // handler-level heartbeat already resets the MCP client timeout. Avoids N
-      // overlapping heartbeats from parallel sessions.
+      // Centralized heartbeat — one interval for the entire pipeline (router +
+      // phases 2+3). Individual runSession() calls intentionally omit onProgress
+      // because this handler-level heartbeat already resets the MCP client
+      // timeout. Avoids N overlapping heartbeats from parallel sessions.
       let heartbeatTick = 0;
       const heartbeatHandle = onProgress
         ? setInterval(() => {
@@ -393,6 +489,27 @@ OUTPUT: check \`outcome\` first — "clean" (nothing to do), "actionable" (block
         : "";
 
       try {
+        // ── Phase 1.5: Dynamic angle routing (wrapped by the heartbeat) ─────
+        // An explicit `angles` override skips the router; otherwise the triage
+        // router adds content-driven angles on top of the deterministic floor.
+        const explicit = angles && angles.length > 0;
+        const agents = explicit
+          ? resolveRequestedAngles(angles, floorAgents)
+          : capAngles([...floorAgents, ...(await routeExtraAngles(cwd, diffCmd))], MAX_ANGLES);
+
+        logger.info(
+          {
+            tool: "review",
+            project: cwd,
+            agents: agents.map((a) => a.angle),
+            changedFiles: changedFiles.length,
+            routed: !explicit,
+            hasFallow: !!fallowResult.stdout,
+            hasCoderabbit: !!coderabbitResult.stdout,
+          },
+          "review agents selected",
+        );
+
         // ── Phase 2 + 3 wrapped in try-finally to guarantee heartbeat cleanup ──
 
         const angleResults = await mapWithConcurrency(

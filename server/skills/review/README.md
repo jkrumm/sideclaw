@@ -11,21 +11,39 @@ Phase 1 — Data Gathering (parallel shell, ~2s)
 ├── coderabbit review --prompt-only
 └── package.json (test script detection)
 
-Phase 2 — Angle Reviews (parallel haiku sessions, ~30-60s)
-├── Architect          ← always
-├── Senior Dev         ← always
-├── Frontend Expert    ← if .tsx/.jsx/.css in diff
-├── Backend Expert     ← if api/**/*.ts or server/**/*.ts in diff
-├── TypeScript Expert  ← if .ts/.tsx in diff
-└── QA Engineer        ← if project has test script
+Phase 1.5 — Angle Routing (one Kimi-K2.6 triage session, ~10-20s)
+└── Reads the diff, adds content-driven angles on top of the deterministic floor
+    (skipped when the caller passes an explicit `angles` list)
 
-Phase 3 — Synthesis (single sonnet session, ~15s)
+Phase 2 — Angle Reviews (parallel Kimi-K2.6 sessions, capped at 3 in flight)
+├── Architect           ← always (floor)
+├── Senior Dev          ← always (floor)
+├── Frontend Expert     ← if .tsx/.jsx/.css in diff (floor)
+├── Backend Expert      ← if api/**/*.ts or server/**/*.ts in diff (floor)
+├── TypeScript Expert   ← if .ts/.tsx in diff (floor)
+├── QA Engineer         ← if project has test script (floor)
+├── Security Reviewer   ← router, if the diff touches auth/secrets/input/etc.
+├── Performance         ← router, if the diff has hot paths / scaling cost
+├── Concurrency         ← router, if the diff has races / shared state / fan-out
+├── Data & Migration    ← router, if the diff touches schema/migrations/data
+└── API Contract        ← router, if the diff changes public API shape
+
+Phase 3 — Synthesis (single Kimi-K2.6 session, ~15s)
 └── Deduplicates, resolves conflicts, classifies findings
 ```
 
 ## Agent Selection
 
-Detection is automatic based on changed file extensions:
+Selection has two layers. A **deterministic floor** is picked from changed file
+extensions (instant, free, always covers the basics). A **triage router** then
+adds content-driven angles that file types can't detect — it reads the diff once
+on Kimi-K2.6 and returns the extra angles it judges relevant. Total angles are
+capped at `MAX_ANGLES` (8); the floor is kept first, router extras fill the rest.
+
+Pass an explicit `angles` array to force a fixed set and skip the router (useful
+when re-running a review). The baseline architect + senior-dev are always kept.
+
+### Floor (deterministic, by file extension)
 
 | Agent      | Trigger                         | Focus                                                                            |
 | ---------- | ------------------------------- | -------------------------------------------------------------------------------- |
@@ -35,6 +53,16 @@ Detection is automatic based on changed file extensions:
 | Backend    | `api/**/*.ts`, `server/**/*.ts` | Elysia patterns (method chaining, encapsulation, guards), API design, validation |
 | TypeScript | `.ts/.tsx`                      | Type safety, generics, async, race conditions, null safety                       |
 | QA         | `test` script in package.json   | Test coverage gaps (unit/integration/e2e), edge cases, regression risk           |
+
+### Router (content-driven, picked by `router.md` from the diff)
+
+| Agent          | Picked when the diff…                                                            |
+| -------------- | ------------------------------------------------------------------------------- |
+| Security       | touches auth, secrets, crypto, input validation, injection, file/env handling   |
+| Performance    | adds hot paths, N+1 queries, unbounded work, scaling-sensitive rendering        |
+| Concurrency    | adds races, shared mutable state, `Promise.all` fan-out, retries/idempotency    |
+| Data & Migration | changes schema, migrations, ORM models, backfills, serialization formats      |
+| API Contract   | changes public API shape, request/response schema, versioning, error contracts  |
 
 External tools run in parallel with agents:
 
@@ -95,13 +123,17 @@ Each agent loads project context via `--setting-sources user,project`:
 
 ## Cost Profile
 
-| Component                     | Model  | Cost                       |
-| ----------------------------- | ------ | -------------------------- |
-| 2-6 angle sessions (parallel) | haiku  | ~$0.01-0.03                |
-| 1 synthesis session           | sonnet | ~$0.02                     |
-| **Total**                     |        | **~$0.03-0.05 per review** |
+All sessions run on **Kimi-K2.6** (EU/GDPR) via the LiteLLM bridge — IU per-token
+billing, zero Max quota.
 
-Wall time: ~45-90s (phases 2+3 dominate, phase 2 is parallel).
+| Component                          | Model     |
+| ---------------------------------- | --------- |
+| 1 router triage session            | Kimi-K2.6 |
+| 2–8 angle sessions (3 in flight)   | Kimi-K2.6 |
+| 1 synthesis session                | Kimi-K2.6 |
+
+Wall time: ~60–120s (router adds ~10-20s; phase 2 dominates and is parallel up to
+`ANGLE_CONCURRENCY`). Passing an explicit `angles` list skips the router.
 
 ## MCP Integration
 
@@ -111,7 +143,8 @@ Called via the `review` MCP tool:
 mcp__sideclaw__review({
   cwd: "/path/to/repo",
   scope: "uncommitted",        // or "head", "HEAD~3", "path/to/file.ts"
-  context: "add retry logic"   // optional — helps catch goal mismatches
+  context: "add retry logic",  // optional — helps catch goal mismatches
+  angles: ["security", "qa"]   // optional — force a fixed set, skip the router
 })
 ```
 
@@ -122,12 +155,18 @@ The `/review` skill and `/ship` orchestrator both invoke this tool.
 ```
 server/skills/review/
 ├── README.md          ← this file
-├── architect.md       ← architecture angle prompt
-├── senior-dev.md      ← code quality angle prompt
-├── frontend.md        ← React/frontend angle prompt
-├── backend.md         ← Elysia/backend angle prompt
-├── typescript.md      ← type safety angle prompt
-├── qa.md              ← QA/testing angle prompt
+├── router.md          ← triage router prompt (picks content-driven angles)
+├── architect.md       ← architecture angle prompt (floor)
+├── senior-dev.md      ← code quality angle prompt (floor)
+├── frontend.md        ← React/frontend angle prompt (floor)
+├── backend.md         ← Elysia/backend angle prompt (floor)
+├── typescript.md      ← type safety angle prompt (floor)
+├── qa.md              ← QA/testing angle prompt (floor)
+├── security.md        ← security angle prompt (router)
+├── performance.md     ← performance angle prompt (router)
+├── concurrency.md     ← concurrency angle prompt (router)
+├── data-migration.md  ← data & migration angle prompt (router)
+├── api-contract.md    ← API contract angle prompt (router)
 └── synthesis.md       ← synthesis/classification prompt
 
 server/mcp/tools/review.ts  ← pipeline orchestration + output schema
