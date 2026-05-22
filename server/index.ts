@@ -13,6 +13,9 @@ import { githubRoutes } from "./routes/github";
 import { diagramsRoutes } from "./routes/diagrams";
 import { actionsRoutes } from "./routes/actions";
 import { kioskRoute } from "./routes/kiosk";
+import { jobsRoutes } from "./routes/jobs";
+import { initJobStore } from "./jobs/store";
+import { executeJob } from "./jobs/executor";
 
 const isDev = !existsSync("dist/index.html");
 const indexHtml = isDev ? null : readFileSync("dist/index.html", "utf-8");
@@ -63,7 +66,12 @@ const app = new Elysia()
   .use(githubRoutes)
   .use(diagramsRoutes)
   .use(actionsRoutes)
-  .use(kioskRoute);
+  .use(kioskRoute)
+  .use(jobsRoutes);
+
+// Wire the async job system: register the executor and run startup recovery
+// (in-flight jobs from a previous process → interrupted; re-promote pending).
+initJobStore({ executor: executeJob });
 
 if (!isDev) {
   app.use(staticPlugin({ assets: "dist/assets", prefix: "/assets" })).get("*", ({ set }) => {

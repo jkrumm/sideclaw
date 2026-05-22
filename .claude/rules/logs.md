@@ -40,6 +40,12 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `session.error` | mcp | Session returned `is_error` or produced no output |
 | `github.cache.hit` | app | Octokit request served from cache (carries `kind: "soft" \| "304"`, `url`) |
 | `github.cache.miss` | app | Octokit response stored to cache (carries `url`, `status`) |
+| `job.create` | app | Async job submitted (carries `jobId`, `tool`) |
+| `job.start` | app | Job promoted from pending to running (carries `jobId`, `tool`, `running`, `pending`, `max`) |
+| `job.done` | app | Job finished successfully (carries `jobId`) |
+| `job.fail` | app | Job handler threw (carries `jobId`, `error`) |
+| `job.recover` | app | Startup reconciliation (carries `interrupted`, `requeued`) |
+| `mcp.tool.submit` | mcp | Thin MCP tool submitted a job to the HTTP server (carries `tool`, `jobId`, `status`) |
 
 ## Query patterns
 

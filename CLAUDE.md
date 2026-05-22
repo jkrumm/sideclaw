@@ -62,9 +62,23 @@ The LaunchAgent starts automatically on login and restarts on crash.
 
 ## MCP Server
 
-sideclaw exposes workflow tools (`check`, `review`, `research`, `implement`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
+sideclaw exposes workflow tools (`check`, `review`, `research`, `implement`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
 
-Entry point: `server/mcp.ts`. Tools live in `server/mcp/tools/`, skill prompts in `server/skills/`.
+Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`; the actual execution logic + schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`.
+
+### Async job model (durable, off the MCP transport)
+
+The four long tools (`check`/`review`/`research`/`implement`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
+
+1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
+2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`/tmp/sideclaw-jobs.db`, separate from the ephemeral `/tmp/sideclaw.db`). See `server/jobs/store.ts`.
+3. The caller polls **`job_wait({ jobId })`** — a long-poll (~50s, heartbeated) that returns the result the moment the job finishes, or `stillRunning: true` to call again. `job_status` is a one-shot peek.
+
+Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart (in-flight jobs reconcile to `interrupted` on boot — `recover()`). A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't stampede the single-backend Kimi bridge into 429s.
+
+Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
+
+Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `implement`/`review` workers get the Tavily key inline (research capability) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
 ### Worker model — LiteLLM bridge (Kimi-K2.6, EU)
 
@@ -76,7 +90,7 @@ Two constraints the bridge imposes:
 
 ### Review Tool — Multi-Angle Pipeline
 
-The `review` tool runs a 3-phase parallel pipeline (see `server/skills/review/README.md` for full docs):
+The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel pipeline inside the HTTP server (see `server/skills/review/README.md` for full docs):
 
 1. **Data gathering** (parallel): git diff, fallow audit, CodeRabbit CLI
 2. **Angle reviews** (parallel Kimi-K2.6 sessions, capped at `ANGLE_CONCURRENCY=3` so the single-backend model doesn't 429): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
