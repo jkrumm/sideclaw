@@ -56,13 +56,13 @@ when re-running a review). The baseline architect + senior-dev are always kept.
 
 ### Router (content-driven, picked by `router.md` from the diff)
 
-| Agent          | Picked when the diff…                                                            |
-| -------------- | ------------------------------------------------------------------------------- |
-| Security       | touches auth, secrets, crypto, input validation, injection, file/env handling   |
-| Performance    | adds hot paths, N+1 queries, unbounded work, scaling-sensitive rendering        |
-| Concurrency    | adds races, shared mutable state, `Promise.all` fan-out, retries/idempotency    |
-| Data & Migration | changes schema, migrations, ORM models, backfills, serialization formats      |
-| API Contract   | changes public API shape, request/response schema, versioning, error contracts  |
+| Agent            | Picked when the diff…                                                          |
+| ---------------- | ------------------------------------------------------------------------------ |
+| Security         | touches auth, secrets, crypto, input validation, injection, file/env handling  |
+| Performance      | adds hot paths, N+1 queries, unbounded work, scaling-sensitive rendering       |
+| Concurrency      | adds races, shared mutable state, `Promise.all` fan-out, retries/idempotency   |
+| Data & Migration | changes schema, migrations, ORM models, backfills, serialization formats       |
+| API Contract     | changes public API shape, request/response schema, versioning, error contracts |
 
 External tools run in parallel with agents:
 
@@ -126,11 +126,11 @@ Each agent loads project context via `--setting-sources user,project`:
 All sessions run on **Kimi-K2.6** (EU/GDPR) via the LiteLLM bridge — IU per-token
 billing, zero Max quota.
 
-| Component                          | Model     |
-| ---------------------------------- | --------- |
-| 1 router triage session            | Kimi-K2.6 |
-| 2–8 angle sessions (3 in flight)   | Kimi-K2.6 |
-| 1 synthesis session                | Kimi-K2.6 |
+| Component                        | Model     |
+| -------------------------------- | --------- |
+| 1 router triage session          | Kimi-K2.6 |
+| 2–8 angle sessions (3 in flight) | Kimi-K2.6 |
+| 1 synthesis session              | Kimi-K2.6 |
 
 Wall time: ~60–120s (router adds ~10-20s; phase 2 dominates and is parallel up to
 `ANGLE_CONCURRENCY`). Passing an explicit `angles` list skips the router.

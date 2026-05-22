@@ -61,5 +61,5 @@ Return ONLY a JSON object:
 Rules:
 
 - `line` is optional — omit if not identifiable.
-- Always reason about *existing* data and the rollout window, not just a fresh database.
+- Always reason about _existing_ data and the rollout window, not just a fresh database.
 - Be concrete about the failure (which rows, which deploy ordering) and the fix.
