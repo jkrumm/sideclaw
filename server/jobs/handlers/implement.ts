@@ -26,6 +26,17 @@ export const IMPLEMENT_INPUT = z.object({
     .describe(
       "Optional supporting context: relevant file paths, the plan, API shapes, or conventions to follow. Reduces exploration time.",
     ),
+  validateCmd: z
+    .string()
+    .optional()
+    .describe(
+      "Optional exact command(s) the worker runs to self-verify its change, e.g. " +
+        "'.venv/bin/pyrefly check && .venv/bin/pytest -q tests/foo'. When provided, the " +
+        "worker runs THIS verbatim instead of discovering the repo's runner — this is the " +
+        "single biggest waste-preventer on non-Node repos (workers otherwise burn their " +
+        "whole turn budget, and may hit the hard timeout, hunting for a test runner). " +
+        "Omit on Node/Bun repos where `bun run typecheck/lint/test` is reliably auto-detected.",
+    ),
 });
 
 export type ImplementParams = z.infer<typeof IMPLEMENT_INPUT>;
@@ -55,14 +66,28 @@ export type ImplementOutput = z.infer<typeof IMPLEMENT_OUTPUT>;
 
 // ── Skill prompt loader ────────────────────────────────────────────────────────
 
-async function loadSkillPrompt(task: string, context: string | undefined): Promise<string> {
+async function loadSkillPrompt(
+  task: string,
+  context: string | undefined,
+  validateCmd: string | undefined,
+): Promise<string> {
   const skillPath = join(import.meta.dir, "../../skills/implement.md");
   if (!existsSync(skillPath)) {
     throw new Error(`implement skill prompt not found at ${skillPath}`);
   }
   const template = await Bun.file(skillPath).text();
   const contextBlock = context ? `\n## Context\n\n${context}\n` : "";
-  return template.replace("{{TASK}}", task).replace("{{CONTEXT}}", contextBlock);
+  const validateBlock = validateCmd
+    ? `\n## Validation command (run THIS to self-verify — do not hunt for a runner)\n\n` +
+      `After your edits are on disk, self-verify by running EXACTLY this via Bash, then ` +
+      `report its outcome in \`checkPassed\`:\n\n\`\`\`\n${validateCmd}\n\`\`\`\n\n` +
+      `Do NOT spend turns discovering an alternative runner — this is the authoritative ` +
+      `command. Fix only failures YOUR change introduced; report pre-existing ones in \`notes\`.\n`
+    : "";
+  return template
+    .replace("{{TASK}}", task)
+    .replace("{{CONTEXT}}", contextBlock)
+    .replace("{{VALIDATE}}", validateBlock);
 }
 
 // ── Core ───────────────────────────────────────────────────────────────────────
@@ -74,10 +99,10 @@ export async function runImplement(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
 ): Promise<ImplementOutput> {
-  const { cwd, task, context } = parseParams(IMPLEMENT_INPUT, rawParams);
+  const { cwd, task, context, validateCmd } = parseParams(IMPLEMENT_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
-  const prompt = await loadSkillPrompt(task, context);
+  const prompt = await loadSkillPrompt(task, context, validateCmd);
   const tavilyKey = await readTavilyKey();
 
   const result = await runSession<ImplementOutput>({

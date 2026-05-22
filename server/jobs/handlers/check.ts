@@ -13,6 +13,17 @@ export const CHECK_INPUT = z.object({
     .describe(
       "Absolute path to the git repo root to validate. Must be an existing git repository. Supports git worktrees.",
     ),
+  commands: z
+    .array(z.string())
+    .optional()
+    .describe(
+      "Optional explicit validation commands to run verbatim, in order, e.g. " +
+        "['.venv/bin/ruff check', '.venv/bin/pyrefly check', '.venv/bin/pytest -q']. " +
+        "When provided, the worker runs ONLY these and skips ecosystem auto-discovery — " +
+        "this avoids burning wall-clock hunting for the test runner (the #1 time-sink on " +
+        "non-Node repos). Each command becomes one step named after its first token. " +
+        "Omit on Node/Bun repos where package.json scripts are auto-detected reliably.",
+    ),
 });
 
 export type CheckParams = z.infer<typeof CHECK_INPUT>;
@@ -44,12 +55,22 @@ export type CheckOutput = z.infer<typeof CHECK_OUTPUT>;
 
 // ── Skill prompt loader ────────────────────────────────────────────────────────
 
-async function loadSkillPrompt(): Promise<string> {
+async function loadSkillPrompt(commands: string[] | undefined): Promise<string> {
   const skillPath = join(import.meta.dir, "../../skills/check.md");
   if (!existsSync(skillPath)) {
     throw new Error(`check skill prompt not found at ${skillPath}`);
   }
-  return Bun.file(skillPath).text();
+  const template = await Bun.file(skillPath).text();
+  const block =
+    commands && commands.length > 0
+      ? "## Explicit commands (run THESE, skip discovery)\n\n" +
+        "The caller supplied the exact validation commands. Run ONLY these, in order, " +
+        "via Bash — do NOT auto-detect the ecosystem or read package.json/pyproject.toml. " +
+        "Name each step after the command's first token (or the tool it invokes):\n\n" +
+        commands.map((c) => `- \`${c}\``).join("\n") +
+        "\n"
+      : "";
+  return template.replace("{{COMMANDS}}", block);
 }
 
 // ── Core ───────────────────────────────────────────────────────────────────────
@@ -59,10 +80,10 @@ export async function runCheck(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
 ): Promise<CheckOutput> {
-  const { cwd } = parseParams(CHECK_INPUT, rawParams);
+  const { cwd, commands } = parseParams(CHECK_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
-  const prompt = await loadSkillPrompt();
+  const prompt = await loadSkillPrompt(commands);
   const result = await runSession<CheckOutput>({
     cwd,
     prompt,

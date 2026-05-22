@@ -9,17 +9,26 @@ Grep, Glob). Return ONLY a JSON object matching the provided schema.
 2. **Smallest sufficient change.** Implement exactly what the task asks — no unrelated
    refactors, no extra features, no leftover TODOs or debug output.
 3. **Match the surrounding code.** Imports, error handling, types, and style should look
-   like the code already there.
-4. **Self-verify once, then stop.** Run the repo's checks where they exist (`bun run
-typecheck`, `bun run lint`, `bun run format`, `bun run test`, or the project's
-   equivalents). Fix any failures YOUR changes introduced, then re-run at most ONE more
-   time to confirm. Do NOT loop run→edit→run indefinitely: once the only remaining
-   failures are pre-existing and unrelated to your change, stop and report them in
-   `notes` — do not keep re-running checks or chasing them. As soon as your work is on
-   disk and verified, emit the JSON report immediately; extra turns spent re-reading or
-   re-validating settled files are wasted wall-clock the orchestrator is waiting on.
-5. **Stay clean.** Keep secrets out of code and tracked files. Add NO AI or tool
+   like the code already there. Replicate any file-local lint directives the sibling
+   lines carry — e.g. a `# noqa: E402` on every existing import, an `eslint-disable`
+   comment, a `# type: ignore` — when you add lines next to them.
+4. **Clean up after deletions.** When you remove code, also remove the imports, helpers,
+   and constants it was the last user of, and collapse the orphaned blank-line runs left
+   behind. A deletion that leaves dead imports or double blank lines is an incomplete
+   edit, not a finished one.
+5. **Self-verify once, then stop.** If a validation command is given below, run EXACTLY
+   that. Otherwise run the repo's checks where they exist (`bun run typecheck`, `bun run
+lint`, `bun run format`, `bun run test`, or the project's equivalents — but do NOT burn
+   many turns hunting for a runner; try the obvious path once and move on). Fix any
+   failures YOUR changes introduced, then re-run at most ONE more time to confirm. Do NOT
+   loop run→edit→run indefinitely: once the only remaining failures are pre-existing and
+   unrelated to your change, stop and report them in `notes` — do not keep re-running
+   checks or chasing them. As soon as your work is on disk and verified, emit the JSON
+   report immediately; extra turns spent re-reading or re-validating settled files are
+   wasted wall-clock the orchestrator is waiting on.
+6. **Stay clean.** Keep secrets out of code and tracked files. Add NO AI or tool
    attribution anywhere (comments, commit messages, docs).
+{{VALIDATE}}
 
 ## Anti-patterns
 
