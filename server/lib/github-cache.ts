@@ -40,6 +40,8 @@ function isSoftHit(err: unknown): err is SoftHitError {
   return typeof err === "object" && err !== null && SOFT_HIT_SENTINEL in err;
 }
 
+const keyOf = (method: string, url: string) => `${method} ${url}`;
+
 // Per-endpoint soft TTL. Repo file contents (e.g. release.yml existence)
 // rarely change — caching for 5 min is fine. Everything else: 10s.
 function getSoftTtlMs(url: string): number {
@@ -88,8 +90,6 @@ export function installEtagCache(octokit: Octokit, opts: EtagCacheOptions = {}):
     }
   };
 
-  const keyOf = (method: string, url: string) => `${method} ${url}`;
-
   octokit.hook.before("request", (options) => {
     const { method, url } = resolveRequest(options);
     if (method !== "GET") return;
@@ -107,7 +107,7 @@ export function installEtagCache(octokit: Octokit, opts: EtagCacheOptions = {}):
 
     // Stale: revalidate. GitHub etag values already include surrounding
     // double quotes — store and re-inject verbatim.
-    options.headers = { ...(options.headers ?? {}), "if-none-match": entry.etag };
+    options.headers = { ...options.headers, "if-none-match": entry.etag };
   });
 
   octokit.hook.after("request", (response, options) => {
