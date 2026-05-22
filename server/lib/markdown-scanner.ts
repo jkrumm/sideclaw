@@ -19,6 +19,10 @@ const IGNORE_DIRS = new Set([
 
 const IGNORE_FILES = new Set(["sc-note.md", "sc-queue.md"]);
 
+function isRenderable(name: string): boolean {
+  return name.endsWith(".md") || name.endsWith(".html");
+}
+
 export function scanMarkdownFiles(repoPath: string): string[] {
   const files: string[] = [];
 
@@ -33,7 +37,7 @@ export function scanMarkdownFiles(repoPath: string): string[] {
       if (entry.isDirectory()) {
         if (entry.name.startsWith(".") || IGNORE_DIRS.has(entry.name)) continue;
         walk(join(dir, entry.name));
-      } else if (entry.name.endsWith(".md") && !IGNORE_FILES.has(entry.name)) {
+      } else if (isRenderable(entry.name) && !IGNORE_FILES.has(entry.name)) {
         files.push(relative(repoPath, join(dir, entry.name)));
       }
     }

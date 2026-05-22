@@ -23,7 +23,8 @@ export const markdownRoutes = new Elysia({ prefix: "/api" })
       set.status = 400;
       return { ok: false, error: "Missing path or file query parameter" } as const;
     }
-    if (!file.endsWith(".md") || file.includes("..")) {
+    // .md and .html are readable; .html is rendered (view-only), never written.
+    if ((!file.endsWith(".md") && !file.endsWith(".html")) || file.includes("..")) {
       set.status = 400;
       return { ok: false, error: "Invalid file path" } as const;
     }

@@ -18,6 +18,8 @@ interface Props {
   content: string;
   contentKey: string;
   onSave: (content: string) => Promise<unknown>;
+  /** Fires on every edit with the live text — used to feed the Preview snapshot. */
+  onChange?: (value: string) => void;
   placeholder?: string;
 }
 
@@ -25,13 +27,13 @@ interface Props {
 const darkTheme = createTheme({
   theme: "dark",
   settings: {
-    background: "var(--bp-palette-dark-gray-4)",
+    background: "var(--bp-palette-dark-gray-2)",
     foreground: "var(--bp-typography-color-default)",
     caret: "var(--bp-typography-color-default)",
     selection: "rgba(45, 114, 210, 0.4)",
     selectionMatch: "rgba(45, 114, 210, 0.25)",
     lineHighlight: "transparent",
-    gutterBackground: "var(--bp-palette-dark-gray-4)",
+    gutterBackground: "var(--bp-palette-dark-gray-2)",
     gutterForeground: "var(--bp-typography-color-muted)",
     gutterBorder: "transparent",
     fontFamily: "'Geist Sans', system-ui, sans-serif",
@@ -47,7 +49,7 @@ const darkTheme = createTheme({
     { tag: t.monospace, fontFamily: "var(--bp-typography-family-mono)" },
     { tag: [t.processingInstruction, t.meta], color: "var(--bp-typography-color-muted)" },
     { tag: t.strikethrough, textDecoration: "line-through" },
-    { tag: t.quote, color: "var(--bp-typography-color-muted)", fontStyle: "italic" },
+    { tag: t.quote, fontStyle: "italic" },
   ],
 });
 
@@ -77,7 +79,7 @@ const lightTheme = createTheme({
     { tag: t.monospace, fontFamily: "var(--bp-typography-family-mono)" },
     { tag: [t.processingInstruction, t.meta], color: "#5f6b7c" },
     { tag: t.strikethrough, textDecoration: "line-through" },
-    { tag: t.quote, color: "#5f6b7c", fontStyle: "italic" },
+    { tag: t.quote, fontStyle: "italic" },
   ],
 });
 
@@ -211,10 +213,18 @@ const editorTheme = EditorView.theme({
 
 // ── Component ───────────────────────────────────────────────────────
 
-export function MarkdownEditor({ content, contentKey, onSave, placeholder }: Props) {
+export function MarkdownEditor({
+  content,
+  contentKey,
+  onSave,
+  onChange: onLiveChange,
+  placeholder,
+}: Props) {
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const onSaveRef = useRef(onSave);
   onSaveRef.current = onSave;
+  const onLiveChangeRef = useRef(onLiveChange);
+  onLiveChangeRef.current = onLiveChange;
   const pendingSaveFnRef = useRef<((c: string) => Promise<unknown>) | null>(null);
   const latestValueRef = useRef(content);
 
@@ -233,6 +243,7 @@ export function MarkdownEditor({ content, contentKey, onSave, placeholder }: Pro
 
   const onChange = useCallback((value: string, _viewUpdate: ViewUpdate) => {
     latestValueRef.current = value;
+    onLiveChangeRef.current?.(value);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     pendingSaveFnRef.current = onSaveRef.current;
     debounceRef.current = setTimeout(() => {

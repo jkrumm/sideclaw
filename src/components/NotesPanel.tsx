@@ -1,4 +1,6 @@
 import React, {
+  lazy,
+  Suspense,
   use,
   useCallback,
   useEffect,
@@ -7,11 +9,17 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Button, Callout, Popover, Spinner, Tag, Tree } from "@blueprintjs/core";
+import { Button, ButtonGroup, Callout, Popover, Spinner, Tag, Tree } from "@blueprintjs/core";
 import type { TreeNodeInfo } from "@blueprintjs/core";
 import { api } from "../lib/api";
 import { MarkdownEditor } from "./MarkdownEditor";
 import type { RepoData } from "../types";
+
+// Lazy — pulls react-markdown + shiki + mermaid into a separate chunk loaded
+// only when the user first switches a file to Preview ("render on request").
+const MarkdownPreview = lazy(() => import("./MarkdownPreview"));
+
+type ViewMode = "edit" | "preview";
 
 export interface NotesPanelHandle {
   notifyExternal: (sourceTabId?: string) => void;
@@ -75,7 +83,7 @@ function buildFileTree(
       nodes.push({
         id: file,
         label: fileName,
-        icon: "document",
+        icon: fileName.toLowerCase().endsWith(".html") ? "code" : "document",
         isSelected: file === selectedFile,
       });
     }
@@ -109,6 +117,21 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
   const [fileVersion, setFileVersion] = useState(0);
   const [mdFiles, setMdFiles] = useState<string[] | null>(null);
   const [treeOpen, setTreeOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("edit");
+
+  // Latest editor text, fed by MarkdownEditor.onChange. Read (not subscribed) when
+  // switching to Preview so the rendered snapshot reflects in-progress edits.
+  const liveTextRef = useRef(initial.notes);
+  useEffect(() => {
+    liveTextRef.current = editorContent;
+  }, [editorContent]);
+
+  // Reset to Edit whenever the active file changes (default view is Edit).
+  useEffect(() => {
+    setViewMode("edit");
+  }, [selectedFile]);
+
+  const isHtml = !!selectedFile && selectedFile.toLowerCase().endsWith(".html");
 
   const storagePrefix = `sideclaw:${repoPath}`;
 
@@ -131,11 +154,15 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
   });
 
   // Eagerly fetch markdown files to detect README and populate tree
-  useEffect(() => {
+  const loadMdFiles = useCallback(() => {
     api.api["markdown-files"].get({ query: { path: repoPath } }).then((res) => {
       if (res.data?.ok) setMdFiles(res.data.data as string[]);
     });
   }, [repoPath]);
+
+  useEffect(() => {
+    loadMdFiles();
+  }, [loadMdFiles]);
 
   const readmeFile = useMemo(
     () => mdFiles?.find((f) => f.toLowerCase() === "readme.md") ?? null,
@@ -356,6 +383,24 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
               })}
             </div>
 
+            {/* Edit / Preview toggle — markdown files only (.html is view-only) */}
+            {!isHtml && (
+              <ButtonGroup style={{ flexShrink: 0 }}>
+                <Button
+                  small
+                  text="Edit"
+                  variant={viewMode === "edit" ? "solid" : "minimal"}
+                  onClick={() => setViewMode("edit")}
+                />
+                <Button
+                  small
+                  text="Preview"
+                  variant={viewMode === "preview" ? "solid" : "minimal"}
+                  onClick={() => setViewMode("preview")}
+                />
+              </ButtonGroup>
+            )}
+
             {/* All MDs button — stays on right */}
             <Popover
               content={
@@ -395,7 +440,10 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
               placement="bottom-end"
               minimal
               isOpen={treeOpen}
-              onInteraction={(next) => setTreeOpen(next)}
+              onInteraction={(next) => {
+                setTreeOpen(next);
+                if (next) loadMdFiles();
+              }}
             >
               <Button
                 small
@@ -429,14 +477,42 @@ export function NotesPanel({ repoPath, initialPromise, ref }: Props) {
         </Callout>
       )}
 
-      {/* Editor — always mounted, hidden when collapsed */}
+      {/* Editor / Preview — always mounted (for autosave flush), hidden when collapsed */}
       <div style={{ display: collapsed ? "none" : "block" }}>
-        <MarkdownEditor
-          content={editorContent}
-          contentKey={contentKey}
-          onSave={editorSave}
-          placeholder={selectedFile ? `Editing ${selectedFile}...` : "Session notes..."}
-        />
+        {isHtml ? (
+          <iframe
+            className="md-html-frame"
+            sandbox=""
+            srcDoc={editorContent}
+            title={selectedFile ?? "HTML preview"}
+          />
+        ) : (
+          <>
+            {/* Editor stays mounted under Preview so pending saves still flush */}
+            <div style={{ display: viewMode === "edit" ? "block" : "none" }}>
+              <MarkdownEditor
+                content={editorContent}
+                contentKey={contentKey}
+                onSave={editorSave}
+                onChange={(v) => {
+                  liveTextRef.current = v;
+                }}
+                placeholder={selectedFile ? `Editing ${selectedFile}...` : "Session notes..."}
+              />
+            </div>
+            {viewMode === "preview" && (
+              <Suspense
+                fallback={
+                  <div style={{ display: "flex", justifyContent: "center", padding: 24 }}>
+                    <Spinner size={24} />
+                  </div>
+                }
+              >
+                <MarkdownPreview content={liveTextRef.current} />
+              </Suspense>
+            )}
+          </>
+        )}
       </div>
     </div>
   );
