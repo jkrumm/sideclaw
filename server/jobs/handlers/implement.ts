@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
 import { readTavilyKey } from "./research.ts";
 
@@ -69,7 +70,10 @@ async function loadSkillPrompt(task: string, context: string | undefined): Promi
 /** Delegate a scoped coding task to a worker that edits files, self-verifies, and
  *  reports. Throws on failure. The worker gets the Tavily key in its env so it can
  *  verify a library/API inline (the research capability) without a nested job. */
-export async function runImplement(rawParams: Record<string, unknown>): Promise<ImplementOutput> {
+export async function runImplement(
+  rawParams: Record<string, unknown>,
+  onProgress?: ProgressSink,
+): Promise<ImplementOutput> {
   const { cwd, task, context } = parseParams(IMPLEMENT_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
@@ -88,6 +92,7 @@ export async function runImplement(rawParams: Record<string, unknown>): Promise<
     settingSources: "user,project",
     extraEnv: tavilyKey ? { TAVILY_API_KEY: tavilyKey } : undefined,
     validate: zodValidator(IMPLEMENT_OUTPUT),
+    onActivity: onProgress,
   });
 
   if (!result.ok || !result.data) {

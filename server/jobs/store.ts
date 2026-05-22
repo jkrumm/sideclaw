@@ -1,6 +1,13 @@
 import { Database } from "bun:sqlite";
 import { appLogger as logger } from "../logger.ts";
-import { type JobRecord, type JobStatus, type JobTool, type JobView, toJobView } from "./types.ts";
+import {
+  type JobProgress,
+  type JobRecord,
+  type JobStatus,
+  type JobTool,
+  type JobView,
+  toJobView,
+} from "./types.ts";
 
 // ── Durable job queue (bun:sqlite) ───────────────────────────────────────────
 //
@@ -27,8 +34,11 @@ const MAX_CONCURRENT = parseInt(process.env.SIDECLAW_JOB_CONCURRENCY ?? "3", 10)
 const PRUNE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_TERMINAL_ROWS = 200;
 
+/** Persist a live progress snapshot for a running job. Passed to the executor. */
+export type ProgressSink = (progress: JobProgress) => void;
+
 /** Executes a job to completion. Returns the typed result, or throws on failure. */
-export type JobExecutor = (job: JobRecord) => Promise<unknown>;
+export type JobExecutor = (job: JobRecord, onProgress: ProgressSink) => Promise<unknown>;
 
 interface JobRow {
   id: string;
@@ -37,6 +47,7 @@ interface JobRow {
   status: string;
   result: string | null;
   error: string | null;
+  progress: string | null;
   attempts: number;
   created_at: number;
   started_at: number | null;
@@ -54,6 +65,7 @@ db.run(`
     status      TEXT NOT NULL,
     result      TEXT,
     error       TEXT,
+    progress    TEXT,
     attempts    INTEGER NOT NULL DEFAULT 0,
     created_at  INTEGER NOT NULL,
     started_at  INTEGER,
@@ -61,6 +73,14 @@ db.run(`
   )
 `);
 db.run("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)");
+
+// Migration for dbs created before the `progress` column existed (the db file
+// persists across restarts within a /tmp lifetime). Ignore if already present.
+try {
+  db.run("ALTER TABLE jobs ADD COLUMN progress TEXT");
+} catch {
+  /* column already exists */
+}
 
 // In-memory mirror of which jobs are actively executing in THIS process. The DB
 // `status` column is the source of truth for persistence; this set drives the
@@ -79,6 +99,7 @@ function rowToRecord(row: JobRow): JobRecord {
     status: row.status as JobStatus,
     result: row.result === null ? null : JSON.parse(row.result),
     error: row.error,
+    progress: row.progress === null ? null : (JSON.parse(row.progress) as JobProgress),
     attempts: row.attempts,
     createdAt: row.created_at,
     startedAt: row.started_at,
@@ -172,12 +193,20 @@ async function execute(job: JobRecord): Promise<void> {
   const exec = executor;
   if (!exec) return;
   try {
-    const result = await exec(job);
+    const result = await exec(job, (progress) => updateProgress(job.id, progress));
     finish(job.id, "done", { result });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     finish(job.id, "failed", { error: message });
   }
+}
+
+/** Persist a running job's latest progress snapshot. Cheap, fire-and-forget from the worker stream. */
+function updateProgress(id: string, progress: JobProgress): void {
+  db.run("UPDATE jobs SET progress = ? WHERE id = ? AND status = 'running'", [
+    JSON.stringify(progress),
+    id,
+  ]);
 }
 
 function finish(
@@ -254,6 +283,7 @@ function fallbackRecord(
     status: "pending",
     result: null,
     error: null,
+    progress: null,
     attempts: 0,
     createdAt: now,
     startedAt: null,

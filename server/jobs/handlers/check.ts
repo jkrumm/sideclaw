@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
 
 // ── Input schema (single source for MCP inputSchema + execution validation) ───
@@ -54,7 +55,10 @@ async function loadSkillPrompt(): Promise<string> {
 // ── Core ───────────────────────────────────────────────────────────────────────
 
 /** Run all available validation steps and return structured pass/fail. Throws on failure. */
-export async function runCheck(rawParams: Record<string, unknown>): Promise<CheckOutput> {
+export async function runCheck(
+  rawParams: Record<string, unknown>,
+  onProgress?: ProgressSink,
+): Promise<CheckOutput> {
   const { cwd } = parseParams(CHECK_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
@@ -67,6 +71,7 @@ export async function runCheck(rawParams: Record<string, unknown>): Promise<Chec
     timeoutMs: 10 * 60 * 1000,
     readOnly: true,
     validate: zodValidator(CHECK_OUTPUT),
+    onActivity: onProgress,
   });
 
   if (!result.ok || !result.data) {

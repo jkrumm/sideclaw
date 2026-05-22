@@ -51,6 +51,13 @@ export interface SessionOptions<T = unknown> {
   /** Called every 15s while the subprocess runs. Use to send MCP progress notifications and reset client timeout. */
   onProgress?: (progress: number, total: number, message: string) => void;
   /**
+   * Called on every stream-json event from the worker (turn complete, tool call,
+   * tool result). Lets the job layer persist live progress — most importantly
+   * `lastActivityAt`, from which callers derive idle time to tell a working
+   * session from a wedged one. Fire-and-forget; errors are swallowed by the runner.
+   */
+  onActivity?: (progress: SessionProgress) => void;
+  /**
    * Optional output validator. Kimi over the bridge ignores `--json-schema` and
    * emits prose-fenced JSON that `extractJson` casts WITHOUT type-checking, so
    * schema drift (e.g. a field of the wrong type) otherwise slips through to the
@@ -82,7 +89,18 @@ export interface SessionResult<T = unknown> {
   error?: string;
 }
 
-// Shape of claude --output-format json envelope
+/** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
+export interface SessionProgress {
+  /** Assistant turns observed so far. */
+  turns: number;
+  /** Short label of the most recent worker action, e.g. "Edit store.ts" or "Bash: bun test". */
+  lastAction: string;
+  /** Epoch ms of the last stream event — `Date.now() - lastActivityAt` is idle time. */
+  lastActivityAt: number;
+}
+
+// The `result` event of --output-format stream-json is the final line and carries
+// the same fields the old single-blob --output-format json envelope did. Reused below.
 interface ClaudeJsonEnvelope {
   type?: string;
   subtype?: string;
@@ -93,6 +111,42 @@ interface ClaudeJsonEnvelope {
   session_id?: string;
   total_cost_usd?: number; // unreliable through the bridge — see logSessionEnd
   num_turns?: number;
+}
+
+// One NDJSON line from `--output-format stream-json --verbose`. See
+// .claude/skills/claude-cli/references/stream-format.md for the full shape.
+interface StreamEvent {
+  type?: "system" | "assistant" | "user" | "result" | "stream_event";
+  subtype?: string;
+  message?: {
+    content?: Array<{
+      type?: "text" | "tool_use" | "tool_result";
+      text?: string;
+      name?: string;
+      input?: Record<string, unknown>;
+    }>;
+  };
+  // result-event fields (mirror ClaudeJsonEnvelope)
+  is_error?: boolean;
+  result?: string;
+  structured_output?: unknown;
+  errors?: string[];
+  num_turns?: number;
+  total_cost_usd?: number;
+}
+
+/** Compact human label for a tool_use item, used as `lastAction`. */
+function describeTool(item: { name?: string; input?: Record<string, unknown> }): string {
+  const name = item.name ?? "tool";
+  const input = item.input ?? {};
+  if (name === "Bash" && typeof input.command === "string") {
+    return `Bash: ${input.command.slice(0, 50)}`;
+  }
+  const path = input.file_path ?? input.path ?? input.notebook_path;
+  if (typeof path === "string") {
+    return `${name} ${path.split("/").pop()}`;
+  }
+  return name;
 }
 
 // ── Progress helper ────────────────────────────────────────────────────────────
@@ -214,6 +268,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     readOnly = false,
     extraEnv,
     validate,
+    onActivity,
   } = opts;
 
   if (!(await bridgeReachable())) {
@@ -231,8 +286,13 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     "-p",
     prompt,
     "--dangerously-skip-permissions",
+    // stream-json (NDJSON, one event per line) instead of a single end-of-run blob,
+    // so the runner can track live activity (turns / last tool / idle time) for the
+    // job layer. Requires --verbose. The final `result` event is parsed identically
+    // to the old --output-format json envelope.
     "--output-format",
-    "json",
+    "stream-json",
+    "--verbose",
     "--setting-sources",
     settingSources,
     "--strict-mcp-config",
@@ -322,11 +382,80 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     }, 5000);
   }, timeoutMs);
 
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
+  // stderr is buffered whole (it's small — diagnostics only); stdout is consumed as
+  // a live NDJSON stream so we can track per-event activity and capture the result.
+  const stderrPromise = new Response(proc.stderr).text();
 
+  let envelope: ClaudeJsonEnvelope | undefined;
+  let turns = 0;
+  let lastAction = "starting";
+  const emitActivity = () => {
+    if (!onActivity) return;
+    try {
+      onActivity({ turns, lastAction, lastActivityAt: Date.now() });
+    } catch {
+      /* progress is best-effort — never let it break the session */
+    }
+  };
+  emitActivity();
+
+  const handleEvent = (ev: StreamEvent): void => {
+    switch (ev.type) {
+      case "assistant": {
+        turns++;
+        const content = ev.message?.content ?? [];
+        const tool = content.find((c) => c.type === "tool_use");
+        if (tool) lastAction = describeTool(tool);
+        else if (content.some((c) => c.type === "text")) lastAction = "responding";
+        emitActivity();
+        break;
+      }
+      case "user": // tool results coming back
+        emitActivity();
+        break;
+      case "system":
+        if (ev.subtype === "api_retry") lastAction = "api retry";
+        else if (ev.subtype === "compact_boundary") lastAction = "compacting context";
+        emitActivity();
+        break;
+      case "result":
+        envelope = ev as ClaudeJsonEnvelope;
+        break;
+    }
+  };
+
+  const decoder = new TextDecoder();
+  const reader = proc.stdout.getReader();
+  let buf = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() ?? ""; // keep the trailing partial line
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          handleEvent(JSON.parse(trimmed) as StreamEvent);
+        } catch {
+          /* skip non-JSON noise (shouldn't occur with stream-json) */
+        }
+      }
+    }
+    if (buf.trim()) {
+      try {
+        handleEvent(JSON.parse(buf.trim()) as StreamEvent);
+      } catch {
+        /* ignore trailing garbage */
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const stderr = await stderrPromise;
   clearTimeout(timeoutHandle);
   if (sigkillTimer !== null) clearTimeout(sigkillTimer);
 
@@ -338,10 +467,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     logger.debug({ stderr: stderrTrimmed.slice(0, 1000) }, "session stderr");
   }
 
-  logger.debug(
-    { exitCode, timedOut, stdoutLen: stdout.length, stdoutHead: stdout.slice(0, 500) },
-    "session raw stdout",
-  );
+  logger.debug({ exitCode, timedOut, turns, lastAction }, "session stream done");
 
   if (timedOut) {
     return { ok: false, error: `Session timed out after ${timeoutMs}ms` };
@@ -354,12 +480,9 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     };
   }
 
-  let envelope: ClaudeJsonEnvelope;
-  try {
-    envelope = JSON.parse(stdout.trim()) as ClaudeJsonEnvelope;
-  } catch {
-    logger.error({ stdout: stdout.slice(0, 500) }, "envelope parse failed");
-    return { ok: false, error: `Failed to parse JSON output: ${stdout.slice(0, 500)}` };
+  if (!envelope) {
+    logger.error({ event: "session.error", project: cwd }, "no result event in stream");
+    return { ok: false, error: "Session ended without a result event" };
   }
 
   logger.debug(

@@ -10,10 +10,14 @@ Grep, Glob). Return ONLY a JSON object matching the provided schema.
    refactors, no extra features, no leftover TODOs or debug output.
 3. **Match the surrounding code.** Imports, error handling, types, and style should look
    like the code already there.
-4. **Self-verify.** Run the repo's checks where they exist (`bun run typecheck`,
-   `bun run lint`, `bun run format`, `bun run test`, or the project's equivalents). Fix
-   any failures YOUR changes introduced. Do NOT fix pre-existing unrelated failures —
-   report them in `notes` instead.
+4. **Self-verify once, then stop.** Run the repo's checks where they exist (`bun run
+typecheck`, `bun run lint`, `bun run format`, `bun run test`, or the project's
+   equivalents). Fix any failures YOUR changes introduced, then re-run at most ONE more
+   time to confirm. Do NOT loop run→edit→run indefinitely: once the only remaining
+   failures are pre-existing and unrelated to your change, stop and report them in
+   `notes` — do not keep re-running checks or chasing them. As soon as your work is on
+   disk and verified, emit the JSON report immediately; extra turns spent re-reading or
+   re-validating settled files are wasted wall-clock the orchestrator is waiting on.
 5. **Stay clean.** Keep secrets out of code and tracked files. Add NO AI or tool
    attribution anywhere (comments, commit messages, docs).
 

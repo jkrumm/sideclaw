@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
 
@@ -308,7 +309,11 @@ function resolveRequestedAngles(requested: string[], floor: AgentConfig[]): Agen
 
 /** Run the triage router (one cheap Kimi session) to pick content-driven angles.
  *  Returns [] on any failure — the floor still reviews, so this degrades gracefully. */
-async function routeExtraAngles(cwd: string, diffCmd: string): Promise<AgentConfig[]> {
+async function routeExtraAngles(
+  cwd: string,
+  diffCmd: string,
+  bump?: (label: string) => void,
+): Promise<AgentConfig[]> {
   let prompt: string;
   try {
     prompt = await loadAnglePrompt("router");
@@ -328,6 +333,7 @@ async function routeExtraAngles(cwd: string, diffCmd: string): Promise<AgentConf
     readOnly: true,
     settingSources: "project",
     validate: zodValidator(ROUTER_OUTPUT),
+    onActivity: bump ? (p) => bump(`router: ${p.lastAction}`) : undefined,
   });
 
   if (!result.ok || !result.data) {
@@ -352,9 +358,20 @@ async function routeExtraAngles(cwd: string, diffCmd: string): Promise<AgentConf
  *  synthesis. Returns structured findings. Throws on git-diff failure (bad
  *  scope/not a repo) or synthesis failure; no-changes and all-angles-failed are
  *  returned as valid ReviewOutput verdicts. */
-export async function runReview(rawParams: Record<string, unknown>): Promise<ReviewOutput> {
+export async function runReview(
+  rawParams: Record<string, unknown>,
+  onProgress?: ProgressSink,
+): Promise<ReviewOutput> {
   const { cwd, scope, context, angles } = parseParams(REVIEW_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
+
+  // Shared liveness bump across this pipeline's many sessions. Per-session turn
+  // counts would clobber under parallel angles, so we keep a single monotonic
+  // counter and let any session (or phase marker) refresh lastActivityAt — that's
+  // what the caller's idle-time wedge signal needs. `label` shows what's live.
+  let activityTurns = 0;
+  const bump = (lastAction: string): void =>
+    onProgress?.({ turns: ++activityTurns, lastAction, lastActivityAt: Date.now() });
 
   const resolvedScope = scope ?? "uncommitted";
   validateScope(resolvedScope);
@@ -366,6 +383,7 @@ export async function runReview(rawParams: Record<string, unknown>): Promise<Rev
   );
 
   // ── Phase 1: Data gathering (parallel) ──────────────────────────────
+  bump("gathering diff, fallow, coderabbit");
   const diffCmd = gitDiffCommand(resolvedScope);
   const filesCmd = gitDiffFilesCommand(resolvedScope);
 
@@ -438,7 +456,7 @@ export async function runReview(rawParams: Record<string, unknown>): Promise<Rev
   const explicit = angles && angles.length > 0;
   const agents = explicit
     ? resolveRequestedAngles(angles, floorAgents)
-    : capAngles([...floorAgents, ...(await routeExtraAngles(cwd, diffCmd))], MAX_ANGLES);
+    : capAngles([...floorAgents, ...(await routeExtraAngles(cwd, diffCmd, bump))], MAX_ANGLES);
 
   logger.info(
     {
@@ -486,6 +504,7 @@ export async function runReview(rawParams: Record<string, unknown>): Promise<Rev
         readOnly: true,
         settingSources: "user,project",
         validate: zodValidator(ANGLE_OUTPUT),
+        onActivity: (p) => bump(`${agent.angle}: ${p.lastAction}`),
       });
 
       if (!result.ok) {
@@ -535,6 +554,7 @@ export async function runReview(rawParams: Record<string, unknown>): Promise<Rev
   }
 
   // ── Phase 3: Synthesis ───────────────────────────
+  bump("synthesizing findings");
   const synthesisPrompt = await loadAnglePrompt("synthesis");
 
   const angleBlock = angleResults
@@ -571,6 +591,7 @@ export async function runReview(rawParams: Record<string, unknown>): Promise<Rev
     readOnly: true,
     settingSources: "user,project",
     validate: zodValidator(REVIEW_OUTPUT),
+    onActivity: (p) => bump(`synthesis: ${p.lastAction}`),
   });
 
   if (!synthesisResult.ok || !synthesisResult.data) {

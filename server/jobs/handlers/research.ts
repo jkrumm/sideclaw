@@ -3,6 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
 
 /** Resolve the Tavily key (env first, then the Keychain entry `make setup` caches).
@@ -110,7 +111,10 @@ async function loadSkillPrompt(query: string, depthDirective: string): Promise<s
 // ── Core ───────────────────────────────────────────────────────────────────────
 
 /** Run a focused web research pass with cross-verification. Throws on failure. */
-export async function runResearch(rawParams: Record<string, unknown>): Promise<ResearchOutput> {
+export async function runResearch(
+  rawParams: Record<string, unknown>,
+  onProgress?: ProgressSink,
+): Promise<ResearchOutput> {
   const { query, cwd, depth } = parseParams(RESEARCH_INPUT, rawParams);
   const workDir = cwd ?? homedir();
   if (!existsSync(workDir)) throw new Error(`Directory not found: ${workDir}`);
@@ -131,6 +135,7 @@ export async function runResearch(rawParams: Record<string, unknown>): Promise<R
     readOnly: true,
     extraEnv: tavilyKey ? { TAVILY_API_KEY: tavilyKey } : undefined,
     validate: zodValidator(RESEARCH_OUTPUT),
+    onActivity: onProgress,
   });
 
   if (!result.ok || !result.data) {

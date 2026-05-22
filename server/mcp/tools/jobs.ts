@@ -26,6 +26,22 @@ const JOB_STATE_OUTPUT = z.object({
       "True while not terminal. If true after job_wait, call job_wait again with the same jobId.",
     ),
   elapsedMs: z.number().describe("Wall time so far (running) or total (terminal)."),
+  idleMs: z
+    .number()
+    .nullable()
+    .describe(
+      "ms since the worker's last activity (stream event), while running; null otherwise. THE wedge signal: a large/growing idleMs during 'running' means the session may be stuck rather than working — peek at the repo (git status) instead of waiting indefinitely. A long single tool call (e.g. a slow test run) can briefly raise it legitimately, so judge by trend.",
+    ),
+  turns: z
+    .number()
+    .nullable()
+    .describe("Assistant turns the worker has taken so far. Null before the first event."),
+  lastAction: z
+    .string()
+    .nullable()
+    .describe(
+      "Most recent worker action, e.g. 'Edit store.ts' or 'Bash: bun test'. Null before the first event.",
+    ),
   result: z
     .unknown()
     .nullable()
@@ -45,6 +61,9 @@ function toState(view: JobView): JobState {
     status: view.status,
     stillRunning: !isTerminal(view.status),
     elapsedMs: view.elapsedMs,
+    idleMs: view.idleMs,
+    turns: view.progress?.turns ?? null,
+    lastAction: view.progress?.lastAction ?? null,
     result: view.result,
     error: view.error,
   };
@@ -83,7 +102,7 @@ export function registerJobTools(server: McpServer): void {
       title: "Job Status (one-shot)",
       description: `Return the current state of a background job by id, without waiting. Prefer job_wait when you actually want the result — this is for a quick non-blocking peek (e.g. checking on a long implement while doing other work).
 
-OUTPUT: \`status\` (pending/running/done/failed/interrupted) and \`stillRunning\`. When status is "done", \`result\` holds the tool's structured output; when "failed"/"interrupted", \`error\` explains why.`,
+OUTPUT: \`status\` (pending/running/done/failed/interrupted) and \`stillRunning\`. While running, \`turns\`/\`lastAction\` show live worker activity and \`idleMs\` is ms since its last event — a large/growing \`idleMs\` is the wedge signal (peek at git status rather than waiting forever). When status is "done", \`result\` holds the tool's structured output; when "failed"/"interrupted", \`error\` explains why.`,
       inputSchema: {
         jobId: z.string().describe("The job id returned by check/research/implement/review."),
       },
@@ -140,10 +159,11 @@ OUTPUT: when \`status\` is "done", \`result\` holds the tool's structured output
         while (!isTerminal(view.status as JobStatus) && Date.now() < deadline) {
           await sleep(POLL_INTERVAL_MS);
           tick++;
+          const action = view.progress?.lastAction ? ` — ${view.progress.lastAction}` : "";
           onProgress?.(
             tick,
             0,
-            `Job ${view.tool} ${view.status} (${Math.round(view.elapsedMs / 1000)}s elapsed)`,
+            `Job ${view.tool} ${view.status} (${Math.round(view.elapsedMs / 1000)}s elapsed)${action}`,
           );
           view = (await getJobStatus(jobId)) ?? view;
         }
