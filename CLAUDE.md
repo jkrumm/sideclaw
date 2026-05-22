@@ -101,6 +101,18 @@ The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel pipe
 Output `outcome`: `"clean"` (ship it), `"actionable"` (apply fixes), `"needs-human"` (has discussions).
 Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fetches `elysiajs.com/llms.txt`.
 
+### Multimodal tools — direct IU OpenAI transport (synchronous)
+
+`read_image`, `read_drawing`, and `generate_image` are **not** Kimi sessions and **not** async jobs. They are plain `fetch` calls to the IU unified endpoint's **OpenAI transport** (`/openai/v1/...`) — stateless, synchronous MCP tools (single call well under the 60s SDK timeout; a `mcpHeartbeat` in `session-runner.ts` keeps the client alive past 15s). Billed IU per-token, zero Max, zero Kimi worker, no `session-runner` / `claude -p` / read-only allowlist.
+
+- **Credentials** (`server/lib/iu-openai.ts`): IU key + base from Keychain (`claude-sdk-api-key`, `claude-sdk-base-url`) or `IU_API_KEY`/`IU_BASE_URL` env. The OpenAI base is derived by replacing the base's trailing `/anthropic` → `/openai/v1` (never hardcoded). `iuFetch` retries 503/429/5xx with backoff; fails fast on 410 (dead model — e.g. `dall-e-3`).
+- **Models (fixed, not residency knobs):** vision = `gemini-3-pro-preview` (best on dense diagrams), image gen = `gpt-image-2`. Both route to a **non-EU vendor** — fine for git-committed/non-sensitive content, not PII.
+- **`read_image`** — vision read of any image. SVGs are rasterized first (`server/lib/image.ts`).
+- **`read_drawing`** — composite: rasterize+read the `.svg` AND deterministically parse the paired `.excalidraw` JSON (`server/lib/excalidraw.ts` — the structural ground truth: frames, bindings, groups), merged into one synthesis (`server/skills/read-drawing.md`). The dotfiles `/read-drawing` skill's `claude_iu` Haiku path is retired in favor of this.
+- **`generate_image`** — `gpt-image-2`, decodes `b64_json`, writes a PNG.
+- **SVG rasterizer:** headless Chrome (`server/lib/chrome.ts` `findChrome`, shared with kiosk) — the only method that resolves web fonts faithfully without cropping. `resvg`/`rsvg-convert`/`qlmanage`/`svglib` all failed the bake-off.
+- **Telemetry:** these bypass the LiteLLM bridge, so the usage-tracker's litellm collector never sees them. `recordIuUsage` appends an NDJSON line per call to `~/.local/share/usage-tracker/sideclaw-iu.jsonl` (litellm-collector-compatible shape; override with `SIDECLAW_IU_USAGE_LOG`) plus `/tmp/sideclaw.jsonl` events. **A usage-tracker `sideclaw-iu` collector still needs registering** to ingest that file — `server/routes/usage.ts` is only Max-quota %, not a token ledger.
+
 ```bash
 # Register at user scope — handled by `make setup` in ~/SourceRoot/dotfiles.
 # Manual fallback:

@@ -174,6 +174,22 @@ export function mcpProgressCallback(extra: McpExtra): SessionOptions["onProgress
   };
 }
 
+/**
+ * Keep a synchronous (non-runSession) MCP handler alive past the SDK's 60s client
+ * timeout by emitting a progress heartbeat every 15s. Use for direct-fetch tools
+ * (read_image, generate_image, read_drawing). Returns a cleanup fn — call it in a
+ * `finally`. No-op when the client didn't request progress.
+ */
+export function mcpHeartbeat(extra: McpExtra, label: string): () => void {
+  const onProgress = mcpProgressCallback(extra);
+  if (!onProgress) return () => {};
+  const t0 = Date.now();
+  const id = setInterval(() => {
+    onProgress(0, 0, `${label} ${Math.round((Date.now() - t0) / 1000)}s`);
+  }, 15_000);
+  return () => clearInterval(id);
+}
+
 // ── Lenient JSON extraction ───────────────────────────────────────────────────
 //
 // Workers sometimes ignore --json-schema and emit text that contains a ```json

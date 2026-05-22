@@ -6,6 +6,9 @@ import { registerReviewTool } from "./mcp/tools/review.ts";
 import { registerImplementTool } from "./mcp/tools/implement.ts";
 import { registerOtelTool } from "./mcp/tools/otel.ts";
 import { registerJobTools } from "./mcp/tools/jobs.ts";
+import { registerReadImageTool } from "./mcp/tools/read-image.ts";
+import { registerGenerateImageTool } from "./mcp/tools/generate-image.ts";
+import { registerReadDrawingTool } from "./mcp/tools/read-drawing.ts";
 import { logger } from "./mcp/logger.ts";
 
 const server = new McpServer({
@@ -19,6 +22,9 @@ registerResearchTool(server);
 registerReviewTool(server);
 registerImplementTool(server);
 registerJobTools(server);
+registerReadImageTool(server);
+registerGenerateImageTool(server);
+registerReadDrawingTool(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

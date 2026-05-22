@@ -1,32 +1,7 @@
 import Elysia, { t } from "elysia";
-import { existsSync } from "fs";
+import { findChrome } from "../lib/chrome.ts";
 
 const ALLOWED_ORIGINS = ["http://sideclaw.local", "http://localhost"];
-
-async function findChrome(): Promise<string | null> {
-  const candidates = [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-  ];
-
-  for (const p of candidates) {
-    if (existsSync(p)) return p;
-  }
-
-  // Also check Playwright Chrome for Testing
-  const base = `${process.env.HOME}/Library/Caches/ms-playwright`;
-  try {
-    const glob = new Bun.Glob("chromium-*/chrome-mac/Chromium.app/Contents/MacOS/Chromium");
-    for await (const match of glob.scan(base)) {
-      const full = `${base}/${match}`;
-      if (existsSync(full)) return full;
-    }
-  } catch {
-    // Playwright not installed — skip
-  }
-
-  return null;
-}
 
 export const kioskRoute = new Elysia().get(
   "/api/open-kiosk",
