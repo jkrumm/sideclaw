@@ -7,9 +7,15 @@
 // terminal state. See server/jobs/store.ts for the durable queue.
 
 /** Tools that run as background jobs. Each maps to a handler in server/jobs/handlers/. */
-export type JobTool = "implement" | "check" | "research" | "review";
+export type JobTool = "implement" | "check" | "research" | "review" | "excalidraw_diagram";
 
-export const JOB_TOOLS: readonly JobTool[] = ["implement", "check", "research", "review"];
+export const JOB_TOOLS: readonly JobTool[] = [
+  "implement",
+  "check",
+  "research",
+  "review",
+  "excalidraw_diagram",
+];
 
 export function isJobTool(value: string): value is JobTool {
   return (JOB_TOOLS as readonly string[]).includes(value);

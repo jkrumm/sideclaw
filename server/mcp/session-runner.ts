@@ -87,6 +87,14 @@ export interface SessionResult<T = unknown> {
   ok: boolean;
   data?: T;
   error?: string;
+  /**
+   * True when the session completed cleanly (exit 0, not is_error, not timed out)
+   * but produced nothing parseable — neither `structured_output`, a JSON `result`,
+   * nor recoverable assistant text. The work may still be on disk: handlers that
+   * edit files (`implement`) can treat this as a cue to reconcile against `git`
+   * rather than reporting an outright failure. Never set on timeout/exit/is_error.
+   */
+  noOutput?: boolean;
 }
 
 /** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
@@ -405,6 +413,11 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   let envelope: ClaudeJsonEnvelope | undefined;
   let turns = 0;
   let lastAction = "starting";
+  // Most recent non-empty assistant text. Kimi over the bridge frequently ends a
+  // session on a tool call, leaving the `result` envelope field empty even though
+  // it already emitted its JSON in an earlier text turn. We keep that text so the
+  // output-extraction fallback can recover it instead of failing the whole job.
+  let lastAssistantText = "";
   const emitActivity = () => {
     if (!onActivity) return;
     try {
@@ -423,6 +436,11 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
         const tool = content.find((c) => c.type === "tool_use");
         if (tool) lastAction = describeTool(tool);
         else if (content.some((c) => c.type === "text")) lastAction = "responding";
+        const text = content
+          .filter((c) => c.type === "text")
+          .map((c) => c.text ?? "")
+          .join("");
+        if (text.trim()) lastAssistantText = text;
         emitActivity();
         break;
       }
@@ -570,9 +588,32 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       return finalize(data);
     }
     logger.error({ raw: raw.slice(0, 500) }, "result JSON parse failed");
-    return { ok: false, error: `result field is not valid JSON: ${raw.slice(0, 500)}` };
+    return {
+      ok: false,
+      error: `result field is not valid JSON: ${raw.slice(0, 500)}`,
+      noOutput: true,
+    };
+  }
+
+  // Bridge fallback: the `result` field is routinely empty for Kimi sessions that
+  // end on a tool call (the OpenAI→Anthropic translation drops the trailing text).
+  // Recover the JSON from the last assistant text message seen in the stream before
+  // declaring failure — this is the single most common false "no output" failure.
+  if (lastAssistantText) {
+    const recovered = extractJson<T>(lastAssistantText);
+    if (recovered !== undefined) {
+      logger.warn(
+        { event: "session.recovered_output", project: cwd },
+        "recovered output from last assistant text (empty result field)",
+      );
+      return finalize(recovered);
+    }
   }
 
   logger.error({ event: "session.error", project: cwd }, "session no usable output");
-  return { ok: false, error: "Session produced no output (empty structured_output and result)" };
+  return {
+    ok: false,
+    error: "Session produced no output (empty structured_output and result)",
+    noOutput: true,
+  };
 }

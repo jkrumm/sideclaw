@@ -55,22 +55,49 @@ export type CheckOutput = z.infer<typeof CHECK_OUTPUT>;
 
 // ── Skill prompt loader ────────────────────────────────────────────────────────
 
+// JSON output contract — shared by both prompt paths so they never drift.
+const OUTPUT_CONTRACT = `## Output
+
+Return ONLY a JSON object with this exact structure (no explanation, no markdown, just JSON):
+
+{
+"passed": <boolean>,
+"steps": [
+{ "name": "<step-name>", "passed": <boolean>, "errors": ["<error line>", ...] }
+],
+"summary": "<one-line summary, e.g. 'All 3 steps passed' or '1/3 steps failed: lint (5 errors)'>"
+}
+
+Only include \`errors\` when the step failed. \`passed\` at root is true only if ALL steps that ran passed.`;
+
+/** Minimal, self-contained prompt for the explicit-commands fast path. Loads NO
+ *  discovery skill — the worker runs exactly the given commands and nothing else
+ *  (no ecosystem sniffing, no fallow, no `git remote -v`/`which`). This is what
+ *  keeps the fast path fast: discovery is the dominant turn-sink otherwise. */
+function explicitCommandsPrompt(commands: string[]): string {
+  return (
+    `You are a code quality checker. The caller supplied the EXACT validation commands. ` +
+    `Run ONLY these, in order, via Bash — capture stdout+stderr for each. A step passes if ` +
+    `its exit code is 0, fails otherwise (collect the error lines into \`errors\`). Name each ` +
+    `step after the command's tool (e.g. "ruff", "pytest", "pyrefly", "lint", "test").\n\n` +
+    `Run EXACTLY these and nothing else. Do NOT explore the repo, read package.json/` +
+    `pyproject.toml, sniff the ecosystem, run \`which\`/\`git remote -v\`, or run \`fallow\`. ` +
+    `As soon as every command has run once, emit the JSON — do not re-run or re-read.\n\n` +
+    commands.map((c, i) => `${i + 1}. \`${c}\``).join("\n") +
+    `\n\n` +
+    OUTPUT_CONTRACT
+  );
+}
+
 async function loadSkillPrompt(commands: string[] | undefined): Promise<string> {
+  if (commands && commands.length > 0) return explicitCommandsPrompt(commands);
   const skillPath = join(import.meta.dir, "../../skills/check.md");
   if (!existsSync(skillPath)) {
     throw new Error(`check skill prompt not found at ${skillPath}`);
   }
+  // Discovery path: drop the (now-unused) explicit-commands placeholder.
   const template = await Bun.file(skillPath).text();
-  const block =
-    commands && commands.length > 0
-      ? "## Explicit commands (run THESE, skip discovery)\n\n" +
-        "The caller supplied the exact validation commands. Run ONLY these, in order, " +
-        "via Bash — do NOT auto-detect the ecosystem or read package.json/pyproject.toml. " +
-        "Name each step after the command's first token (or the tool it invokes):\n\n" +
-        commands.map((c) => `- \`${c}\``).join("\n") +
-        "\n"
-      : "";
-  return template.replace("{{COMMANDS}}", block);
+  return template.replace("{{COMMANDS}}\n", "").replace("{{COMMANDS}}", "");
 }
 
 // ── Core ───────────────────────────────────────────────────────────────────────
@@ -83,12 +110,15 @@ export async function runCheck(
   const { cwd, commands } = parseParams(CHECK_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
+  const cmdCount = commands?.length ?? 0;
   const prompt = await loadSkillPrompt(commands);
   const result = await runSession<CheckOutput>({
     cwd,
     prompt,
     jsonSchema: CHECK_JSON_SCHEMA,
-    maxTurns: 30,
+    // Fast path needs only one Bash turn per command + the JSON turn — cap tight so
+    // a churny worker can't burn the discovery-sized budget it no longer needs.
+    maxTurns: cmdCount > 0 ? cmdCount + 6 : 30,
     timeoutMs: 10 * 60 * 1000,
     readOnly: true,
     validate: zodValidator(CHECK_OUTPUT),

@@ -2,9 +2,26 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { logger } from "../../mcp/logger.ts";
 import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
 import { readTavilyKey } from "./research.ts";
+
+/** Repo-relative paths of working-tree changes (modified, added, untracked, renamed dest). */
+function gitChangedFiles(cwd: string): string[] {
+  try {
+    const r = Bun.spawnSync(["git", "status", "--porcelain", "--untracked-files=all"], { cwd });
+    if (r.exitCode !== 0) return [];
+    return r.stdout
+      .toString()
+      .split("\n")
+      .map((l) => l.replace(/^.. /, "").trim()) // strip the 2-char XY status + space
+      .filter(Boolean)
+      .map((p) => (p.includes(" -> ") ? (p.split(" -> ")[1] ?? p) : p)); // rename → dest
+  } catch {
+    return [];
+  }
+}
 
 // ── Input schema ─────────────────────────────────────────────────────────────
 
@@ -105,6 +122,10 @@ export async function runImplement(
   const prompt = await loadSkillPrompt(task, context, validateCmd);
   const tavilyKey = await readTavilyKey();
 
+  // Snapshot the working tree so a no-output recovery can report only the files
+  // THIS run touched, not pre-existing dirt.
+  const before = new Set(gitChangedFiles(cwd));
+
   const result = await runSession<ImplementOutput>({
     cwd,
     prompt,
@@ -120,8 +141,34 @@ export async function runImplement(
     onActivity: onProgress,
   });
 
-  if (!result.ok || !result.data) {
-    throw new Error(result.error ?? "implement produced no result");
+  if (result.ok && result.data) return result.data;
+
+  // The session emitted no parseable report (the Kimi/bridge "empty result" failure
+  // mode) — but it may have completed the edits regardless. Reconcile against git:
+  // disk is the ground truth, so a job that wrote files reports `applied: true`
+  // honestly instead of a misleading hard failure. Only for `noOutput` — a timeout
+  // or non-zero exit is a real failure worth surfacing as-is.
+  if (result.noOutput) {
+    const after = gitChangedFiles(cwd);
+    const newlyChanged = after.filter((f) => !before.has(f));
+    logger.warn(
+      { event: "implement.git_recovery", project: cwd, newlyChanged: newlyChanged.length },
+      "implement produced no report; reconciled against working tree",
+    );
+    return {
+      applied: newlyChanged.length > 0,
+      summary:
+        newlyChanged.length > 0
+          ? `Worker emitted no structured report, but the working tree shows ${newlyChanged.length} changed file(s). Result reconstructed from git — the change description is unavailable.`
+          : "Worker emitted no structured report and the working tree shows no new changes from this run.",
+      filesChanged: newlyChanged,
+      checkPassed: null,
+      notes:
+        "UNVERIFIED REPORT: the worker did not return its JSON envelope (known Kimi/bridge empty-result failure); " +
+        "this result was reconstructed from `git status`. Inspect the diff and run the repo's checks yourself before " +
+        "trusting it — `applied`/`filesChanged` reflect the working tree, not the worker's own account.",
+    };
   }
-  return result.data;
+
+  throw new Error(result.error ?? "implement produced no result");
 }

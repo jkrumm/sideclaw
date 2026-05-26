@@ -28,7 +28,7 @@ lint`, `bun run format`, `bun run test`, or the project's equivalents — but do
    wasted wall-clock the orchestrator is waiting on.
 6. **Stay clean.** Keep secrets out of code and tracked files. Add NO AI or tool
    attribution anywhere (comments, commit messages, docs).
-{{VALIDATE}}
+   {{VALIDATE}}
 
 ## Anti-patterns
 
@@ -36,8 +36,17 @@ lint`, `bun run format`, `bun run test`, or the project's equivalents — but do
 - Do NOT claim `checkPassed: true` without actually running the checks.
 - Do NOT exceed the task's scope.
 - Do NOT commit, push, or create branches — leave changes in the working tree.
+- Do NOT re-read a file you have already read this session — you have its contents.
+  After validation passes, do NOT re-read your changed files to "confirm" them; the
+  edits already succeeded. Re-reading settled files is the single biggest source of
+  wasted turns — go straight to the JSON.
 
 ## Output
+
+Your VERY LAST message must be the JSON object as plain text — nothing after it. Do NOT
+end the session on a tool call (run your final validation, read its result, THEN emit the
+JSON in a closing text turn). A session that ends on a tool call returns an empty result
+and looks like a failure even when your edits are correct on disk.
 
 Return ONLY a JSON object with this exact structure (no prose, no markdown fence):
 

@@ -115,6 +115,64 @@ Key requirements (already handled by the runner):
 - Delete `CLAUDE_SESSION_ID`, `CLAUDE_PARENT_SESSION_ID`, set `CLAUDE_ENTRYPOINT=worker`
 - `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used. `total_cost_usd` is unreliable through the bridge — read real spend from LiteLLM logs
 
+## Worker Output Reliability & Worker Discipline
+
+Hard-won lessons from the bridge worker model. They apply to **every** `runSession()`-based
+tool, not just the one that first hit them — design new tools with these baked in.
+
+### 1. Worker output is bridge-fragile — never trust the envelope blindly
+
+Kimi over the bridge **ignores `--json-schema`** (so `structured_output` is always empty) and
+routinely **ends a session on a tool call**, which leaves the `result` envelope field empty even
+on `subtype: "success"`. The session looks like a hard failure (`"Session produced no output"`)
+while the work is actually complete. This is generic — it has hit `implement`, and will hit
+`research`/`review` (its router/angle/synthesis sessions) identically.
+
+Mitigations, in order of where they live:
+- **Runner-level (covers all tools, already in place):** `runSession()` accumulates the last
+  assistant text and recovers the JSON from it when `result` is empty (logs
+  `session.recovered_output`). New tools get this for free — do not re-implement output parsing.
+- **Distinguish "no parseable output" from real failure:** `SessionResult.noOutput` is set only
+  on clean-exit-but-unparseable (never on timeout/exit/is_error). File-editing tools should
+  branch on it.
+- **For file-editing tools, reconcile against ground truth.** Disk is authoritative, not the
+  worker's self-report. `implement` snapshots `git status` before the run and, on `noOutput`,
+  reconstructs `applied`/`filesChanged` from the working-tree delta and marks the report
+  `UNVERIFIED` (logs `implement.git_recovery`). Any new write-capable tool must do the same —
+  a worker's "I changed nothing" / "failed" claim is not trustworthy on its own.
+- **Prompt the worker to end on a text turn.** Every skill's Output section must say: *your very
+  last message is the JSON, never a tool call* (run final validation, read its result, THEN emit
+  JSON). This reduces the empty-`result` rate at the source.
+
+### 2. Don't make the worker discover what the caller can pass in
+
+Repo/environment discovery (finding the test runner, the venv, the lint command) is the dominant
+turn-sink and the main cause of 20-min timeouts on non-Node repos. For any tool that runs repo
+tooling inside the worker:
+- Accept an **explicit-command param** as a fast path (`check`'s `commands`, `implement`'s
+  `validateCmd`). When present, run exactly those and skip discovery entirely — and prove it:
+  build a **minimal prompt that loads no discovery skill** and forbids `which`/`git remote -v`/
+  ecosystem sniffing/`fallow`, and cap `maxTurns` tight (commands + a few). A discovery
+  instruction left anywhere in the prompt will be obeyed even in fast-path mode.
+- Prefer doing discovery in **handler code** (deterministic parallel `shell()` calls) over asking
+  the worker to do it — this is why `review` never had the time-sink: it gathers diff/fallow/
+  coderabbit itself and hands the worker the results.
+
+### 3. Keep skills ecosystem-agnostic
+
+Don't hardwire Node/`package.json` assumptions into skill prompts or angle-gating. `check` was
+Node-only until it learned Python/uv, Make, Rust, Go. **Known residual: `review` still gates the
+QA angle on `package.json` existing** — it won't add a QA reviewer for a Python/Go test suite.
+Generalize test/ecosystem detection when touching that path.
+
+### 4. Schema changes need an MCP reconnect, not just `make reload`
+
+`make reload` restarts only the launchd HTTP server (job execution + per-run skill-prompt reads).
+The MCP process is owned by the calling Claude Code session, so an edited `*_INPUT`/`*_OUTPUT`
+schema (a new field) is invisible until the client reconnects `/mcp` — until then the SDK's Zod
+validation **silently strips** the unknown field before the handler sees it. Skill-prompt and
+handler-logic edits are live after `make reload`; schema edits are not. (Also in the repo CLAUDE.md.)
+
 ## Progress Heartbeat (timeout prevention)
 
 The MCP SDK has a **60-second default client timeout** (`DEFAULT_REQUEST_TIMEOUT_MSEC`). Any tool that spawns a `claude -p` session will exceed this. The session runner sends `notifications/progress` every 15 seconds to reset the client timeout.

@@ -186,7 +186,7 @@ export interface VisionResult {
 }
 
 /** Single vision call: image (base64) + prompt → text. Default model
- * gemini-3-pro-preview (best on dense diagrams per the bake-off). */
+ * gemini-3.5-flash (fast, strong on dense diagrams). */
 export async function visionRead(opts: {
   imageBase64: string;
   mimeType?: string;
@@ -195,7 +195,7 @@ export async function visionRead(opts: {
   tool?: string;
   timeoutMs?: number;
 }): Promise<VisionResult> {
-  const model = opts.model ?? "gemini-3-pro-preview";
+  const model = opts.model ?? "gemini-3.5-flash";
   const mimeType = opts.mimeType ?? "image/png";
   const t0 = performance.now();
 

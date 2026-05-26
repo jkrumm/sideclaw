@@ -4,6 +4,7 @@ import { runCheck } from "./handlers/check.ts";
 import { runResearch } from "./handlers/research.ts";
 import { runImplement } from "./handlers/implement.ts";
 import { runReview } from "./handlers/review.ts";
+import { runExcalidrawDiagram } from "./handlers/excalidraw-diagram.ts";
 
 /** Dispatch a job to its tool handler. Returns the typed result, or throws on
  *  failure — the store turns a throw into `status: "failed"` with the message.
@@ -18,6 +19,8 @@ export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<un
       return runImplement(job.params, onProgress);
     case "review":
       return runReview(job.params, onProgress);
+    case "excalidraw_diagram":
+      return runExcalidrawDiagram(job.params, onProgress);
     default: {
       const exhaustive: never = job.tool;
       throw new Error(`unknown job tool: ${String(exhaustive)}`);

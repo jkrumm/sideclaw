@@ -66,6 +66,8 @@ sideclaw exposes workflow tools (`check`, `review`, `research`, `implement`) plu
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`; the actual execution logic + schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`.
 
+**Deploying schema changes:** `make reload` only restarts the launchd HTTP server (job execution + skill-prompt reads, which load from disk per-run). It does NOT restart the MCP process — that's owned by the calling Claude Code session. So an edited tool **input/output schema** (e.g. a new `commands`/`validateCmd` field on `*_INPUT`) is not visible to a connected client until its MCP reconnects; until then the SDK's Zod validation silently **strips** the unknown field before it reaches the handler. After changing a tool schema, reconnect `/mcp` (or restart the session) — not just `make reload`. Skill-prompt and handler-logic edits need only `make reload`.
+
 ### Async job model (durable, off the MCP transport)
 
 The four long tools (`check`/`review`/`research`/`implement`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
@@ -106,7 +108,7 @@ Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fe
 `read_image`, `read_drawing`, and `generate_image` are **not** Kimi sessions and **not** async jobs. They are plain `fetch` calls to the IU unified endpoint's **OpenAI transport** (`/openai/v1/...`) — stateless, synchronous MCP tools (single call well under the 60s SDK timeout; a `mcpHeartbeat` in `session-runner.ts` keeps the client alive past 15s). Billed IU per-token, zero Max, zero Kimi worker, no `session-runner` / `claude -p` / read-only allowlist.
 
 - **Credentials** (`server/lib/iu-openai.ts`): IU key + base from Keychain (`claude-sdk-api-key`, `claude-sdk-base-url`) or `IU_API_KEY`/`IU_BASE_URL` env. The OpenAI base is derived by replacing the base's trailing `/anthropic` → `/openai/v1` (never hardcoded). `iuFetch` retries 503/429/5xx with backoff; fails fast on 410 (dead model — e.g. `dall-e-3`).
-- **Models (fixed, not residency knobs):** vision = `gemini-3-pro-preview` (best on dense diagrams), image gen = `gpt-image-2`. Both route to a **non-EU vendor** — fine for git-committed/non-sensitive content, not PII.
+- **Models (fixed, not residency knobs):** vision = `gemini-3.5-flash` (fast, strong on dense diagrams), image gen = `gpt-image-2`. Both route to a **non-EU vendor** — fine for git-committed/non-sensitive content, not PII.
 - **`read_image`** — vision read of any image. SVGs are rasterized first (`server/lib/image.ts`).
 - **`read_drawing`** — composite: rasterize+read the `.svg` AND deterministically parse the paired `.excalidraw` JSON (`server/lib/excalidraw.ts` — the structural ground truth: frames, bindings, groups), merged into one synthesis (`server/skills/read-drawing.md`). The dotfiles `/read-drawing` skill's `claude_iu` Haiku path is retired in favor of this.
 - **`generate_image`** — `gpt-image-2`, decodes `b64_json`, writes a PNG.

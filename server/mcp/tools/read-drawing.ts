@@ -79,7 +79,7 @@ OUTPUT: \`synthesis\` is the merged prose; \`structure\` is the deterministic JS
           .describe(
             "Absolute base path or a .svg/.excalidraw file. The pair is resolved automatically.",
           ),
-        model: z.string().optional().describe('Vision model. Default "gemini-3-pro-preview".'),
+        model: z.string().optional().describe('Vision model. Default "gemini-3.5-flash".'),
       },
       outputSchema: READ_DRAWING_OUTPUT.shape,
       annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false },
@@ -109,8 +109,7 @@ OUTPUT: \`synthesis\` is the merged prose; \`structure\` is the deterministic JS
           : { title: null, components: [], flows: [], groups: [], frames: [], annotations: [] };
 
         let synthesis: string;
-        let usedModel = model ?? "gemini-3-pro-preview";
-        let latencyMs = 0;
+        let usedModel = model ?? "gemini-3.5-flash";
         let usage;
 
         if (svgPath) {
@@ -129,14 +128,13 @@ OUTPUT: \`synthesis\` is the merged prose; \`structure\` is the deterministic JS
           });
           synthesis = result.text;
           usedModel = result.model;
-          latencyMs = result.latencyMs;
           usage = result.usage;
         } else {
-          // .excalidraw only — no image to read; synthesize from structure alone.
           usedModel = "structure-only";
           synthesis = `### Diagram (structure only — no .svg)\n\n${formatStructureForPrompt(structure)}`;
         }
 
+        const latencyMs = Math.round(performance.now() - startMs);
         const out = {
           synthesis,
           structure,

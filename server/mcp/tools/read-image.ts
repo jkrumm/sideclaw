@@ -41,7 +41,7 @@ export function registerReadImageTool(server: McpServer): void {
 WHEN TO CALL: to understand a screenshot, diagram, photo, or any image as text. For paired Excalidraw drawings (.svg + .excalidraw) prefer read_drawing.
 READ-ONLY: never modifies files (SVGs are rasterized to a temp PNG that is cleaned up). Safe to retry.
 CWD: pass an absolute file path. SVGs are rasterized via headless Chrome first; other formats read as-is.
-OUTPUT: \`text\` holds the reading. Default model gemini-3-pro-preview (best on dense diagrams). Routes to a non-EU vendor — fine for git-committed/non-sensitive images.`,
+OUTPUT: \`text\` holds the reading. Default model gemini-3.5-flash (fast, strong on dense diagrams). Routes to a non-EU vendor — fine for git-committed/non-sensitive images.`,
       inputSchema: {
         path: z.string().describe("Absolute path to the image file (.png/.jpg/.svg/...)."),
         prompt: z
@@ -53,7 +53,7 @@ OUTPUT: \`text\` holds the reading. Default model gemini-3-pro-preview (best on 
         model: z
           .string()
           .optional()
-          .describe('Vision model. Default "gemini-3-pro-preview". Not a residency knob.'),
+          .describe('Vision model. Default "gemini-3.5-flash". Not a residency knob.'),
       },
       outputSchema: READ_IMAGE_OUTPUT.shape,
       annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false },
@@ -73,20 +73,21 @@ OUTPUT: \`text\` holds the reading. Default model gemini-3-pro-preview (best on 
       const stop = mcpHeartbeat(extra, "read_image");
       try {
         const { base64, mimeType } = await loadImageAsBase64(path);
-        const result = await visionRead({
+        const visionResult = await visionRead({
           imageBase64: base64,
           mimeType,
           prompt: prompt ?? DEFAULT_READ_PROMPT,
           model,
           tool: "read_image",
         });
+        const result = { ...visionResult, latencyMs: Math.round(performance.now() - startMs) };
         logger.info(
           {
             event: "mcp.tool.end",
             tool: "read_image",
             model: result.model,
             bytes: base64.length,
-            durationMs: Math.round(performance.now() - startMs),
+            durationMs: result.latencyMs,
             tokens: result.usage?.totalTokens,
           },
           "read_image done",
