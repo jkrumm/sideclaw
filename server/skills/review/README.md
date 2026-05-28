@@ -28,6 +28,10 @@ Phase 2 — Angle Reviews (parallel Kimi-K2.6 sessions, capped at 3 in flight)
 ├── Data & Migration    ← router, if the diff touches schema/migrations/data
 └── API Contract        ← router, if the diff changes public API shape
 
+Phase 2b (parallel sidecar) — Adversary Critic
+└── Single non-agentic gemini-3.5-flash call via IU OpenAI transport — the only
+    cross-family reviewer in the pipeline. Always runs unless disabled.
+
 Phase 3 — Synthesis (single Kimi-K2.6 session, ~15s)
 └── Deduplicates, resolves conflicts, classifies findings
 ```
@@ -123,17 +127,32 @@ Each agent loads project context via `--setting-sources user,project`:
 
 ## Cost Profile
 
-All sessions run on **Kimi-K2.6** (EU/GDPR) via the LiteLLM bridge — IU per-token
-billing, zero Max quota.
+All angle + synthesis sessions run on **Kimi-K2.6** (EU/GDPR) via the LiteLLM
+bridge — IU per-token billing, zero Max quota. The adversary critic uses the
+**IU OpenAI transport** (`gemini-3.5-flash`) directly — also IU per-token, also
+zero Max, but a different model family so its bias profile is uncorrelated with
+the Kimi reviewers.
 
-| Component                        | Model     |
-| -------------------------------- | --------- |
-| 1 router triage session          | Kimi-K2.6 |
-| 2–8 angle sessions (3 in flight) | Kimi-K2.6 |
-| 1 synthesis session              | Kimi-K2.6 |
+| Component                                          | Model              |
+| -------------------------------------------------- | ------------------ |
+| 1 router triage session                            | Kimi-K2.6          |
+| 2–8 angle sessions (3 in flight)                   | Kimi-K2.6          |
+| 1 adversary critic (single HTTPS call, no agent)   | gemini-3.5-flash   |
+| 1 synthesis session                                | Kimi-K2.6          |
 
 Wall time: ~60–120s (router adds ~10-20s; phase 2 dominates and is parallel up to
-`ANGLE_CONCURRENCY`). Passing an explicit `angles` list skips the router.
+`ANGLE_CONCURRENCY`; the adversary runs in parallel with phase 2 and finishes in
+~5–10s, so it doesn't extend wall time). Passing an explicit `angles` list skips
+the router. Set `SIDECLAW_REVIEW_ADVERSARY=false` to disable the adversary.
+
+### Why the adversary is non-negotiable by default
+
+Every other reviewer in this pipeline is a Kimi-K2.6 session. Same-family
+reviewers share correlated blind spots — a consensus of 6 Kimi angles is not the
+same signal as 5 Kimi angles + 1 cross-family critic. The adversary runs as a
+single HTTPS call (no agent loop, no `claude -p`), so it costs cents and adds no
+wall-time overhead while killing the implicit self-attribution bias that
+same-family multi-reviewer pipelines otherwise carry.
 
 ## MCP Integration
 
@@ -167,6 +186,7 @@ server/skills/review/
 ├── concurrency.md     ← concurrency angle prompt (router)
 ├── data-migration.md  ← data & migration angle prompt (router)
 ├── api-contract.md    ← API contract angle prompt (router)
+├── adversary.md       ← adversary critic prompt (cross-family, IU OpenAI transport)
 └── synthesis.md       ← synthesis/classification prompt
 
 server/mcp/tools/review.ts  ← pipeline orchestration + output schema

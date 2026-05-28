@@ -239,6 +239,54 @@ export async function visionRead(opts: {
   return { text, model, latencyMs, usage };
 }
 
+export interface TextCompleteResult {
+  text: string;
+  model: string;
+  latencyMs: number;
+  usage?: IuUsage;
+}
+
+/** Single non-agentic text completion via the IU OpenAI transport. Useful for
+ * cross-family review/critique calls that don't need a `claude -p` agent loop:
+ * one HTTPS call, one JSON response, billed IU per-token. Default model
+ * gemini-3.5-flash. Pass `tool` to tag the usage-tracker row. */
+export async function textComplete(opts: {
+  prompt: string;
+  model?: string;
+  tool?: string;
+  temperature?: number;
+  maxTokens?: number;
+  timeoutMs?: number;
+}): Promise<TextCompleteResult> {
+  const model = opts.model ?? "gemini-3.5-flash";
+  const t0 = performance.now();
+
+  const body: Record<string, unknown> = {
+    model,
+    temperature: opts.temperature ?? 0,
+    messages: [{ role: "user", content: opts.prompt }],
+  };
+  if (opts.maxTokens) body.max_tokens = opts.maxTokens;
+
+  const data = (await iuFetch("/chat/completions", body, {
+    timeoutMs: opts.timeoutMs ?? 90_000,
+  })) as { id?: string; choices?: { message?: { content?: string } }[]; usage?: unknown };
+
+  const text = data.choices?.[0]?.message?.content ?? "";
+  if (!text) throw new Error("Text completion returned no content.");
+  const usage = normalizeUsage(data.usage);
+  const latencyMs = Math.round(performance.now() - t0);
+
+  await recordIuUsage({
+    tool: opts.tool ?? "text_complete",
+    model,
+    usage,
+    requestId: data.id,
+    latencyMs,
+  });
+  return { text, model, latencyMs, usage };
+}
+
 export interface GenerateImageResult {
   path: string;
   model: string;

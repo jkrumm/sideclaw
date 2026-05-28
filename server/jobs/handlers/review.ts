@@ -2,6 +2,7 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { textComplete } from "../../lib/iu-openai.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
@@ -72,7 +73,7 @@ const FINDING = z.object({
   angle: z
     .string()
     .describe(
-      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | coderabbit | fallow",
+      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | adversary | coderabbit | fallow",
     ),
 });
 
@@ -353,6 +354,106 @@ async function routeExtraAngles(
   return picked.map((a) => ({ angle: a, label: ROUTER_ANGLE_LABELS[a] }));
 }
 
+// ── Adversary critic (cross-family, non-agentic) ──────────────────────────────
+//
+// One single HTTPS call to the IU OpenAI transport (gemini-3.5-flash) running
+// in parallel with the Kimi-K2.6 angle sessions. Purpose: kill the implicit
+// self-attribution bias every same-family multi-reviewer pipeline has, by
+// adding one genuinely off-policy critic. Cheap (~5–10s, cents per review),
+// fail-soft (returns AngleResult with failureReason on any error so synthesis
+// treats it like a degraded angle, not a pipeline crash).
+//
+// Truncated at 200K chars so a pathological huge diff can't blow the request.
+
+const ADVERSARY_MODEL = "gemini-3.5-flash";
+const ADVERSARY_MAX_DIFF_CHARS = 200_000;
+
+const ADVERSARY_OUTPUT = z.object({
+  findings: z.array(ANGLE_FINDING),
+});
+
+/** Best-effort JSON extraction from a model response: strips ```json fences,
+ *  trims, and parses. Returns null on any failure — caller decides. */
+function parseJsonLoose(raw: string): unknown {
+  let s = raw.trim();
+  // Strip ```json ... ``` or ``` ... ``` fences if the model added them
+  const fence = s.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/);
+  if (fence) s = fence[1].trim();
+  // If there's still extraneous prose, slice from first { to last }
+  const first = s.indexOf("{");
+  const last = s.lastIndexOf("}");
+  if (first > 0 && last > first) s = s.slice(first, last + 1);
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+async function runAdversaryAngle(opts: {
+  diff: string;
+  contextBlock: string;
+  promptPath: string;
+  bump?: (label: string) => void;
+}): Promise<AngleResult> {
+  const angle = "adversary";
+  try {
+    const tmpl = await Bun.file(opts.promptPath).text();
+    const diffTrimmed =
+      opts.diff.length > ADVERSARY_MAX_DIFF_CHARS
+        ? opts.diff.slice(0, ADVERSARY_MAX_DIFF_CHARS) +
+          `\n\n[diff truncated at ${ADVERSARY_MAX_DIFF_CHARS} chars]`
+        : opts.diff;
+    const prompt = tmpl
+      .replace("[DIFF]", diffTrimmed)
+      .replace("[CONTEXT_BLOCK]", opts.contextBlock || "");
+
+    opts.bump?.("adversary: requesting");
+    const result = await textComplete({
+      prompt,
+      model: ADVERSARY_MODEL,
+      tool: "review:adversary",
+      temperature: 0,
+      timeoutMs: 90_000,
+    });
+    opts.bump?.("adversary: parsing");
+
+    const parsed = parseJsonLoose(result.text);
+    if (!parsed) {
+      logger.warn(
+        { tool: "review", angle, sample: result.text.slice(0, 200) },
+        "adversary returned unparseable JSON",
+      );
+      return { angle, findings: [], failureReason: "unparseable JSON output" };
+    }
+
+    const validated = ADVERSARY_OUTPUT.safeParse(parsed);
+    if (!validated.success) {
+      logger.warn(
+        { tool: "review", angle, error: validated.error.message },
+        "adversary output failed schema validation",
+      );
+      return { angle, findings: [], failureReason: "schema validation failed" };
+    }
+
+    logger.info(
+      {
+        tool: "review",
+        angle,
+        model: result.model,
+        findings: validated.data.findings.length,
+        latencyMs: result.latencyMs,
+      },
+      "adversary angle done",
+    );
+    return { angle, findings: validated.data.findings };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn({ tool: "review", angle, error: msg }, "adversary angle failed");
+    return { angle, findings: [], failureReason: msg };
+  }
+}
+
 // ── Core ───────────────────────────────────────────────────────────────────────
 
 /** Multi-angle code review pipeline: data gather → parallel angle sessions →
@@ -472,11 +573,23 @@ export async function runReview(
     "review agents selected",
   );
 
-  // ── Phase 2: Angle reviews (parallel sessions) ──────────────────────
-  const angleResults = await mapWithConcurrency(
-    agents,
-    ANGLE_CONCURRENCY,
-    async (agent): Promise<AngleResult> => {
+  // ── Phase 2: Angle reviews (parallel sessions) + adversary critic ────────
+  // The adversary runs in parallel with the Kimi angle fan-out via a single
+  // direct fetch to the IU OpenAI transport — different model family, no
+  // session-runner, no claude -p, no contention with ANGLE_CONCURRENCY.
+  const adversaryPath = join(SKILL_DIR, "adversary.md");
+  const adversaryEnabled = process.env.SIDECLAW_REVIEW_ADVERSARY !== "false";
+  const adversaryPromise: Promise<AngleResult | null> = adversaryEnabled
+    ? runAdversaryAngle({
+        diff: diffResult.stdout,
+        contextBlock,
+        promptPath: adversaryPath,
+        bump,
+      })
+    : Promise.resolve(null);
+
+  const [kimiAngleResults, adversaryResult] = await Promise.all([
+    mapWithConcurrency(agents, ANGLE_CONCURRENCY, async (agent): Promise<AngleResult> => {
       let prompt: string;
       try {
         prompt = await loadAnglePrompt(agent.angle);
@@ -522,13 +635,19 @@ export async function runReview(
         "angle session done",
       );
       return { angle: agent.angle, findings: result.data?.findings ?? [] };
-    },
-  );
+    }),
+    adversaryPromise,
+  ]);
+
+  const angleResults: AngleResult[] = adversaryResult
+    ? [...kimiAngleResults, adversaryResult]
+    : kimiAngleResults;
+  const totalReviewers = agents.length + (adversaryResult ? 1 : 0);
 
   const failedAngles = angleResults.filter((r) => r.failureReason);
 
   // ── Short-circuit: if EVERY angle failed, don't pretend a synthesis is meaningful ─
-  if (failedAngles.length === agents.length) {
+  if (failedAngles.length === totalReviewers) {
     logger.error(
       {
         event: "review.done",
@@ -536,7 +655,7 @@ export async function runReview(
         project: cwd,
         outcome: "needs-human",
         failedAngles: failedAngles.length,
-        totalAngles: agents.length,
+        totalAngles: totalReviewers,
         durationMs: Math.round(performance.now() - startMs),
       },
       "review aborted — all angle sessions failed",
@@ -551,7 +670,7 @@ export async function runReview(
         angle: r.angle,
       })),
       testGaps: [],
-      summary: `All ${agents.length} specialist reviewers failed — no review was actually performed. Causes: ${failedAngles.map((r) => `${r.angle}: ${r.failureReason}`).join("; ")}. Do NOT treat this as approval.`,
+      summary: `All ${totalReviewers} specialist reviewers failed — no review was actually performed. Causes: ${failedAngles.map((r) => `${r.angle}: ${r.failureReason}`).join("; ")}. Do NOT treat this as approval.`,
     };
   }
 
@@ -623,7 +742,7 @@ export async function runReview(
         angle: f.angle,
       });
     }
-    data.summary = `Partial review: ${failedAngles.length}/${agents.length} reviewers failed (${failedAngles.map((r) => r.angle).join(", ")}). ${data.summary}`;
+    data.summary = `Partial review: ${failedAngles.length}/${totalReviewers} reviewers failed (${failedAngles.map((r) => r.angle).join(", ")}). ${data.summary}`;
   }
 
   logger.info(
@@ -637,7 +756,7 @@ export async function runReview(
       discussions: data.discussions.length,
       testGaps: data.testGaps.length,
       failedAngles: failedAngles.length,
-      totalAngles: agents.length,
+      totalAngles: totalReviewers,
       durationMs: Math.round(performance.now() - startMs),
     },
     "review done",
