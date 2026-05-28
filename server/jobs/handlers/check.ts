@@ -115,6 +115,7 @@ export async function runCheck(
   const result = await runSession<CheckOutput>({
     cwd,
     prompt,
+    tool: "check",
     jsonSchema: CHECK_JSON_SCHEMA,
     // Fast path needs only one Bash turn per command + the JSON turn — cap tight so
     // a churny worker can't burn the discovery-sized budget it no longer needs.

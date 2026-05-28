@@ -129,6 +129,7 @@ export async function runImplement(
   const result = await runSession<ImplementOutput>({
     cwd,
     prompt,
+    tool: "implement",
     model: "Kimi-K2.6",
     jsonSchema: IMPLEMENT_JSON_SCHEMA,
     maxTurns: 100,

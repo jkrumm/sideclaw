@@ -326,6 +326,7 @@ async function routeExtraAngles(
   const result = await runSession<z.infer<typeof ROUTER_OUTPUT>>({
     cwd,
     prompt,
+    tool: "review:router",
     model: "Kimi-K2.6",
     jsonSchema: ROUTER_JSON_SCHEMA,
     maxTurns: 8,
@@ -497,6 +498,7 @@ export async function runReview(
       const result = await runSession<AngleOutput>({
         cwd,
         prompt,
+        tool: "review:angle",
         model: "Kimi-K2.6",
         jsonSchema: ANGLE_JSON_SCHEMA,
         maxTurns: 60,
@@ -584,6 +586,7 @@ export async function runReview(
   const synthesisResult = await runSession<ReviewOutput>({
     cwd,
     prompt: finalPrompt,
+    tool: "review:synthesis",
     model: "Kimi-K2.6",
     jsonSchema: REVIEW_JSON_SCHEMA,
     maxTurns: 20,

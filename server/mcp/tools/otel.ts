@@ -121,6 +121,7 @@ OUTPUT: inspect \`status\` first. "errors" means active error spans/logs were fo
       const result = await runSession<OtelOutput>({
         cwd: workDir,
         prompt,
+        tool: "otel",
         model: "Kimi-K2.6",
         jsonSchema: OTEL_JSON_SCHEMA,
         maxTurns: 20,

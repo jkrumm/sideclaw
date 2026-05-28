@@ -1,6 +1,7 @@
-import { existsSync } from "fs";
+import { appendFileSync, existsSync, mkdirSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
+import { randomUUID } from "crypto";
 import { z } from "zod";
 import { logger } from "./logger.ts";
 
@@ -20,6 +21,28 @@ const BRIDGE_URL = process.env.SIDECLAW_BRIDGE_URL ?? "http://localhost:4000";
 // auth token — send a static dummy the proxy ignores.
 const BRIDGE_TOKEN = process.env.SIDECLAW_BRIDGE_TOKEN ?? "sk-litellm-master-key";
 const DEFAULT_MODEL = "Kimi-K2.6";
+
+// Per-session attribution log. Each runSession invocation appends one record
+// describing tool / cwd / time window — usage-tracker's litellm collector joins
+// individual bridge requests to it by ts ∈ [tsStart, tsEnd], so token rows get
+// tagged with which sideclaw tool (check/review/research/implement/…) caused them.
+// Format: NDJSON, one record per session, written on completion.
+const ATTRIBUTION_LOG = join(
+  homedir(),
+  ".local",
+  "share",
+  "usage-tracker",
+  "sideclaw-sessions.jsonl",
+);
+
+function writeAttribution(record: Record<string, unknown>): void {
+  try {
+    mkdirSync(dirname(ATTRIBUTION_LOG), { recursive: true });
+    appendFileSync(ATTRIBUTION_LOG, JSON.stringify(record) + "\n", "utf-8");
+  } catch {
+    // Attribution is best-effort — never break a session over a log write.
+  }
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -48,6 +71,13 @@ export interface SessionOptions<T = unknown> {
   readOnly?: boolean;
   /** Extra env vars merged into the worker (e.g. TAVILY_API_KEY for research). */
   extraEnv?: Record<string, string>;
+  /**
+   * Tool name for usage attribution — e.g. "check", "review", "research",
+   * "implement". Written to the sideclaw-sessions.jsonl attribution log so
+   * usage-tracker can tag bridge requests back to the sideclaw tool that caused
+   * them. Optional but every job handler should set it.
+   */
+  tool?: string;
   /** Called every 15s while the subprocess runs. Use to send MCP progress notifications and reset client timeout. */
   onProgress?: (progress: number, total: number, message: string) => void;
   /**
@@ -291,15 +321,35 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     settingSources = "project",
     readOnly = false,
     extraEnv,
+    tool,
     validate,
     onActivity,
   } = opts;
+
+  const sessionUuid = randomUUID();
+  const tsStart = new Date().toISOString();
+  const emitAttribution = (
+    outcome: "ok" | "error" | "timeout",
+    extras: Record<string, unknown> = {},
+  ): void => {
+    writeAttribution({
+      sessionId: sessionUuid,
+      tool: tool ?? "unknown",
+      project: cwd,
+      model,
+      tsStart,
+      tsEnd: new Date().toISOString(),
+      outcome,
+      ...extras,
+    });
+  };
 
   if (!(await bridgeReachable())) {
     logger.error(
       { event: "session.bridge_down", project: cwd, url: BRIDGE_URL },
       "LiteLLM bridge unreachable",
     );
+    emitAttribution("error", { reason: "bridge_down" });
     return {
       ok: false,
       error: `LiteLLM bridge unreachable at ${BRIDGE_URL}. Run 'make litellm-restart' in dotfiles (see docs/kimi-litellm-bridge.md).`,
@@ -433,8 +483,8 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       case "assistant": {
         turns++;
         const content = ev.message?.content ?? [];
-        const tool = content.find((c) => c.type === "tool_use");
-        if (tool) lastAction = describeTool(tool);
+        const toolUse = content.find((c) => c.type === "tool_use");
+        if (toolUse) lastAction = describeTool(toolUse);
         else if (content.some((c) => c.type === "text")) lastAction = "responding";
         const text = content
           .filter((c) => c.type === "text")
@@ -503,11 +553,15 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
 
   logger.debug({ exitCode, timedOut, turns, lastAction }, "session stream done");
 
+  const durationMs = Math.round(performance.now() - startMs);
+
   if (timedOut) {
+    emitAttribution("timeout", { durationMs, turns });
     return { ok: false, error: `Session timed out after ${timeoutMs}ms` };
   }
 
   if (exitCode !== 0) {
+    emitAttribution("error", { durationMs, turns, exitCode });
     return {
       ok: false,
       error: `Session exited with code ${exitCode}${stderrTrimmed ? `. stderr: ${stderrTrimmed}` : ""}`,
@@ -516,6 +570,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
 
   if (!envelope) {
     logger.error({ event: "session.error", project: cwd }, "no result event in stream");
+    emitAttribution("error", { durationMs, turns, reason: "no_envelope" });
     return { ok: false, error: "Session ended without a result event" };
   }
 
@@ -537,6 +592,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       { event: "session.error", project: cwd, subtype: envelope.subtype, error: errMsg },
       "session is_error",
     );
+    emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
     return { ok: false, error: errMsg };
   }
 
@@ -549,7 +605,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
         event: "session.end",
         project: cwd,
         model,
-        durationMs: Math.round(performance.now() - startMs),
+        durationMs,
         costUsd: envelope.total_cost_usd,
         turns: envelope.num_turns,
       },
@@ -567,12 +623,15 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
           { event: "session.invalid_output", project: cwd, error: v.error },
           "session output failed validation",
         );
+        emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
         return { ok: false, error: v.error };
       }
       logSessionEnd();
+      emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
       return { ok: true, data: v.value };
     }
     logSessionEnd();
+    emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
     return { ok: true, data: value };
   };
 
@@ -588,6 +647,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       return finalize(data);
     }
     logger.error({ raw: raw.slice(0, 500) }, "result JSON parse failed");
+    emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns, reason: "json_parse" });
     return {
       ok: false,
       error: `result field is not valid JSON: ${raw.slice(0, 500)}`,
@@ -611,6 +671,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   }
 
   logger.error({ event: "session.error", project: cwd }, "session no usable output");
+  emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns, reason: "no_output" });
   return {
     ok: false,
     error: "Session produced no output (empty structured_output and result)",

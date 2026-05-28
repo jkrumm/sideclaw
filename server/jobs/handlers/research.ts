@@ -128,6 +128,7 @@ export async function runResearch(
   const result = await runSession<ResearchOutput>({
     cwd: workDir,
     prompt,
+    tool: "research",
     model: "Kimi-K2.6",
     jsonSchema: RESEARCH_JSON_SCHEMA,
     maxTurns: profile.maxTurns,

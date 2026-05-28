@@ -149,6 +149,7 @@ export async function runExcalidrawDiagram(
   const result = await runSession<WorkerOutput>({
     cwd: parentDir,
     prompt,
+    tool: "excalidraw-diagram",
     model: "Kimi-K2.6",
     jsonSchema: WORKER_JSON_SCHEMA,
     maxTurns: 40,
