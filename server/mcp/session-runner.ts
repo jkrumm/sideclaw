@@ -13,14 +13,15 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
 
 // All worker sessions route through the LiteLLM bridge (dotfiles litellm/), which
 // translates Anthropic Messages → OpenAI chat/completions against the IU unified
-// endpoint. Primary model Kimi-K2.6 (EU/GDPR), with claude-sonnet-4-6-eu failover
-// configured inside LiteLLM. The Max subscription is never used by workers — it is
-// reserved for the orchestrator. See docs/kimi-litellm-bridge.md in dotfiles.
+// endpoint. Primary model DeepSeek-V4-Pro (residency unverified — see caveat in
+// docs/deepseek-litellm-bridge.md), with the EU-resident claude-sonnet-4-6-eu as
+// the configured LiteLLM failover. The Max subscription is never used by workers —
+// it is reserved for the orchestrator. See docs/deepseek-litellm-bridge.md in dotfiles.
 const BRIDGE_URL = process.env.SIDECLAW_BRIDGE_URL ?? "http://localhost:4000";
 // LiteLLM runs unauthenticated (localhost-bound), but claude requires a non-empty
 // auth token — send a static dummy the proxy ignores.
 const BRIDGE_TOKEN = process.env.SIDECLAW_BRIDGE_TOKEN ?? "sk-litellm-master-key";
-const DEFAULT_MODEL = "Kimi-K2.6";
+const DEFAULT_MODEL = "DeepSeek-V4-Pro";
 
 // Per-session attribution log. Each runSession invocation appends one record
 // describing tool / cwd / time window — usage-tracker's litellm collector joins
@@ -49,7 +50,7 @@ function writeAttribution(record: Record<string, unknown>): void {
 export interface SessionOptions<T = unknown> {
   cwd: string;
   prompt: string;
-  /** Bridge model id (LiteLLM model_name): "Kimi-K2.6" | "claude-sonnet-4-6-eu" | "gpt-5-mini". */
+  /** Bridge model id (LiteLLM model_name): "DeepSeek-V4-Pro" | "DeepSeek-V4-Flash" | "claude-sonnet-4-6-eu". */
   model?: string;
   jsonSchema?: object;
   maxTurns?: number;
@@ -63,8 +64,8 @@ export interface SessionOptions<T = unknown> {
   settingSources?: string;
   /**
    * Read-only worker: removes Edit/Write/NotebookEdit from the tool set via
-   * `--allowedTools`. Kimi is eager and will "helpfully" edit files under
-   * `--dangerously-skip-permissions` (it once auto-fixed lint during a `check`),
+   * `--allowedTools`. Bridge workers are eager and will "helpfully" edit files under
+   * `--dangerously-skip-permissions` (Kimi once auto-fixed lint during a `check`),
    * so check/review/research must opt in. Bash stays available (needed to run
    * validators / curl), so prompts must also instruct "report only".
    */
@@ -88,8 +89,8 @@ export interface SessionOptions<T = unknown> {
    */
   onActivity?: (progress: SessionProgress) => void;
   /**
-   * Optional output validator. Kimi over the bridge ignores `--json-schema` and
-   * emits prose-fenced JSON that `extractJson` casts WITHOUT type-checking, so
+   * Optional output validator. Models over the bridge ignore `--json-schema` and
+   * emit prose-fenced JSON that `extractJson` casts WITHOUT type-checking, so
    * schema drift (e.g. a field of the wrong type) otherwise slips through to the
    * MCP `outputSchema` boundary and fails the call opaquely. When provided, the
    * extracted data (from `structured_output` or the result fence) is validated
@@ -352,7 +353,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     emitAttribution("error", { reason: "bridge_down" });
     return {
       ok: false,
-      error: `LiteLLM bridge unreachable at ${BRIDGE_URL}. Run 'make litellm-restart' in dotfiles (see docs/kimi-litellm-bridge.md).`,
+      error: `LiteLLM bridge unreachable at ${BRIDGE_URL}. Run 'make litellm-restart' in dotfiles (see docs/deepseek-litellm-bridge.md).`,
     };
   }
 
@@ -463,7 +464,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   let envelope: ClaudeJsonEnvelope | undefined;
   let turns = 0;
   let lastAction = "starting";
-  // Most recent non-empty assistant text. Kimi over the bridge frequently ends a
+  // Most recent non-empty assistant text. Bridge workers frequently end a
   // session on a tool call, leaving the `result` envelope field empty even though
   // it already emitted its JSON in an earlier text turn. We keep that text so the
   // output-extraction fallback can recover it instead of failing the whole job.
@@ -647,7 +648,11 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       return finalize(data);
     }
     logger.error({ raw: raw.slice(0, 500) }, "result JSON parse failed");
-    emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns, reason: "json_parse" });
+    emitAttribution("error", {
+      durationMs,
+      turns: envelope.num_turns ?? turns,
+      reason: "json_parse",
+    });
     return {
       ok: false,
       error: `result field is not valid JSON: ${raw.slice(0, 500)}`,
@@ -655,7 +660,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     };
   }
 
-  // Bridge fallback: the `result` field is routinely empty for Kimi sessions that
+  // Bridge fallback: the `result` field is routinely empty for bridge sessions that
   // end on a tool call (the OpenAI→Anthropic translation drops the trailing text).
   // Recover the JSON from the last assistant text message seen in the stream before
   // declaring failure — this is the single most common false "no output" failure.

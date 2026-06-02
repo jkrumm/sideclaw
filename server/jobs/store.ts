@@ -24,7 +24,7 @@ import {
 const DB_PATH = process.env.SIDECLAW_JOBS_DB ?? "/tmp/sideclaw-jobs.db";
 
 // Global ceiling on concurrently-running jobs. Kept low: workers route through a
-// single-backend Kimi-K2.6 bridge that 429s under burst, and `review` itself
+// single-backend bridge model that 429s under burst, and `review` itself
 // fans out to ANGLE_CONCURRENCY (3) inner sessions per job. Excess submissions
 // wait as `pending` and promote as slots free — this is admission control that
 // stops an agent firing N parallel implements from stampeding the bridge.

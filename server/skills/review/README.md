@@ -11,11 +11,11 @@ Phase 1 — Data Gathering (parallel shell, ~2s)
 ├── coderabbit review --prompt-only
 └── package.json (test script detection)
 
-Phase 1.5 — Angle Routing (one Kimi-K2.6 triage session, ~10-20s)
+Phase 1.5 — Angle Routing (one DeepSeek-V4-Pro triage session, ~10-20s)
 └── Reads the diff, adds content-driven angles on top of the deterministic floor
     (skipped when the caller passes an explicit `angles` list)
 
-Phase 2 — Angle Reviews (parallel Kimi-K2.6 sessions, capped at 3 in flight)
+Phase 2 — Angle Reviews (parallel DeepSeek-V4-Pro sessions, capped at 3 in flight)
 ├── Architect           ← always (floor)
 ├── Senior Dev          ← always (floor)
 ├── Frontend Expert     ← if .tsx/.jsx/.css in diff (floor)
@@ -32,7 +32,7 @@ Phase 2b (parallel sidecar) — Adversary Critic
 └── Single non-agentic gemini-3.5-flash call via IU OpenAI transport — the only
     cross-family reviewer in the pipeline. Always runs unless disabled.
 
-Phase 3 — Synthesis (single Kimi-K2.6 session, ~15s)
+Phase 3 — Synthesis (single DeepSeek-V4-Pro session, ~15s)
 └── Deduplicates, resolves conflicts, classifies findings
 ```
 
@@ -41,7 +41,7 @@ Phase 3 — Synthesis (single Kimi-K2.6 session, ~15s)
 Selection has two layers. A **deterministic floor** is picked from changed file
 extensions (instant, free, always covers the basics). A **triage router** then
 adds content-driven angles that file types can't detect — it reads the diff once
-on Kimi-K2.6 and returns the extra angles it judges relevant. Total angles are
+on DeepSeek-V4-Pro and returns the extra angles it judges relevant. Total angles are
 capped at `MAX_ANGLES` (8); the floor is kept first, router extras fill the rest.
 
 Pass an explicit `angles` array to force a fixed set and skip the router (useful
@@ -127,18 +127,18 @@ Each agent loads project context via `--setting-sources user,project`:
 
 ## Cost Profile
 
-All angle + synthesis sessions run on **Kimi-K2.6** (EU/GDPR) via the LiteLLM
+All angle + synthesis sessions run on **DeepSeek-V4-Pro** (EU/GDPR) via the LiteLLM
 bridge — IU per-token billing, zero Max quota. The adversary critic uses the
 **IU OpenAI transport** (`gemini-3.5-flash`) directly — also IU per-token, also
 zero Max, but a different model family so its bias profile is uncorrelated with
-the Kimi reviewers.
+the DeepSeek reviewers.
 
-| Component                                          | Model              |
-| -------------------------------------------------- | ------------------ |
-| 1 router triage session                            | Kimi-K2.6          |
-| 2–8 angle sessions (3 in flight)                   | Kimi-K2.6          |
-| 1 adversary critic (single HTTPS call, no agent)   | gemini-3.5-flash   |
-| 1 synthesis session                                | Kimi-K2.6          |
+| Component                                        | Model            |
+| ------------------------------------------------ | ---------------- |
+| 1 router triage session                          | DeepSeek-V4-Pro  |
+| 2–8 angle sessions (3 in flight)                 | DeepSeek-V4-Pro  |
+| 1 adversary critic (single HTTPS call, no agent) | gemini-3.5-flash |
+| 1 synthesis session                              | DeepSeek-V4-Pro  |
 
 Wall time: ~60–120s (router adds ~10-20s; phase 2 dominates and is parallel up to
 `ANGLE_CONCURRENCY`; the adversary runs in parallel with phase 2 and finishes in
@@ -147,9 +147,9 @@ the router. Set `SIDECLAW_REVIEW_ADVERSARY=false` to disable the adversary.
 
 ### Why the adversary is non-negotiable by default
 
-Every other reviewer in this pipeline is a Kimi-K2.6 session. Same-family
-reviewers share correlated blind spots — a consensus of 6 Kimi angles is not the
-same signal as 5 Kimi angles + 1 cross-family critic. The adversary runs as a
+Every other reviewer in this pipeline is a DeepSeek-V4-Pro session. Same-family
+reviewers share correlated blind spots — a consensus of 6 DeepSeek angles is not
+the same signal as 5 DeepSeek angles + 1 cross-family critic. The adversary runs as a
 single HTTPS call (no agent loop, no `claude -p`), so it costs cents and adds no
 wall-time overhead while killing the implicit self-attribution bias that
 same-family multi-reviewer pipelines otherwise carry.

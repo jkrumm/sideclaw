@@ -129,7 +129,7 @@ export async function runResearch(
     cwd: workDir,
     prompt,
     tool: "research",
-    model: "Kimi-K2.6",
+    model: "DeepSeek-V4-Pro",
     jsonSchema: RESEARCH_JSON_SCHEMA,
     maxTurns: profile.maxTurns,
     timeoutMs: profile.timeoutMs,

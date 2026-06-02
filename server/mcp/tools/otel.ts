@@ -122,7 +122,7 @@ OUTPUT: inspect \`status\` first. "errors" means active error spans/logs were fo
         cwd: workDir,
         prompt,
         tool: "otel",
-        model: "Kimi-K2.6",
+        model: "DeepSeek-V4-Pro",
         jsonSchema: OTEL_JSON_SCHEMA,
         maxTurns: 20,
         timeoutMs: 8 * 60 * 1000,

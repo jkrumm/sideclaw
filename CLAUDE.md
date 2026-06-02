@@ -78,34 +78,34 @@ The four long tools (`check`/`review`/`research`/`implement`) do **not** block t
 
 While a job runs, `job_status`/`job_wait` also expose live worker progress derived from the worker's stream-json output: `turns`, `lastAction` (e.g. `"Edit store.ts"`), and **`idleMs`** — ms since the last worker event. `idleMs` is the wedge signal: it stays low while events flow and rises during a single long operation (e.g. a slow test run), so a *large and still-growing* `idleMs` means the session may be stuck — peek at `git status` rather than waiting indefinitely. The runner persists each snapshot via a `ProgressSink` threaded `store → executor → handler → runSession.onActivity`; `review` aggregates one shared liveness bump across its parallel angle sessions.
 
-Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart (in-flight jobs reconcile to `interrupted` on boot — `recover()`). A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't stampede the single-backend Kimi bridge into 429s.
+Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart (in-flight jobs reconcile to `interrupted` on boot — `recover()`). A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't stampede the single-backend bridge into 429s.
 
 Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `implement`/`review` workers get the Tavily key inline (research capability) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
-### Worker model — LiteLLM bridge (Kimi-K2.6, EU)
+### Worker model — LiteLLM bridge (DeepSeek-V4-Pro)
 
-Every worker session runs on the **IU unified endpoint via a local LiteLLM bridge**, never on the Max subscription (Max is reserved for the orchestrator). The bridge (`dotfiles/litellm/`, LaunchAgent on `:4000`) translates Anthropic Messages → OpenAI chat/completions and routes to **Kimi-K2.6** (EU/GDPR, Azure Sweden), with LiteLLM-native failover to `claude-sonnet-4-6-eu`. `session-runner.ts` injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`. Full background: `dotfiles/docs/kimi-litellm-bridge.md`.
+Every worker session runs on the **IU unified endpoint via a local LiteLLM bridge**, never on the Max subscription (Max is reserved for the orchestrator). The bridge (`dotfiles/litellm/`, LaunchAgent on `:4000`) translates Anthropic Messages → OpenAI chat/completions and routes to **DeepSeek-V4-Pro** (switched from Kimi-K2.6 on 2026-06-02; ~4× cheaper output, ties on coding index, 1M ctx), with LiteLLM-native failover to the EU-resident `claude-sonnet-4-6-eu`. Per the bridge config the DeepSeek tiers route via **Azure Spain (EU/GDPR)** — note modelpick's catalog still lists their residency as unverified, so reconcile that there. `session-runner.ts` injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`. Full background: `dotfiles/docs/deepseek-litellm-bridge.md`.
 
 Two constraints the bridge imposes:
 - **No `WebSearch`/`WebFetch`** — they make internal Anthropic-model calls the bridge can't serve. `research` uses Tavily + `curl` + Context7 via Bash instead.
-- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Kimi will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review`/`research` are read-only; `implement` has full file access.
+- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Bridge workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review`/`research` are read-only; `implement` has full file access.
 
 ### Review Tool — Multi-Angle Pipeline
 
 The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel pipeline inside the HTTP server (see `server/skills/review/README.md` for full docs):
 
 1. **Data gathering** (parallel): git diff, fallow audit, CodeRabbit CLI
-2. **Angle reviews** (parallel Kimi-K2.6 sessions, capped at `ANGLE_CONCURRENCY=3` so the single-backend model doesn't 429): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
-3. **Synthesis** (Kimi-K2.6): deduplicates, classifies into `blocking` / `improvements` / `discussions` / `testGaps`
+2. **Angle reviews** (parallel DeepSeek-V4-Pro sessions, capped at `ANGLE_CONCURRENCY=3` so the single-backend model doesn't 429): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
+3. **Synthesis** (DeepSeek-V4-Pro): deduplicates, classifies into `blocking` / `improvements` / `discussions` / `testGaps`
 
 Output `outcome`: `"clean"` (ship it), `"actionable"` (apply fixes), `"needs-human"` (has discussions).
 Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fetches `elysiajs.com/llms.txt`.
 
 ### Multimodal tools — direct IU OpenAI transport (synchronous)
 
-`read_image`, `read_drawing`, and `generate_image` are **not** Kimi sessions and **not** async jobs. They are plain `fetch` calls to the IU unified endpoint's **OpenAI transport** (`/openai/v1/...`) — stateless, synchronous MCP tools (single call well under the 60s SDK timeout; a `mcpHeartbeat` in `session-runner.ts` keeps the client alive past 15s). Billed IU per-token, zero Max, zero Kimi worker, no `session-runner` / `claude -p` / read-only allowlist.
+`read_image`, `read_drawing`, and `generate_image` are **not** bridge worker sessions and **not** async jobs. They are plain `fetch` calls to the IU unified endpoint's **OpenAI transport** (`/openai/v1/...`) — stateless, synchronous MCP tools (single call well under the 60s SDK timeout; a `mcpHeartbeat` in `session-runner.ts` keeps the client alive past 15s). Billed IU per-token, zero Max, zero bridge worker, no `session-runner` / `claude -p` / read-only allowlist.
 
 - **Credentials** (`server/lib/iu-openai.ts`): IU key + base from Keychain (`claude-sdk-api-key`, `claude-sdk-base-url`) or `IU_API_KEY`/`IU_BASE_URL` env. The OpenAI base is derived by replacing the base's trailing `/anthropic` → `/openai/v1` (never hardcoded). `iuFetch` retries 503/429/5xx with backoff; fails fast on 410 (dead model — e.g. `dall-e-3`).
 - **Models (fixed, not residency knobs):** vision = `gemini-3.5-flash` (fast, strong on dense diagrams), image gen = `gpt-image-2`. Both route to a **non-EU vendor** — fine for git-committed/non-sensitive content, not PII.
@@ -125,7 +125,7 @@ tail -f /tmp/sideclaw.jsonl | jq .
 tail -f /tmp/sideclaw.jsonl | jq 'select(.source == "mcp")'
 ```
 
-Inner sessions spawned by MCP tools use `claude -p` routed through the LiteLLM bridge (Kimi-K2.6, IU per-token billing — no Max quota). See `.claude/rules/mcp-tools.md` for authoring conventions.
+Inner sessions spawned by MCP tools use `claude -p` routed through the LiteLLM bridge (DeepSeek-V4-Pro, IU per-token billing — no Max quota). See `.claude/rules/mcp-tools.md` for authoring conventions.
 
 ## Git Workflow
 

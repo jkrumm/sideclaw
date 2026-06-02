@@ -6,7 +6,7 @@ import { logger } from "../mcp/logger.ts";
 // ── IU OpenAI transport ───────────────────────────────────────────────────────
 //
 // Direct, stateless HTTPS calls to the IU unified endpoint's OpenAI transport
-// (`/openai/v1/...`). These bypass the LiteLLM/Kimi bridge and session-runner
+// (`/openai/v1/...`). These bypass the LiteLLM bridge and session-runner
 // entirely — they are plain fetches, billed IU per-token, zero Max quota.
 //
 // Because they bypass the bridge, the usage-tracker's litellm collector never

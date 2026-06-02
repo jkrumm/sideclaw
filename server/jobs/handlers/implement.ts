@@ -130,7 +130,7 @@ export async function runImplement(
     cwd,
     prompt,
     tool: "implement",
-    model: "Kimi-K2.6",
+    model: "DeepSeek-V4-Pro",
     jsonSchema: IMPLEMENT_JSON_SCHEMA,
     maxTurns: 100,
     timeoutMs: 20 * 60 * 1000,
@@ -144,7 +144,7 @@ export async function runImplement(
 
   if (result.ok && result.data) return result.data;
 
-  // The session emitted no parseable report (the Kimi/bridge "empty result" failure
+  // The session emitted no parseable report (the bridge "empty result" failure
   // mode) — but it may have completed the edits regardless. Reconcile against git:
   // disk is the ground truth, so a job that wrote files reports `applied: true`
   // honestly instead of a misleading hard failure. Only for `noOutput` — a timeout
@@ -165,7 +165,7 @@ export async function runImplement(
       filesChanged: newlyChanged,
       checkPassed: null,
       notes:
-        "UNVERIFIED REPORT: the worker did not return its JSON envelope (known Kimi/bridge empty-result failure); " +
+        "UNVERIFIED REPORT: the worker did not return its JSON envelope (known bridge empty-result failure); " +
         "this result was reconstructed from `git status`. Inspect the diff and run the repo's checks yourself before " +
         "trusting it — `applied`/`filesChanged` reflect the working tree, not the worker's own account.",
     };

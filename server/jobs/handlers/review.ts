@@ -7,9 +7,9 @@ import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
 
-// Max angle sessions in flight at once. Kimi-K2.6 is single-backend (Azure
-// Sweden) and 429s under burst load; capping keeps the LiteLLM Kimi→sonnet-eu
-// fallback from stampeding when 4–6 angles fire together.
+// Max angle sessions in flight at once. The single-backend bridge model 429s
+// under burst load; capping keeps the LiteLLM DeepSeek-V4-Pro→sonnet-eu fallback
+// from stampeding when 4–6 angles fire together.
 const ANGLE_CONCURRENCY = 3;
 
 // Hard cap on total angles per review. Floor angles (architect, senior-dev, +
@@ -308,7 +308,7 @@ function resolveRequestedAngles(requested: string[], floor: AgentConfig[]): Agen
   return capAngles([...baseline, ...extra], MAX_ANGLES);
 }
 
-/** Run the triage router (one cheap Kimi session) to pick content-driven angles.
+/** Run the triage router (one cheap worker session) to pick content-driven angles.
  *  Returns [] on any failure — the floor still reviews, so this degrades gracefully. */
 async function routeExtraAngles(
   cwd: string,
@@ -328,7 +328,7 @@ async function routeExtraAngles(
     cwd,
     prompt,
     tool: "review:router",
-    model: "Kimi-K2.6",
+    model: "DeepSeek-V4-Pro",
     jsonSchema: ROUTER_JSON_SCHEMA,
     maxTurns: 8,
     timeoutMs: 3 * 60 * 1000,
@@ -357,7 +357,7 @@ async function routeExtraAngles(
 // ── Adversary critic (cross-family, non-agentic) ──────────────────────────────
 //
 // One single HTTPS call to the IU OpenAI transport (gemini-3.5-flash) running
-// in parallel with the Kimi-K2.6 angle sessions. Purpose: kill the implicit
+// in parallel with the DeepSeek-V4-Pro angle sessions. Purpose: kill the implicit
 // self-attribution bias every same-family multi-reviewer pipeline has, by
 // adding one genuinely off-policy critic. Cheap (~5–10s, cents per review),
 // fail-soft (returns AngleResult with failureReason on any error so synthesis
@@ -574,7 +574,7 @@ export async function runReview(
   );
 
   // ── Phase 2: Angle reviews (parallel sessions) + adversary critic ────────
-  // The adversary runs in parallel with the Kimi angle fan-out via a single
+  // The adversary runs in parallel with the worker angle fan-out via a single
   // direct fetch to the IU OpenAI transport — different model family, no
   // session-runner, no claude -p, no contention with ANGLE_CONCURRENCY.
   const adversaryPath = join(SKILL_DIR, "adversary.md");
@@ -588,7 +588,7 @@ export async function runReview(
       })
     : Promise.resolve(null);
 
-  const [kimiAngleResults, adversaryResult] = await Promise.all([
+  const [angleSessionResults, adversaryResult] = await Promise.all([
     mapWithConcurrency(agents, ANGLE_CONCURRENCY, async (agent): Promise<AngleResult> => {
       let prompt: string;
       try {
@@ -612,7 +612,7 @@ export async function runReview(
         cwd,
         prompt,
         tool: "review:angle",
-        model: "Kimi-K2.6",
+        model: "DeepSeek-V4-Pro",
         jsonSchema: ANGLE_JSON_SCHEMA,
         maxTurns: 60,
         timeoutMs: 15 * 60 * 1000,
@@ -640,8 +640,8 @@ export async function runReview(
   ]);
 
   const angleResults: AngleResult[] = adversaryResult
-    ? [...kimiAngleResults, adversaryResult]
-    : kimiAngleResults;
+    ? [...angleSessionResults, adversaryResult]
+    : angleSessionResults;
   const totalReviewers = agents.length + (adversaryResult ? 1 : 0);
 
   const failedAngles = angleResults.filter((r) => r.failureReason);
@@ -706,7 +706,7 @@ export async function runReview(
     cwd,
     prompt: finalPrompt,
     tool: "review:synthesis",
-    model: "Kimi-K2.6",
+    model: "DeepSeek-V4-Pro",
     jsonSchema: REVIEW_JSON_SCHEMA,
     maxTurns: 20,
     timeoutMs: 10 * 60 * 1000,

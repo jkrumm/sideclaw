@@ -106,10 +106,10 @@ Treat verdict "pass" or "warn" as passed. Treat verdict "fail" as a failed step.
 All tools spawn inner `claude -p` sessions via `runSession()` from `server/mcp/session-runner.ts`.
 
 Key requirements (already handled by the runner):
-- **All workers route through the LiteLLM bridge** (`:4000`), never the Max subscription. The runner injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` (LiteLLM is unauthenticated, but claude requires a non-empty token) + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, and deletes `ANTHROPIC_API_KEY`. Default model `Kimi-K2.6` (failover `claude-sonnet-4-6-eu` inside LiteLLM). A bridge liveness check fails fast with a clear error if `:4000` is down.
+- **All workers route through the LiteLLM bridge** (`:4000`), never the Max subscription. The runner injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` (LiteLLM is unauthenticated, but claude requires a non-empty token) + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, and deletes `ANTHROPIC_API_KEY`. Default model `DeepSeek-V4-Pro` (failover `claude-sonnet-4-6-eu` inside LiteLLM). A bridge liveness check fails fast with a clear error if `:4000` is down.
 - `--strict-mcp-config --mcp-config '{"mcpServers": {}}'` — prevents circular MCP (empty `{}` is invalid schema)
 - `--setting-sources` defaults to `project` (small uncached system prompt — bridge calls have no prompt caching); pass `settingSources: "user,project"` where global rules matter (`review`, `implement`)
-- `readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"` so Edit/Write are unavailable. Required for read-only tools (`check`/`review`/`research`) — Kimi edits files under `--dangerously-skip-permissions` otherwise
+- `readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"` so Edit/Write are unavailable. Required for read-only tools (`check`/`review`/`research`) — bridge workers edit files under `--dangerously-skip-permissions` otherwise
 - `extraEnv` merges extra vars into the worker (e.g. `TAVILY_API_KEY` for `research`)
 - `WebSearch`/`WebFetch` do not work through the bridge (internal Anthropic-model calls) — do web access via Bash (Tavily/curl/Context7)
 - Delete `CLAUDE_SESSION_ID`, `CLAUDE_PARENT_SESSION_ID`, set `CLAUDE_ENTRYPOINT=worker`
@@ -122,8 +122,8 @@ tool, not just the one that first hit them — design new tools with these baked
 
 ### 1. Worker output is bridge-fragile — never trust the envelope blindly
 
-Kimi over the bridge **ignores `--json-schema`** (so `structured_output` is always empty) and
-routinely **ends a session on a tool call**, which leaves the `result` envelope field empty even
+Models over the bridge **ignore `--json-schema`** (so `structured_output` is always empty) and
+routinely **end a session on a tool call**, which leaves the `result` envelope field empty even
 on `subtype: "success"`. The session looks like a hard failure (`"Session produced no output"`)
 while the work is actually complete. This is generic — it has hit `implement`, and will hit
 `research`/`review` (its router/angle/synthesis sessions) identically.
