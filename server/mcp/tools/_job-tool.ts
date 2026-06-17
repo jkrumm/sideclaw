@@ -4,8 +4,8 @@ import type { JobTool } from "../../jobs/types.ts";
 import { submitJob, httpReachable, HTTP_DOWN_MESSAGE } from "../job-client.ts";
 import { logger } from "../logger.ts";
 
-// Shared registration for the four long-running tools (check/research/implement/
-// review). Each no longer executes inline — it submits a job to the HTTP server
+// Shared registration for the long-running tools (check/research/review).
+// Each no longer executes inline — it submits a job to the HTTP server
 // and returns a handle immediately. The caller then polls `job_wait`/`job_status`.
 // This is what keeps a 13-minute worker run from blocking (and destabilizing) the
 // MCP transport.

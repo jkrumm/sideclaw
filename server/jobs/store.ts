@@ -27,7 +27,7 @@ const DB_PATH = process.env.SIDECLAW_JOBS_DB ?? "/tmp/sideclaw-jobs.db";
 // single-backend bridge model that 429s under burst, and `review` itself
 // fans out to ANGLE_CONCURRENCY (3) inner sessions per job. Excess submissions
 // wait as `pending` and promote as slots free — this is admission control that
-// stops an agent firing N parallel implements from stampeding the bridge.
+// stops an agent firing N parallel jobs from stampeding the bridge.
 const MAX_CONCURRENT = parseInt(process.env.SIDECLAW_JOB_CONCURRENCY ?? "3", 10);
 
 // Retention: keep terminal jobs queryable for a while after they finish, then GC.

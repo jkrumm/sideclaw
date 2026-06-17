@@ -26,7 +26,7 @@ const DEFAULT_MODEL = "DeepSeek-V4-Pro";
 // Per-session attribution log. Each runSession invocation appends one record
 // describing tool / cwd / time window — usage-tracker's litellm collector joins
 // individual bridge requests to it by ts ∈ [tsStart, tsEnd], so token rows get
-// tagged with which sideclaw tool (check/review/research/implement/…) caused them.
+// tagged with which sideclaw tool (check/review/research/…) caused them.
 // Format: NDJSON, one record per session, written on completion.
 const ATTRIBUTION_LOG = join(
   homedir(),
@@ -59,7 +59,7 @@ export interface SessionOptions<T = unknown> {
    * `--setting-sources` value. Default "project" (repo CLAUDE.md only) keeps the
    * uncached system prompt small — bridge calls lose prompt caching, so global
    * rules are paid on every turn. Use "user,project" for tools that benefit from
-   * the global code-style/typescript rules (review, implement).
+   * the global code-style/typescript rules (review).
    */
   settingSources?: string;
   /**
@@ -73,8 +73,8 @@ export interface SessionOptions<T = unknown> {
   /** Extra env vars merged into the worker (e.g. TAVILY_API_KEY for research). */
   extraEnv?: Record<string, string>;
   /**
-   * Tool name for usage attribution — e.g. "check", "review", "research",
-   * "implement". Written to the sideclaw-sessions.jsonl attribution log so
+   * Tool name for usage attribution — e.g. "check", "review", "research".
+   * Written to the sideclaw-sessions.jsonl attribution log so
    * usage-tracker can tag bridge requests back to the sideclaw tool that caused
    * them. Optional but every job handler should set it.
    */
@@ -121,8 +121,8 @@ export interface SessionResult<T = unknown> {
   /**
    * True when the session completed cleanly (exit 0, not is_error, not timed out)
    * but produced nothing parseable — neither `structured_output`, a JSON `result`,
-   * nor recoverable assistant text. The work may still be on disk: handlers that
-   * edit files (`implement`) can treat this as a cue to reconcile against `git`
+   * nor recoverable assistant text. The work may still be on disk: a file-editing
+   * handler could treat this as a cue to reconcile against `git`
    * rather than reporting an outright failure. Never set on timeout/exit/is_error.
    */
   noOutput?: boolean;

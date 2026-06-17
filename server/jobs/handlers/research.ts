@@ -7,7 +7,7 @@ import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
 
 /** Resolve the Tavily key (env first, then the Keychain entry `make setup` caches).
- *  Exported so higher-order handlers (implement/review) can grant the same web-search
+ *  Exported so higher-order handlers (review) can grant the same web-search
  *  capability to their workers without recursive MCP calls. */
 export async function readTavilyKey(): Promise<string | null> {
   if (process.env.TAVILY_API_KEY) return process.env.TAVILY_API_KEY;

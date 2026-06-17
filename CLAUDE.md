@@ -62,7 +62,7 @@ The LaunchAgent starts automatically on login and restarts on crash.
 
 ## MCP Server
 
-sideclaw exposes workflow tools (`check`, `review`, `research`, `implement`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
+sideclaw exposes workflow tools (`check`, `review`, `research`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`; the actual execution logic + schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`.
 
@@ -70,7 +70,7 @@ Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`
 
 ### Async job model (durable, off the MCP transport)
 
-The four long tools (`check`/`review`/`research`/`implement`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
+The long tools (`check`/`review`/`research`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`/tmp/sideclaw-jobs.db`, separate from the ephemeral `/tmp/sideclaw.db`). See `server/jobs/store.ts`.
@@ -82,7 +82,7 @@ Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/
 
 Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
 
-Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `implement`/`review` workers get the Tavily key inline (research capability) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
+Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` workers get the Tavily key inline (research capability) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
 ### Worker model — LiteLLM bridge (DeepSeek-V4-Pro)
 
@@ -90,7 +90,7 @@ Every worker session runs on the **IU unified endpoint via a local LiteLLM bridg
 
 Two constraints the bridge imposes:
 - **No `WebSearch`/`WebFetch`** — they make internal Anthropic-model calls the bridge can't serve. `research` uses Tavily + `curl` + Context7 via Bash instead.
-- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Bridge workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review`/`research` are read-only; `implement` has full file access.
+- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Bridge workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review`/`research` are all read-only.
 
 ### Review Tool — Multi-Angle Pipeline
 
