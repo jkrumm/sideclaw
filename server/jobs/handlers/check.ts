@@ -83,6 +83,12 @@ function explicitCommandsPrompt(commands: string[]): string {
     `Run EXACTLY these and nothing else. Do NOT explore the repo, read package.json/` +
     `pyproject.toml, sniff the ecosystem, run \`which\`/\`git remote -v\`, or run \`fallow\`. ` +
     `As soon as every command has run once, emit the JSON — do not re-run or re-read.\n\n` +
+    `Wrap each command in a wall-clock cap so a hung or watch-mode process can't stall the ` +
+    `job: prefer \`timeout 180 <cmd>\` (or \`gtimeout 180\`); if neither exists, set your Bash ` +
+    `tool's own timeout to 180000 ms. Exit code 124 means the cap killed it — mark that step ` +
+    `failed with "timed out after 180s" and move on, never retry. If a test command reports no ` +
+    `tests ("0 test files", "No test files found", pytest exit 5), mark the step passed — an ` +
+    `empty suite is not a failure.\n\n` +
     commands.map((c, i) => `${i + 1}. \`${c}\``).join("\n") +
     `\n\n` +
     OUTPUT_CONTRACT

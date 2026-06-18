@@ -26,7 +26,7 @@ const DEFAULT_MODEL = "DeepSeek-V4-Pro";
 // Per-session attribution log. Each runSession invocation appends one record
 // describing tool / cwd / time window — usage-tracker's litellm collector joins
 // individual bridge requests to it by ts ∈ [tsStart, tsEnd], so token rows get
-// tagged with which sideclaw tool (check/review/research/…) caused them.
+// tagged with which sideclaw tool (check/review/…) caused them.
 // Format: NDJSON, one record per session, written on completion.
 const ATTRIBUTION_LOG = join(
   homedir(),
@@ -66,14 +66,14 @@ export interface SessionOptions<T = unknown> {
    * Read-only worker: removes Edit/Write/NotebookEdit from the tool set via
    * `--allowedTools`. Bridge workers are eager and will "helpfully" edit files under
    * `--dangerously-skip-permissions` (Kimi once auto-fixed lint during a `check`),
-   * so check/review/research must opt in. Bash stays available (needed to run
+   * so check/review must opt in. Bash stays available (needed to run
    * validators / curl), so prompts must also instruct "report only".
    */
   readOnly?: boolean;
-  /** Extra env vars merged into the worker (e.g. TAVILY_API_KEY for research). */
+  /** Extra env vars merged into the worker (e.g. RESEARCH_GATEWAY_URL/TOKEN for review). */
   extraEnv?: Record<string, string>;
   /**
-   * Tool name for usage attribution — e.g. "check", "review", "research".
+   * Tool name for usage attribution — e.g. "check", "review".
    * Written to the sideclaw-sessions.jsonl attribution log so
    * usage-tracker can tag bridge requests back to the sideclaw tool that caused
    * them. Optional but every job handler should set it.
@@ -126,6 +126,13 @@ export interface SessionResult<T = unknown> {
    * rather than reporting an outright failure. Never set on timeout/exit/is_error.
    */
   noOutput?: boolean;
+  /**
+   * The worker's raw final text when output could not be parsed/validated into `T`
+   * (set alongside `noOutput`). Untruncated, unlike the truncated copy in `error`.
+   * Lets a handler salvage a degraded-but-non-empty result (e.g. a synthesis that
+   * emitted prose instead of JSON) instead of discarding minutes of work.
+   */
+  rawText?: string;
 }
 
 /** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
@@ -657,6 +664,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       ok: false,
       error: `result field is not valid JSON: ${raw.slice(0, 500)}`,
       noOutput: true,
+      rawText: raw,
     };
   }
 
@@ -681,5 +689,6 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     ok: false,
     error: "Session produced no output (empty structured_output and result)",
     noOutput: true,
+    rawText: lastAssistantText || undefined,
   };
 }

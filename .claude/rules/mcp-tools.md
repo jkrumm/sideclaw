@@ -110,8 +110,8 @@ Key requirements (already handled by the runner):
 - `--strict-mcp-config --mcp-config '{"mcpServers": {}}'` — prevents circular MCP (empty `{}` is invalid schema)
 - `--setting-sources` defaults to `project` (small uncached system prompt — bridge calls have no prompt caching); pass `settingSources: "user,project"` where global rules matter (`review`, `implement`)
 - `readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"` so Edit/Write are unavailable. Required for read-only tools (`check`/`review`) — bridge workers edit files under `--dangerously-skip-permissions` otherwise
-- `extraEnv` merges extra vars into the worker (e.g. `TAVILY_API_KEY` for `review`)
-- `WebSearch`/`WebFetch` do not work through the bridge (internal Anthropic-model calls) — do web access via Bash (Tavily/curl/Context7)
+- `extraEnv` merges extra vars into the worker (e.g. `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN` for `review` angle workers)
+- `WebSearch`/`WebFetch` do not work through the bridge (internal Anthropic-model calls) — do web access via Bash (e.g. `curl` the research-gateway)
 - Delete `CLAUDE_SESSION_ID`, `CLAUDE_PARENT_SESSION_ID`, set `CLAUDE_ENTRYPOINT=worker`
 - `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used. `total_cost_usd` is unreliable through the bridge — read real spend from LiteLLM logs
 

@@ -82,14 +82,14 @@ Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/
 
 Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
 
-Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` workers get the Tavily key inline (web-search capability) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
+Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
 ### Worker model — LiteLLM bridge (DeepSeek-V4-Pro)
 
 Every worker session runs on the **IU unified endpoint via a local LiteLLM bridge**, never on the Max subscription (Max is reserved for the orchestrator). The bridge (`dotfiles/litellm/`, LaunchAgent on `:4000`) translates Anthropic Messages → OpenAI chat/completions and routes to **DeepSeek-V4-Pro** (switched from Kimi-K2.6 on 2026-06-02; ~4× cheaper output, ties on coding index, 1M ctx), with LiteLLM-native failover to the EU-resident `claude-sonnet-4-6-eu`. Per the bridge config the DeepSeek tiers route via **Azure Spain (EU/GDPR)** — note modelpick's catalog still lists their residency as unverified, so reconcile that there. `session-runner.ts` injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`. Full background: `dotfiles/docs/deepseek-litellm-bridge.md`.
 
 Two constraints the bridge imposes:
-- **No `WebSearch`/`WebFetch`** — they make internal Anthropic-model calls the bridge can't serve. `review` uses Tavily + `curl` + Context7 via Bash instead.
+- **No `WebSearch`/`WebFetch`** — they make internal Anthropic-model calls the bridge can't serve. For web/library facts, workers shell out via Bash instead — `review` angle workers `curl` the research-gateway (async submit + poll) to validate external claims.
 - **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Bridge workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review` are all read-only.
 
 ### Review Tool — Multi-Angle Pipeline
@@ -102,6 +102,10 @@ The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel pipe
 
 Output `outcome`: `"clean"` (ship it), `"actionable"` (apply fixes), `"needs-human"` (has discussions).
 Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fetches `elysiajs.com/llms.txt`.
+
+**External-fact validation (optional):** when `RESEARCH_GATEWAY_URL` + `RESEARCH_GATEWAY_TOKEN` are set in `.env`, each angle prompt gets a bounded `curl` recipe (and the bearer via `extraEnv`) so a reviewer can validate an external library/API/version claim against the research-gateway before filing it. Unconfigured → the block is empty and review runs unchanged.
+
+**Synthesis salvage:** the synthesizer occasionally emits prose instead of the schema JSON. Synthesis now retries once with a JSON-only directive, then falls back to a `needs-human` verdict that preserves the raw synthesizer text in a discussions entry (via `SessionResult.rawText`) — a multi-minute run is never discarded as a bare parse error.
 
 ### Multimodal tools — direct IU OpenAI transport (synchronous)
 

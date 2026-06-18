@@ -17,6 +17,51 @@ const ANGLE_CONCURRENCY = 3;
 // slots. Bounds cost and wall time (more angles = more concurrency waves).
 const MAX_ANGLES = 8;
 
+// Appended to every angle prompt when the research-gateway is configured
+// (RESEARCH_GATEWAY_URL + RESEARCH_GATEWAY_TOKEN in env). Lets a read-only angle
+// worker validate an external library/API/version claim before filing it, via a
+// bounded curl to the async bearer gateway. Empty string when unconfigured, so
+// review still runs fully without it.
+const RESEARCH_VALIDATION_BLOCK = `
+
+## Validating external facts (optional, use sparingly)
+
+You may verify an external technical fact against the research gateway — but ONLY when you
+are about to file a finding that hinges on something you are genuinely unsure of: whether a
+library API / method / option exists, its current version, or a framework's current best
+practice. Do NOT use it for logic, style, or design findings about the diff itself, and do
+NOT use it to "explore" the topic. At most once or twice for this entire review.
+
+The gateway is an async bearer HTTP service. Submit a quick-depth query, then poll a few
+times; if it has not answered within ~30s, drop the check and file your finding with an
+explicit confidence caveat. NEVER block the review waiting on it.
+
+\`\`\`bash
+JOB=$(curl -sS --max-time 20 -X POST "$RESEARCH_GATEWAY_URL/research" \\
+  -H "Authorization: Bearer $RESEARCH_GATEWAY_TOKEN" -H "Content-Type: application/json" \\
+  -d '{"query":"<your one specific question>","depth":"quick"}' | jq -r '.jobId')
+for i in $(seq 1 6); do
+  sleep 5
+  R=$(curl -sS --max-time 20 "$RESEARCH_GATEWAY_URL/research/$JOB" \\
+    -H "Authorization: Bearer $RESEARCH_GATEWAY_TOKEN")
+  [ "$(printf '%s' "$R" | jq -r '.status')" = "done" ] && printf '%s' "$R" | jq -r '.result.report' && break
+done
+\`\`\`
+
+Use the returned report only to confirm or correct the finding before you file it. This is
+the only network call you may make; stay read-only otherwise.`;
+
+// Hardening suffix appended to the synthesis prompt on a retry, after a first
+// attempt returned prose instead of the schema JSON (the failure that otherwise
+// discarded the whole multi-angle run).
+const SYNTHESIS_JSON_ONLY_RETRY = `
+
+────────────────────────────────────────────────────────
+RETRY — your previous response was REJECTED because it was not valid JSON. Return ONLY the
+JSON object specified above. Your entire message must be a single JSON object (optionally
+wrapped in one \`\`\`json fence) — no preamble such as "Here's the verdict", no markdown
+headings, no commentary before or after. Emit it as your final message and stop.`;
+
 /** Run `fn` over `items` with at most `limit` in flight. Preserves input order. */
 async function mapWithConcurrency<T, R>(
   items: T[],
@@ -554,6 +599,17 @@ export async function runReview(
     ? `\n\n## Author Context\n\n> ${context}\n\nThis is the author's stated intent. Use it to evaluate whether the changes achieve the goal — not to justify shortcuts. If the implementation doesn't match the intent, that's a blocking finding.`
     : "";
 
+  // Optional research-gateway validation for angle workers. Gated on env so review
+  // still runs fully when the gateway isn't configured. When set, each angle prompt
+  // gets the curl recipe and each angle session gets the bearer creds via extraEnv.
+  const gatewayUrl = process.env.RESEARCH_GATEWAY_URL;
+  const gatewayToken = process.env.RESEARCH_GATEWAY_TOKEN;
+  const researchEnabled = !!(gatewayUrl && gatewayToken);
+  const researchBlock = researchEnabled ? RESEARCH_VALIDATION_BLOCK : "";
+  const researchEnv: Record<string, string> | undefined = researchEnabled
+    ? { RESEARCH_GATEWAY_URL: gatewayUrl as string, RESEARCH_GATEWAY_TOKEN: gatewayToken as string }
+    : undefined;
+
   // ── Phase 1.5: Dynamic angle routing ─────
   const explicit = angles && angles.length > 0;
   const agents = explicit
@@ -569,6 +625,7 @@ export async function runReview(
       routed: !explicit,
       hasFallow: !!fallowResult.stdout,
       hasCoderabbit: !!coderabbitResult.stdout,
+      research: researchEnabled,
     },
     "review agents selected",
   );
@@ -607,6 +664,7 @@ export async function runReview(
 
       prompt = prompt.replace("[GIT_DIFF_COMMAND]", `Run: \`${diffCmd}\``);
       prompt += contextBlock;
+      prompt += researchBlock;
 
       const result = await runSession<AngleOutput>({
         cwd,
@@ -618,6 +676,7 @@ export async function runReview(
         timeoutMs: 15 * 60 * 1000,
         readOnly: true,
         settingSources: "user,project",
+        extraEnv: researchEnv,
         validate: zodValidator(ANGLE_OUTPUT),
         onActivity: (p) => bump(`${agent.angle}: ${p.lastAction}`),
       });
@@ -702,32 +761,68 @@ export async function runReview(
     .replace("[FALLOW_RESULTS]", fallowBlock)
     .replace("[CODERABBIT_RESULTS]", coderabbitBlock);
 
-  const synthesisResult = await runSession<ReviewOutput>({
-    cwd,
-    prompt: finalPrompt,
-    tool: "review:synthesis",
-    model: "DeepSeek-V4-Pro",
-    jsonSchema: REVIEW_JSON_SCHEMA,
-    maxTurns: 20,
-    timeoutMs: 10 * 60 * 1000,
-    readOnly: true,
-    settingSources: "user,project",
-    validate: zodValidator(REVIEW_OUTPUT),
-    onActivity: (p) => bump(`synthesis: ${p.lastAction}`),
-  });
+  const runSynthesis = (synthPrompt: string, maxTurns: number) =>
+    runSession<ReviewOutput>({
+      cwd,
+      prompt: synthPrompt,
+      tool: "review:synthesis",
+      model: "DeepSeek-V4-Pro",
+      jsonSchema: REVIEW_JSON_SCHEMA,
+      maxTurns,
+      timeoutMs: 10 * 60 * 1000,
+      readOnly: true,
+      settingSources: "user,project",
+      validate: zodValidator(REVIEW_OUTPUT),
+      onActivity: (p) => bump(`synthesis: ${p.lastAction}`),
+    });
+
+  let synthesisResult = await runSynthesis(finalPrompt, 20);
+
+  // Salvage: the synthesizer occasionally emits prose instead of the schema JSON.
+  // Rather than discard the whole multi-angle run, retry once with a hardened
+  // JSON-only directive, then fall back to a needs-human verdict that preserves the
+  // raw synthesizer text — a 12-minute run must never end as a bare parse error.
+  if (!synthesisResult.ok || !synthesisResult.data) {
+    logger.warn(
+      { tool: "review", project: cwd, error: synthesisResult.error },
+      "synthesis output invalid — retrying with JSON-only directive",
+    );
+    bump("synthesis: retry (json-only)");
+    synthesisResult = await runSynthesis(finalPrompt + SYNTHESIS_JSON_ONLY_RETRY, 8);
+  }
 
   if (!synthesisResult.ok || !synthesisResult.data) {
+    const raw = (synthesisResult.rawText ?? synthesisResult.error ?? "").trim();
     logger.error(
       {
         event: "review.done",
         tool: "review",
         project: cwd,
+        outcome: "needs-human",
+        salvaged: true,
         durationMs: Math.round(performance.now() - startMs),
         error: synthesisResult.error,
       },
-      "review synthesis failed",
+      "synthesis failed twice — returning salvaged needs-human verdict",
     );
-    throw new Error(synthesisResult.error ?? "review synthesis produced no result");
+    return {
+      outcome: "needs-human",
+      blocking: [],
+      improvements: [],
+      discussions: [
+        {
+          file: "(review pipeline)",
+          message:
+            "Synthesis did not return valid JSON after a retry, so the findings could not be " +
+            "structured. The multi-angle review DID run — its raw synthesizer output is preserved " +
+            "below for manual triage; re-run the review or read this directly:\n\n" +
+            (raw.slice(0, 6000) || "(no synthesizer text was captured)"),
+          angle: "synthesis",
+        },
+      ],
+      testGaps: [],
+      summary: `Review ran ${totalReviewers} reviewers but synthesis failed to serialize a structured verdict (after one retry). Findings were NOT lost — see the discussions entry for the raw synthesizer text. Treat as needs-human.`,
+    };
   }
 
   const data = synthesisResult.data;

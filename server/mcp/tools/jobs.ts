@@ -104,7 +104,7 @@ export function registerJobTools(server: McpServer): void {
 
 OUTPUT: \`status\` (pending/running/done/failed/interrupted) and \`stillRunning\`. While running, \`turns\`/\`lastAction\` show live worker activity and \`idleMs\` is ms since its last event — a large/growing \`idleMs\` is the wedge signal (peek at git status rather than waiting forever). When status is "done", \`result\` holds the tool's structured output; when "failed"/"interrupted", \`error\` explains why.`,
       inputSchema: {
-        jobId: z.string().describe("The job id returned by check/research/review."),
+        jobId: z.string().describe("The job id returned by check/review."),
       },
       outputSchema: JOB_STATE_OUTPUT.shape,
       annotations: { readOnlyHint: true, idempotentHint: true },
@@ -128,12 +128,12 @@ OUTPUT: \`status\` (pending/running/done/failed/interrupted) and \`stillRunning\
     "job_wait",
     {
       title: "Wait for Job",
-      description: `Block until a background job finishes (or the wait window elapses), then return its state. This is the normal way to consume check/research/review: submit → job_wait → use result.
+      description: `Block until a background job finishes (or the wait window elapses), then return its state. This is the normal way to consume check/review: submit → job_wait → use result.
 
 BEHAVIOR: polls internally and sends progress heartbeats, so it is safe for long jobs and won't trip the MCP timeout. Waits up to ~50s per call. If the job is still running when the window elapses, it returns with \`stillRunning: true\` — simply call job_wait again with the same jobId to keep waiting (loop until stillRunning is false). You may also do other work between calls.
 OUTPUT: when \`status\` is "done", \`result\` holds the tool's structured output; "failed"/"interrupted" set \`error\`.`,
       inputSchema: {
-        jobId: z.string().describe("The job id returned by check/research/review."),
+        jobId: z.string().describe("The job id returned by check/review."),
         maxWaitMs: z
           .number()
           .optional()

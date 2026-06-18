@@ -63,6 +63,11 @@ Return ONLY a JSON object:
 }
 ```
 
+**Your VERY LAST message must be ONLY this JSON object** (optionally wrapped in a single
+json code fence). No preamble such as "Here's the synthesized verdict", no markdown headings,
+no commentary before or after — if you wrap the JSON in prose, the entire multi-angle review
+is discarded. Do any reasoning first, then emit the JSON as your final message and stop.
+
 ## Rules
 
 - `line` is optional — omit if not identifiable from the original finding
