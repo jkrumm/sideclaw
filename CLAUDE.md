@@ -62,7 +62,7 @@ The LaunchAgent starts automatically on login and restarts on crash.
 
 ## MCP Server
 
-sideclaw exposes workflow tools (`check`, `review`, `research`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
+sideclaw exposes workflow tools (`check`, `review`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`; the actual execution logic + schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`.
 
@@ -70,7 +70,7 @@ Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`
 
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`check`/`review`/`research`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
+The long tools (`check`/`review`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`/tmp/sideclaw-jobs.db`, separate from the ephemeral `/tmp/sideclaw.db`). See `server/jobs/store.ts`.
@@ -82,15 +82,15 @@ Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/
 
 Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
 
-Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` workers get the Tavily key inline (research capability) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
+Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` workers get the Tavily key inline (web-search capability) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
 ### Worker model — LiteLLM bridge (DeepSeek-V4-Pro)
 
 Every worker session runs on the **IU unified endpoint via a local LiteLLM bridge**, never on the Max subscription (Max is reserved for the orchestrator). The bridge (`dotfiles/litellm/`, LaunchAgent on `:4000`) translates Anthropic Messages → OpenAI chat/completions and routes to **DeepSeek-V4-Pro** (switched from Kimi-K2.6 on 2026-06-02; ~4× cheaper output, ties on coding index, 1M ctx), with LiteLLM-native failover to the EU-resident `claude-sonnet-4-6-eu`. Per the bridge config the DeepSeek tiers route via **Azure Spain (EU/GDPR)** — note modelpick's catalog still lists their residency as unverified, so reconcile that there. `session-runner.ts` injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`. Full background: `dotfiles/docs/deepseek-litellm-bridge.md`.
 
 Two constraints the bridge imposes:
-- **No `WebSearch`/`WebFetch`** — they make internal Anthropic-model calls the bridge can't serve. `research` uses Tavily + `curl` + Context7 via Bash instead.
-- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Bridge workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review`/`research` are all read-only.
+- **No `WebSearch`/`WebFetch`** — they make internal Anthropic-model calls the bridge can't serve. `review` uses Tavily + `curl` + Context7 via Bash instead.
+- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Bridge workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review` are all read-only.
 
 ### Review Tool — Multi-Angle Pipeline
 

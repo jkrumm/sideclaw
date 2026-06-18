@@ -1,17 +1,16 @@
 // Shared types for the async job system.
 //
-// Long-running MCP tools (check / research / review) no longer block
+// Long-running MCP tools (check / review) no longer block
 // the MCP call. They submit a job to the always-on HTTP server (LaunchAgent),
 // which executes it in the background and persists state to bun:sqlite. The
 // orchestrating agent polls `job_status` / `job_wait` until the job reaches a
 // terminal state. See server/jobs/store.ts for the durable queue.
 
 /** Tools that run as background jobs. Each maps to a handler in server/jobs/handlers/. */
-export type JobTool = "check" | "research" | "review" | "excalidraw_diagram";
+export type JobTool = "check" | "review" | "excalidraw_diagram";
 
 export const JOB_TOOLS: readonly JobTool[] = [
   "check",
-  "research",
   "review",
   "excalidraw_diagram",
 ];

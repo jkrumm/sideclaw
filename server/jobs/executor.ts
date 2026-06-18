@@ -1,7 +1,6 @@
 import type { JobRecord } from "./types.ts";
 import type { ProgressSink } from "./store.ts";
 import { runCheck } from "./handlers/check.ts";
-import { runResearch } from "./handlers/research.ts";
 import { runReview } from "./handlers/review.ts";
 import { runExcalidrawDiagram } from "./handlers/excalidraw-diagram.ts";
 
@@ -12,8 +11,6 @@ export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<un
   switch (job.tool) {
     case "check":
       return runCheck(job.params, onProgress);
-    case "research":
-      return runResearch(job.params, onProgress);
     case "review":
       return runReview(job.params, onProgress);
     case "excalidraw_diagram":
