@@ -12,7 +12,7 @@ The code below was written by a different AI model. You are the one cross-family
   - Hidden assumptions about input shape, ordering, or invariants that will break in production
   - Race conditions, error paths, partial failures, retry / idempotency violations
   - Spec/intent mismatches — does the change actually do what the author context claims?
-  - Silent regressions — behavior that *looks* unchanged but quietly diverges (rounding, sort order, timezone, default values)
+  - Silent regressions — behavior that _looks_ unchanged but quietly diverges (rounding, sort order, timezone, default values)
 - If you genuinely cannot find anything substantive, return empty findings. Do **not** invent issues to look thorough — false-positive critiques poison the synthesis. But try hard before giving up.
 
 ## Severity classification
@@ -35,9 +35,7 @@ Return **only** a JSON object, no prose, no markdown fences. Each finding must i
 
 ```json
 {
-  "findings": [
-    { "severity": "blocking", "file": "path/to/file.ts", "line": 42, "message": "..." }
-  ]
+  "findings": [{ "severity": "blocking", "file": "path/to/file.ts", "line": 42, "message": "..." }]
 }
 ```
 
