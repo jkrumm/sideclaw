@@ -1,7 +1,7 @@
 import { Elysia, t } from "elysia";
 import { startJob, getJob, subscribeToJob } from "../lib/chain-runner";
 import { toContainerPath } from "../lib/workspace";
-import { gitDisabled } from "../lib/feature-flags";
+import { gitEnabled } from "../lib/feature-flags";
 
 // ── Git operations ────────────────────────────────────────────────────────────
 
@@ -107,7 +107,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/actions" })
   .post(
     "/chain",
     async ({ body, set }) => {
-      if (gitDisabled) {
+      if (!gitEnabled) {
         set.status = 503;
         return { ok: false as const, error: "Git integration disabled" };
       }
@@ -150,7 +150,7 @@ export const actionsRoutes = new Elysia({ prefix: "/api/actions" })
   .post(
     "/git",
     async ({ body, set }) => {
-      if (gitDisabled) {
+      if (!gitEnabled) {
         set.status = 503;
         return { ok: false, error: "Git integration disabled" };
       }

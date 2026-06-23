@@ -5,11 +5,11 @@ import { parseQueue, serializeQueue } from "../lib/parse-queue";
 import type { QueueTask } from "../lib/parse-queue";
 import { toContainerPath } from "../lib/workspace";
 import { detectCompletion, updateCache } from "../lib/queue-cache";
-import { queueDisabled } from "../lib/feature-flags";
+import { queueEnabled } from "../lib/feature-flags";
 
 export const queueRoutes = new Elysia({ prefix: "/api" })
   .get("/queue", async ({ query, set }) => {
-    if (queueDisabled) return { ok: true, data: [] as QueueTask[] } as const;
+    if (!queueEnabled) return { ok: true, data: [] as QueueTask[] } as const;
 
     const path = query.path;
     if (!path) {
@@ -29,7 +29,7 @@ export const queueRoutes = new Elysia({ prefix: "/api" })
     }
   })
   .put("/queue", async ({ query, body, set }) => {
-    if (queueDisabled) {
+    if (!queueEnabled) {
       set.status = 503;
       return { ok: false, error: "Queue feature disabled" } as const;
     }

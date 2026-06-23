@@ -24,21 +24,25 @@ so per-repo isolation is enforced. Frontend polling (`GitPanel.tsx`) runs at
 30s and pauses while the tab is hidden. Observe via
 `jq 'select(.event | startswith("github.cache"))' /tmp/sideclaw.jsonl`.
 
-### Disabling the GitPanel
+### Enabling the GitPanel
 
-Set `SIDECLAW_GIT_DISABLED=true` + `VITE_SIDECLAW_GIT_DISABLED=true` in `.env`
-to turn off the whole git surface — GitPanel doesn't render, `/api/repo/git`
-and `/api/github` return `data: null`, and `/api/actions/{chain,git}` return
-503. Use this when GitHub rate-limit pressure outweighs the dashboard value.
+Both git and queue surfaces are **off by default** — opt in per `.env`.
 
-### Disabling the QueuePanel
+Set `SIDECLAW_GIT_ENABLED=true` + `VITE_SIDECLAW_GIT_ENABLED=true` in `.env`
+to turn on the whole git surface — GitPanel renders, `/api/repo/git` and
+`/api/github` return live data, and `/api/actions/{chain,git}` are active.
+Left unset, the git surface stays off (`data: null`, actions return 503),
+which avoids GitHub rate-limit pressure.
 
-Set `SIDECLAW_QUEUE_DISABLED=true` + `VITE_SIDECLAW_QUEUE_DISABLED=true` in
-`.env` to turn off the whole queue surface — QueuePanel doesn't render, `GET
-/api/queue` and `/api/completed-tasks` return empty arrays, `PUT /api/queue`
-returns 503, `/api/repo` returns `queue: []`, the SSE watcher skips
-`sc-queue.md`, and repo init no longer creates the file. Use this when the
-task-queue workflow (Stop-hook injection from dotfiles) isn't in play.
+### Enabling the QueuePanel
+
+Set `SIDECLAW_QUEUE_ENABLED=true` + `VITE_SIDECLAW_QUEUE_ENABLED=true` in
+`.env` to turn on the whole queue surface — QueuePanel renders, `GET
+/api/queue` and `/api/completed-tasks` return live data, `PUT /api/queue`
+writes, `/api/repo` includes the queue, the SSE watcher tracks `sc-queue.md`,
+and repo init creates the file. Left unset, the queue surface stays off
+(empty arrays, `PUT` returns 503). Enable it when the task-queue workflow
+(Stop-hook injection from dotfiles) is in play.
 
 ## Running sideclaw
 

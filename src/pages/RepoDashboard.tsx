@@ -20,8 +20,8 @@ import type { QueuePanelHandle } from "../components/QueuePanel";
 import type { NotesPanelHandle } from "../components/NotesPanel";
 import type { GitStatus, RepoData } from "../types";
 
-const GIT_DISABLED = import.meta.env.VITE_SIDECLAW_GIT_DISABLED === "true";
-const QUEUE_DISABLED = import.meta.env.VITE_SIDECLAW_QUEUE_DISABLED === "true";
+const GIT_ENABLED = import.meta.env.VITE_SIDECLAW_GIT_ENABLED === "true";
+const QUEUE_ENABLED = import.meta.env.VITE_SIDECLAW_QUEUE_ENABLED === "true";
 
 async function fetchRepoData(path: string): Promise<RepoData> {
   const res = await fetch(`/api/repo?path=${encodeURIComponent(path)}`);
@@ -84,7 +84,7 @@ function RepoDashboardInner() {
   );
   const gitPromise = useMemo(
     () =>
-      GIT_DISABLED
+      !GIT_ENABLED
         ? Promise.resolve(null)
         : repoPath
           ? fetchGitData(repoPath)
@@ -132,8 +132,8 @@ function RepoDashboardInner() {
           knownServerStart = data.serverStart;
         }
         // Refresh panels to catch any events missed during a disconnect gap
-        if (!QUEUE_DISABLED) queueRef.current?.refresh();
-        if (!GIT_DISABLED) gitRef.current?.refresh();
+        if (QUEUE_ENABLED) queueRef.current?.refresh();
+        if (GIT_ENABLED) gitRef.current?.refresh();
         resetWatchdog(evtSource);
       });
 
@@ -146,7 +146,7 @@ function RepoDashboardInner() {
           sourceTabId?: string;
         };
         if (payload.file === "queue") {
-          if (!QUEUE_DISABLED) queueRef.current?.refresh();
+          if (QUEUE_ENABLED) queueRef.current?.refresh();
         } else if (payload.file === "notes") notesRef.current?.notifyExternal(payload.sourceTabId);
       });
 
@@ -231,12 +231,12 @@ function RepoDashboardInner() {
           padding: 24,
         }}
       >
-        {!GIT_DISABLED && (
+        {GIT_ENABLED && (
           <Suspense fallback={<PanelSkeleton height={100} />}>
             <GitPanel key={repoPath} ref={gitRef} repoPath={repoPath} initialPromise={gitPromise} />
           </Suspense>
         )}
-        {!QUEUE_DISABLED && (
+        {QUEUE_ENABLED && (
           <Suspense fallback={<PanelSkeleton height={160} />}>
             <QueuePanel
               key={repoPath}

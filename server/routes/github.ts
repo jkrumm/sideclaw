@@ -1,10 +1,10 @@
 import { Elysia } from "elysia";
 import { getGithubData, triggerRelease } from "../lib/github";
-import { gitDisabled } from "../lib/feature-flags";
+import { gitEnabled } from "../lib/feature-flags";
 
 export const githubRoutes = new Elysia({ prefix: "/api" })
   .get("/github", async ({ query, set }) => {
-    if (gitDisabled) return { ok: true as const, data: null };
+    if (!gitEnabled) return { ok: true as const, data: null };
 
     const { githubRepo, branch } = query;
     if (!githubRepo || !branch) {
@@ -22,7 +22,7 @@ export const githubRoutes = new Elysia({ prefix: "/api" })
     return { ok: true as const, data };
   })
   .post("/github/trigger-release", async ({ query, set }) => {
-    if (gitDisabled) {
+    if (!gitEnabled) {
       set.status = 503;
       return { ok: false as const, error: "Git integration disabled" };
     }
