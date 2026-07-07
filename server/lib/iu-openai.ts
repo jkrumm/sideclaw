@@ -30,6 +30,7 @@ export interface IuUsage {
 interface IuConfig {
   key: string;
   openaiBase: string;
+  anthropicBase: string;
 }
 
 let configCache: IuConfig | null = null;
@@ -76,7 +77,7 @@ export async function getIuConfig(): Promise<IuConfig> {
     );
   }
 
-  configCache = { key, openaiBase };
+  configCache = { key, openaiBase, anthropicBase: baseRaw };
   return configCache;
 }
 

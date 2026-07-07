@@ -4,6 +4,7 @@ import { dirname, join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
 import { logger } from "./logger.ts";
+import { getIuConfig } from "../lib/iu-openai.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -11,17 +12,48 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
   ? join(homedir(), ".local/bin/claude")
   : "claude";
 
-// All worker sessions route through the LiteLLM bridge (dotfiles litellm/), which
-// translates Anthropic Messages → OpenAI chat/completions against the IU unified
-// endpoint. Primary model DeepSeek-V4-Pro (residency unverified — see caveat in
-// docs/deepseek-litellm-bridge.md), with the EU-resident claude-sonnet-4-6-eu as
-// the configured LiteLLM failover. The Max subscription is never used by workers —
-// it is reserved for the orchestrator. See docs/deepseek-litellm-bridge.md in dotfiles.
+// Worker sessions run on Claude via the IU unified endpoint's native Anthropic
+// transport (off Max, IU per-token) — the same recipe dotfiles' `ca`/`claude_iu`
+// use. This is the hot path for plain `claude-*` model ids. The LiteLLM bridge
+// (dotfiles litellm/), which translates Anthropic Messages → OpenAI chat/completions
+// against DeepSeek, is retained but dormant by default — it only engages when a
+// `DeepSeek*` or `*-eu` model id is passed (see `useBridge` below). The Max
+// subscription is never used by workers — it is reserved for the orchestrator.
+// A `session_env` line is written per IU-native session (see `writeSessionEnv`)
+// so usage-tracker classifies worker spend as IU, not Max.
 const BRIDGE_URL = process.env.SIDECLAW_BRIDGE_URL ?? "http://localhost:4000";
 // LiteLLM runs unauthenticated (localhost-bound), but claude requires a non-empty
 // auth token — send a static dummy the proxy ignores.
 const BRIDGE_TOKEN = process.env.SIDECLAW_BRIDGE_TOKEN ?? "sk-litellm-master-key";
-const DEFAULT_MODEL = "DeepSeek-V4-Pro";
+// Worker model tiers — single source of truth. Call sites import these instead of
+// hardcoding ids so a tier change is one edit. Both are plain `claude-*` ids, so
+// `useBridge` routes them to the IU native Anthropic transport.
+export const WORKER_MODEL = "claude-sonnet-5[1m]"; // reasoning tier: review, otel, excalidraw
+export const CHECK_MODEL = "claude-haiku-4-5"; // fast/cheap tier: mechanical validation (check)
+const DEFAULT_MODEL = WORKER_MODEL;
+
+const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
+
+/** Mirror dotfiles' SessionStart hook: record the worker's base_url keyed by its
+ * transcript sessionId so usage-tracker classifies the run as IU (not Max).
+ * Idempotent — safe if the hook also fires. Never throws. */
+function writeSessionEnv(sessionId: string, baseUrl: string): void {
+  try {
+    mkdirSync(CLAUDE_LOG_DIR, { recursive: true });
+    const now = new Date().toISOString();
+    const line =
+      JSON.stringify({
+        ts: now,
+        src: "sideclaw",
+        event: "session_env",
+        level: "info",
+        data: { session: sessionId, base_url: baseUrl },
+      }) + "\n";
+    appendFileSync(join(CLAUDE_LOG_DIR, `${now.slice(0, 10)}.jsonl`), line);
+  } catch {
+    /* never throw from telemetry */
+  }
+}
 
 // Per-session attribution log. Each runSession invocation appends one record
 // describing tool / cwd / time window — usage-tracker's litellm collector joins
@@ -50,7 +82,9 @@ function writeAttribution(record: Record<string, unknown>): void {
 export interface SessionOptions<T = unknown> {
   cwd: string;
   prompt: string;
-  /** Bridge model id (LiteLLM model_name): "DeepSeek-V4-Pro" | "DeepSeek-V4-Flash" | "claude-sonnet-4-6-eu". */
+  /** Model id. Plain "claude-*" ids (e.g. "claude-sonnet-5[1m]", "claude-haiku-4-5")
+   * route via the IU native Anthropic transport. "DeepSeek-V4-Pro" | "DeepSeek-V4-Flash"
+   * | "*-eu" ids route through the (dormant-by-default) LiteLLM bridge — see `useBridge`. */
   model?: string;
   jsonSchema?: object;
   maxTurns?: number;
@@ -179,6 +213,8 @@ interface StreamEvent {
   errors?: string[];
   num_turns?: number;
   total_cost_usd?: number;
+  // system-event field: the worker's real transcript session id (init event).
+  session_id?: string;
 }
 
 /** Compact human label for a tool_use item, used as `lastAction`. */
@@ -352,7 +388,12 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     });
   };
 
-  if (!(await bridgeReachable())) {
+  // DeepSeek*/Kimi* and *-eu model ids route through the (dormant-by-default)
+  // LiteLLM bridge; plain "claude-*" ids route via the IU native Anthropic
+  // transport. Mirrors usage-tracker's isBridgeRouted().
+  const useBridge = !model.startsWith("claude") || model.endsWith("-eu");
+
+  if (useBridge && !(await bridgeReachable())) {
     logger.error(
       { event: "session.bridge_down", project: cwd, url: BRIDGE_URL },
       "LiteLLM bridge unreachable",
@@ -362,6 +403,24 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       ok: false,
       error: `LiteLLM bridge unreachable at ${BRIDGE_URL}. Run 'make litellm-restart' in dotfiles (see docs/deepseek-litellm-bridge.md).`,
     };
+  }
+
+  let anthropicBase = "";
+  let iuKey = "";
+  if (!useBridge) {
+    try {
+      const cfg = await getIuConfig();
+      anthropicBase = cfg.anthropicBase;
+      iuKey = cfg.key;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error(
+        { event: "session.iu_config_error", project: cwd, error: message },
+        "IU config unavailable",
+      );
+      emitAttribution("error", { reason: "iu_config_error" });
+      return { ok: false, error: message };
+    }
   }
 
   const args: string[] = [
@@ -397,17 +456,25 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     args.push("--json-schema", JSON.stringify(jsonSchema));
   }
 
-  // Route the worker through the LiteLLM bridge. ANTHROPIC_API_KEY is deleted: it
-  // is rejected by claude v2.x ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
-  // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 is required or the IU gateway 400s on
-  // Anthropic beta headers.
+  // ANTHROPIC_API_KEY is deleted in both branches: it is rejected by claude v2.x
+  // ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined) env[k] = v;
   }
-  env.ANTHROPIC_BASE_URL = BRIDGE_URL;
-  env.ANTHROPIC_AUTH_TOKEN = BRIDGE_TOKEN;
-  env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
+  if (useBridge) {
+    // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 is required or the IU gateway 400s
+    // on Anthropic beta headers when routed through the bridge.
+    env.ANTHROPIC_BASE_URL = BRIDGE_URL;
+    env.ANTHROPIC_AUTH_TOKEN = BRIDGE_TOKEN;
+    env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
+  } else {
+    // IU native Anthropic transport — same recipe as dotfiles' claude_iu(). Do not
+    // set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS here; that was a bridge-only
+    // workaround and dropping it on the native path is the protocol-fidelity win.
+    env.ANTHROPIC_BASE_URL = anthropicBase;
+    env.ANTHROPIC_AUTH_TOKEN = iuKey;
+  }
   delete env.ANTHROPIC_API_KEY;
   delete env.CLAUDE_SESSION_ID;
   delete env.CLAUDE_PARENT_SESSION_ID;
@@ -424,7 +491,8 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       jsonSchema: !!jsonSchema,
       settingSources,
       readOnly,
-      bridge: BRIDGE_URL,
+      useBridge,
+      baseUrl: env.ANTHROPIC_BASE_URL,
     },
     "session spawn",
   );
@@ -476,6 +544,16 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   // it already emitted its JSON in an earlier text turn. We keep that text so the
   // output-extraction fallback can recover it instead of failing the whole job.
   let lastAssistantText = "";
+  // Worker's real transcript session id (from the stream's system/init event, not
+  // sideclaw's own `sessionUuid`). Used to tag the IU-native session_env sidecar
+  // so usage-tracker joins it to the right transcript.
+  let workerSessionId: string | undefined;
+  let sessionEnvWritten = false;
+  const maybeWriteSessionEnv = () => {
+    if (useBridge || sessionEnvWritten || !workerSessionId) return;
+    writeSessionEnv(workerSessionId, anthropicBase);
+    sessionEnvWritten = true;
+  };
   const emitActivity = () => {
     if (!onActivity) return;
     try {
@@ -508,10 +586,18 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       case "system":
         if (ev.subtype === "api_retry") lastAction = "api retry";
         else if (ev.subtype === "compact_boundary") lastAction = "compacting context";
+        if (!workerSessionId && ev.session_id) {
+          workerSessionId = ev.session_id;
+          maybeWriteSessionEnv();
+        }
         emitActivity();
         break;
       case "result":
         envelope = ev as ClaudeJsonEnvelope;
+        if (!workerSessionId && ev.session_id) {
+          workerSessionId = ev.session_id;
+          maybeWriteSessionEnv();
+        }
         break;
     }
   };
@@ -545,6 +631,13 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     }
   } finally {
     reader.releaseLock();
+  }
+
+  // Fallback: if no system/result event carried session_id during the stream,
+  // check the envelope one more time before giving up on IU-native telemetry.
+  if (!workerSessionId && envelope?.session_id) {
+    workerSessionId = envelope.session_id;
+    maybeWriteSessionEnv();
   }
 
   const stderr = await stderrPromise;
@@ -604,9 +697,10 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     return { ok: false, error: errMsg };
   }
 
-  // total_cost_usd is unreliable through the bridge (claude reads Anthropic usage
-  // fields the OpenAI→Anthropic translation does not populate). Real spend is
-  // visible in LiteLLM's logs, not here — kept only for rough comparison.
+  // total_cost_usd is unreliable when routed through the bridge (claude reads
+  // Anthropic usage fields the OpenAI→Anthropic translation does not populate;
+  // real spend there is visible in LiteLLM's logs instead). On the IU native
+  // Anthropic transport the envelope's cost/usage fields are populated normally.
   const logSessionEnd = () =>
     logger.info(
       {

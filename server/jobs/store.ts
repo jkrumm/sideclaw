@@ -23,11 +23,11 @@ import {
 
 const DB_PATH = process.env.SIDECLAW_JOBS_DB ?? "/tmp/sideclaw-jobs.db";
 
-// Global ceiling on concurrently-running jobs. Kept low: workers route through a
-// single-backend bridge model that 429s under burst, and `review` itself
-// fans out to ANGLE_CONCURRENCY (3) inner sessions per job. Excess submissions
-// wait as `pending` and promote as slots free — this is admission control that
-// stops an agent firing N parallel jobs from stampeding the bridge.
+// Global ceiling on concurrently-running jobs. Kept low: workers hit the IU
+// unified endpoint's rate limits under burst, and `review` itself fans out to
+// ANGLE_CONCURRENCY (3) inner sessions per job. Excess submissions wait as
+// `pending` and promote as slots free — this is admission control that stops
+// an agent firing N parallel jobs from tripping the endpoint's rate limits.
 const MAX_CONCURRENT = parseInt(process.env.SIDECLAW_JOB_CONCURRENCY ?? "3", 10);
 
 // Retention: keep terminal jobs queryable for a while after they finish, then GC.

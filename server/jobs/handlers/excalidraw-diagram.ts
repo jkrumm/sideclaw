@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { z } from "zod";
-import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { runSession, WORKER_MODEL, zodValidator } from "../../mcp/session-runner.ts";
 import { logger } from "../../mcp/logger.ts";
 import { hydrateExcalidrawSkeleton } from "../../lib/excalidraw-hydrate.ts";
 import type { ProgressSink } from "../store.ts";
@@ -150,7 +150,7 @@ export async function runExcalidrawDiagram(
     cwd: parentDir,
     prompt,
     tool: "excalidraw-diagram",
-    model: "DeepSeek-V4-Pro",
+    model: WORKER_MODEL,
     jsonSchema: WORKER_JSON_SCHEMA,
     maxTurns: 40,
     timeoutMs: 15 * 60 * 1000,

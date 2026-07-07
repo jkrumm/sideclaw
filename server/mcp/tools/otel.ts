@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { runSession, mcpProgressCallback, zodValidator } from "../session-runner.ts";
+import { mcpProgressCallback, runSession, WORKER_MODEL, zodValidator } from "../session-runner.ts";
 import { logger } from "../logger.ts";
 
 // ── Output schema — single source of truth ────────────────────────────────────
@@ -122,7 +122,7 @@ OUTPUT: inspect \`status\` first. "errors" means active error spans/logs were fo
         cwd: workDir,
         prompt,
         tool: "otel",
-        model: "DeepSeek-V4-Pro",
+        model: WORKER_MODEL,
         jsonSchema: OTEL_JSON_SCHEMA,
         maxTurns: 20,
         timeoutMs: 8 * 60 * 1000,

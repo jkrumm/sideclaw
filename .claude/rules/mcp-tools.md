@@ -106,14 +106,14 @@ Treat verdict "pass" or "warn" as passed. Treat verdict "fail" as a failed step.
 All tools spawn inner `claude -p` sessions via `runSession()` from `server/mcp/session-runner.ts`.
 
 Key requirements (already handled by the runner):
-- **All workers route through the LiteLLM bridge** (`:4000`), never the Max subscription. The runner injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` (LiteLLM is unauthenticated, but claude requires a non-empty token) + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, and deletes `ANTHROPIC_API_KEY`. Default model `DeepSeek-V4-Pro` (failover `claude-sonnet-4-6-eu` inside LiteLLM). A bridge liveness check fails fast with a clear error if `:4000` is down.
+- **Workers run on Claude via the IU native Anthropic transport** (off Max — Max is the orchestrator's). The runner selects the backend by model id: plain `claude-*` ids (default `claude-sonnet-5[1m]`; `check` uses `claude-haiku-4-5`) resolve the IU key/base via `getIuConfig()` and inject `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` (no `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` — bridge-only workaround), deleting `ANTHROPIC_API_KEY`. `DeepSeek*`/`*-eu` ids fall through to the retained-but-dormant LiteLLM bridge (`:4000`, dummy token, `DISABLE_EXPERIMENTAL_BETAS=1`), which fails fast if `:4000` is down. Each IU-native session writes a `session_env` line to `~/.claude/logs/<date>.jsonl` so usage-tracker classifies its spend as IU, not Max.
 - `--strict-mcp-config --mcp-config '{"mcpServers": {}}'` — prevents circular MCP (empty `{}` is invalid schema)
-- `--setting-sources` defaults to `project` (small uncached system prompt — bridge calls have no prompt caching); pass `settingSources: "user,project"` where global rules matter (`review`, `implement`)
-- `readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"` so Edit/Write are unavailable. Required for read-only tools (`check`/`review`) — bridge workers edit files under `--dangerously-skip-permissions` otherwise
+- `--setting-sources` defaults to `project` (small system prompt); pass `settingSources: "user,project"` where global rules matter (`review`, `implement`)
+- `readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"` so Edit/Write are unavailable. Required for read-only tools (`check`/`review`) — workers edit files under `--dangerously-skip-permissions` otherwise
 - `extraEnv` merges extra vars into the worker (e.g. `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN` for `review` angle workers)
-- `WebSearch`/`WebFetch` do not work through the bridge (internal Anthropic-model calls) — do web access via Bash (e.g. `curl` the research-gateway)
+- `WebSearch`/`WebFetch` are not wired into worker prompts — do web access via Bash (e.g. `curl` the research-gateway)
 - Delete `CLAUDE_SESSION_ID`, `CLAUDE_PARENT_SESSION_ID`, set `CLAUDE_ENTRYPOINT=worker`
-- `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used. `total_cost_usd` is unreliable through the bridge — read real spend from LiteLLM logs
+- `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used. `total_cost_usd` is populated on the IU native transport; through the (dormant) bridge it is unreliable — read real spend from LiteLLM logs there
 
 ## Worker Output Reliability & Worker Discipline
 

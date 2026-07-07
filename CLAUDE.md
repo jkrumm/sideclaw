@@ -82,27 +82,29 @@ The long tools (`check`/`review`) do **not** block the MCP call. A 13-minute wor
 
 While a job runs, `job_status`/`job_wait` also expose live worker progress derived from the worker's stream-json output: `turns`, `lastAction` (e.g. `"Edit store.ts"`), and **`idleMs`** — ms since the last worker event. `idleMs` is the wedge signal: it stays low while events flow and rises during a single long operation (e.g. a slow test run), so a *large and still-growing* `idleMs` means the session may be stuck — peek at `git status` rather than waiting indefinitely. The runner persists each snapshot via a `ProgressSink` threaded `store → executor → handler → runSession.onActivity`; `review` aggregates one shared liveness bump across its parallel angle sessions.
 
-Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart (in-flight jobs reconcile to `interrupted` on boot — `recover()`). A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't stampede the single-backend bridge into 429s.
+Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart (in-flight jobs reconcile to `interrupted` on boot — `recover()`). A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't trip the IU unified endpoint's rate limits.
 
 Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
-### Worker model — LiteLLM bridge (DeepSeek-V4-Pro)
+### Worker model — IU native Anthropic transport (claude-sonnet-5 / claude-haiku-4-5)
 
-Every worker session runs on the **IU unified endpoint via a local LiteLLM bridge**, never on the Max subscription (Max is reserved for the orchestrator). The bridge (`dotfiles/litellm/`, LaunchAgent on `:4000`) translates Anthropic Messages → OpenAI chat/completions and routes to **DeepSeek-V4-Pro** (switched from Kimi-K2.6 on 2026-06-02; ~4× cheaper output, ties on coding index, 1M ctx), with LiteLLM-native failover to the EU-resident `claude-sonnet-4-6-eu`. Per the bridge config the DeepSeek tiers route via **Azure Spain (EU/GDPR)** — note modelpick's catalog still lists their residency as unverified, so reconcile that there. `session-runner.ts` injects `ANTHROPIC_BASE_URL=http://localhost:4000` + a dummy `ANTHROPIC_AUTH_TOKEN` + `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`. Full background: `dotfiles/docs/deepseek-litellm-bridge.md`.
+Worker sessions run on **Claude via the IU unified endpoint's native Anthropic transport** (the same recipe dotfiles' `ca`/`claude_iu` use), never on the Max subscription (Max is reserved for the orchestrator). `session-runner.ts` selects the backend by model id: plain `claude-*` ids (default `claude-sonnet-5[1m]`, `check` uses `claude-haiku-4-5`) resolve the IU key/base via `getIuConfig()` and inject `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` directly — no `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` (that flag was a bridge-only workaround). Each IU-native session writes a `session_env` line to `~/.claude/logs/<date>.jsonl` (mirroring the dotfiles SessionStart hook) so usage-tracker classifies worker spend as IU, not Max.
 
-Two constraints the bridge imposes:
-- **No `WebSearch`/`WebFetch`** — they make internal Anthropic-model calls the bridge can't serve. For web/library facts, workers shell out via Bash instead — `review` angle workers `curl` the research-gateway (async submit + poll) to validate external claims.
-- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Bridge workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review` are all read-only.
+The **LiteLLM bridge** (`dotfiles/litellm/`, LaunchAgent on `:4000`, DeepSeek-V4-Pro/Flash via Azure Spain with failover to `claude-sonnet-4-6-eu`) is retained but off the hot path — it only engages when a `DeepSeek*` or `*-eu` model id is passed. Full background: `dotfiles/docs/deepseek-litellm-bridge.md`.
+
+Two constraints carried over regardless of backend:
+- **No `WebSearch`/`WebFetch`** — not wired into worker prompts. For web/library facts, workers shell out via Bash instead — `review` angle workers `curl` the research-gateway (async submit + poll) to validate external claims.
+- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review` are all read-only.
 
 ### Review Tool — Multi-Angle Pipeline
 
 The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel pipeline inside the HTTP server (see `server/skills/review/README.md` for full docs):
 
 1. **Data gathering** (parallel): git diff, fallow audit, CodeRabbit CLI
-2. **Angle reviews** (parallel DeepSeek-V4-Pro sessions, capped at `ANGLE_CONCURRENCY=3` so the single-backend model doesn't 429): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
-3. **Synthesis** (DeepSeek-V4-Pro): deduplicates, classifies into `blocking` / `improvements` / `discussions` / `testGaps`
+2. **Angle reviews** (parallel claude-sonnet-5 sessions, capped at `ANGLE_CONCURRENCY=3` so the IU endpoint's rate limits aren't tripped): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
+3. **Synthesis** (claude-sonnet-5): deduplicates, classifies into `blocking` / `improvements` / `discussions` / `testGaps`
 
 Output `outcome`: `"clean"` (ship it), `"actionable"` (apply fixes), `"needs-human"` (has discussions).
 Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fetches `elysiajs.com/llms.txt`.
@@ -133,7 +135,7 @@ tail -f /tmp/sideclaw.jsonl | jq .
 tail -f /tmp/sideclaw.jsonl | jq 'select(.source == "mcp")'
 ```
 
-Inner sessions spawned by MCP tools use `claude -p` routed through the LiteLLM bridge (DeepSeek-V4-Pro, IU per-token billing — no Max quota). See `.claude/rules/mcp-tools.md` for authoring conventions.
+Inner sessions spawned by MCP tools use `claude -p` routed to Claude via the IU unified endpoint's native Anthropic transport (claude-sonnet-5 / claude-haiku-4-5, IU per-token billing — no Max quota). See `.claude/rules/mcp-tools.md` for authoring conventions.
 
 ## Git Workflow
 

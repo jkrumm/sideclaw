@@ -1,15 +1,15 @@
 import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
-import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { runSession, WORKER_MODEL, zodValidator } from "../../mcp/session-runner.ts";
 import { textComplete } from "../../lib/iu-openai.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
 
-// Max angle sessions in flight at once. The single-backend bridge model 429s
-// under burst load; capping keeps the LiteLLM DeepSeek-V4-Pro→sonnet-eu fallback
-// from stampeding when 4–6 angles fire together.
+// Max angle sessions in flight at once. Capping keeps concurrent claude-sonnet-5
+// sessions against the IU unified endpoint from tripping its rate limits when
+// 4–6 angles fire together.
 const ANGLE_CONCURRENCY = 3;
 
 // Hard cap on total angles per review. Floor angles (architect, senior-dev, +
@@ -373,7 +373,7 @@ async function routeExtraAngles(
     cwd,
     prompt,
     tool: "review:router",
-    model: "DeepSeek-V4-Pro",
+    model: WORKER_MODEL,
     jsonSchema: ROUTER_JSON_SCHEMA,
     maxTurns: 8,
     timeoutMs: 3 * 60 * 1000,
@@ -402,7 +402,7 @@ async function routeExtraAngles(
 // ── Adversary critic (cross-family, non-agentic) ──────────────────────────────
 //
 // One single HTTPS call to the IU OpenAI transport (gemini-3.5-flash) running
-// in parallel with the DeepSeek-V4-Pro angle sessions. Purpose: kill the implicit
+// in parallel with the claude-sonnet-5 angle sessions. Purpose: kill the implicit
 // self-attribution bias every same-family multi-reviewer pipeline has, by
 // adding one genuinely off-policy critic. Cheap (~5–10s, cents per review),
 // fail-soft (returns AngleResult with failureReason on any error so synthesis
@@ -670,7 +670,7 @@ export async function runReview(
         cwd,
         prompt,
         tool: "review:angle",
-        model: "DeepSeek-V4-Pro",
+        model: WORKER_MODEL,
         jsonSchema: ANGLE_JSON_SCHEMA,
         maxTurns: 60,
         timeoutMs: 15 * 60 * 1000,
@@ -766,7 +766,7 @@ export async function runReview(
       cwd,
       prompt: synthPrompt,
       tool: "review:synthesis",
-      model: "DeepSeek-V4-Pro",
+      model: WORKER_MODEL,
       jsonSchema: REVIEW_JSON_SCHEMA,
       maxTurns,
       timeoutMs: 10 * 60 * 1000,

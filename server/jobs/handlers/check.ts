@@ -1,7 +1,7 @@
 import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
-import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { CHECK_MODEL, runSession, zodValidator } from "../../mcp/session-runner.ts";
 import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
 
@@ -123,7 +123,7 @@ export async function runCheck(
     prompt,
     tool: "check",
     jsonSchema: CHECK_JSON_SCHEMA,
-    model: "DeepSeek-V4-Flash",
+    model: CHECK_MODEL,
     // Fast path needs only one Bash turn per command + the JSON turn — cap tight so
     // a churny worker can't burn the discovery-sized budget it no longer needs.
     maxTurns: cmdCount > 0 ? cmdCount + 6 : 30,
