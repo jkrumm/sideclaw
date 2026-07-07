@@ -1,4 +1,7 @@
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { appLogger as logger } from "../logger.ts";
 import {
   type JobProgress,
@@ -18,10 +21,14 @@ import {
 // died with the previous process).
 //
 // A separate db file from /tmp/sideclaw.db: that one DROPs its table on every
-// startup (ephemeral completed_tasks). Jobs must persist across process restarts
-// within a /tmp lifetime, so they get their own file and CREATE TABLE IF NOT EXISTS.
+// startup (ephemeral completed_tasks). Jobs must persist across process restarts,
+// so they get their own file and CREATE TABLE IF NOT EXISTS — outside /tmp,
+// since macOS's periodic daily cleanup sweeps files there untouched for 3+ days,
+// and WAL mode only bumps the base file's mtime on checkpoint, not per-write.
 
-const DB_PATH = process.env.SIDECLAW_JOBS_DB ?? "/tmp/sideclaw-jobs.db";
+const DB_PATH =
+  process.env.SIDECLAW_JOBS_DB ?? join(homedir(), ".local", "share", "sideclaw", "jobs.db");
+mkdirSync(dirname(DB_PATH), { recursive: true });
 
 // Global ceiling on concurrently-running jobs. Kept low: workers hit the IU
 // unified endpoint's rate limits under burst, and `review` itself fans out to
