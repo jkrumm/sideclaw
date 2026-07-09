@@ -86,7 +86,7 @@ export interface SessionOptions<T = unknown> {
    * route via the IU native Anthropic transport. "DeepSeek-V4-Pro" | "DeepSeek-V4-Flash"
    * | "*-eu" ids route through the (dormant-by-default) LiteLLM bridge — see `useBridge`. */
   model?: string;
-  jsonSchema?: object;
+  jsonSchema?: Record<string, unknown>;
   maxTurns?: number;
   timeoutMs?: number;
   /**
@@ -457,7 +457,11 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     // unresolvable $ref ("no schema with key or ref ..."), rejecting the payload
     // outright. z.toJSONSchema() always emits "$schema", so strip it here — the
     // single point where the flag is serialized — rather than at each call site.
-    const { $schema: _$schema, ...schemaWithoutMeta } = jsonSchema as Record<string, unknown>;
+    let schemaWithoutMeta: unknown = jsonSchema;
+    if (!Array.isArray(jsonSchema)) {
+      const { $schema: _$schema, ...rest } = jsonSchema;
+      schemaWithoutMeta = rest;
+    }
     args.push("--json-schema", JSON.stringify(schemaWithoutMeta));
   }
 
