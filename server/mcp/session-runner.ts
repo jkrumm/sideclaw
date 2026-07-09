@@ -453,7 +453,12 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   }
 
   if (jsonSchema) {
-    args.push("--json-schema", JSON.stringify(jsonSchema));
+    // claude CLI's --json-schema validator treats a top-level "$schema" key as an
+    // unresolvable $ref ("no schema with key or ref ..."), rejecting the payload
+    // outright. z.toJSONSchema() always emits "$schema", so strip it here — the
+    // single point where the flag is serialized — rather than at each call site.
+    const { $schema: _$schema, ...schemaWithoutMeta } = jsonSchema as Record<string, unknown>;
+    args.push("--json-schema", JSON.stringify(schemaWithoutMeta));
   }
 
   // ANTHROPIC_API_KEY is deleted in both branches: it is rejected by claude v2.x
