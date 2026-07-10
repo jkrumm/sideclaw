@@ -16,6 +16,16 @@
 
   <!-- Bun auto-loads .env from WorkingDirectory — no need to repeat vars here -->
 
+  <!-- launchd's default PATH (/usr/bin:/bin:/usr/sbin:/sbin) lacks Homebrew and
+       user-local bins. Worker `claude -p` subprocesses inherit this process's env,
+       so a missing PATH here breaks global hooks (e.g. the SessionEnd bun shebang
+       in ~/.claude/hooks/notify.ts) with "bun: No such file or directory". -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/Users/jkrumm/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
   <key>KeepAlive</key>
   <true/>
 
