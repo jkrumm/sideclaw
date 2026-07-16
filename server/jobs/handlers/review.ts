@@ -207,10 +207,36 @@ function scopeDiffArgs(scope: string): string {
   return `${scope} HEAD`; // bare ref → range up to HEAD
 }
 
+// Untracked (but non-ignored) files are invisible to `git diff`, which blinded
+// every reviewer to newly added files. A changed file importing a brand-new
+// module handed the adversary an import with no target in the diff, and it
+// filed a false blocking "file missing / build break" — observed live against
+// usage-tracker's then-untracked src/collectors/sideclaw-iu.ts.
+//
+// `git diff --no-index -- /dev/null <file>` renders each untracked file as a
+// normal added-file hunk (`new file mode`, repo-relative `b/` path) so it reads
+// identically to a staged addition. `git add -N` would produce the same hunks
+// via plain `git diff`, but it mutates the caller's index — a read-only review
+// must never touch their staging area.
+//
+// -z + `xargs -0` keeps paths containing spaces intact; --exclude-standard
+// honours .gitignore (so node_modules and friends stay out); --no-index always
+// exits 1 when it finds a difference, so stderr is dropped and the non-zero
+// exit is absorbed by the surrounding `$(...)`.
+//
+// Untracked files belong to the "uncommitted" scope only: the "head" and
+// commit-range scopes review committed history, where a new file is already
+// part of the commit and splicing in working-tree files would review code the
+// caller never asked about.
+const UNTRACKED_DIFF =
+  "git ls-files --others --exclude-standard -z | xargs -0 -I{} git diff --no-index -- /dev/null {} 2>/dev/null";
+
+const UNTRACKED_FILES = "git ls-files --others --exclude-standard";
+
 function gitDiffCommand(scope: string): string {
   switch (scope) {
     case "uncommitted":
-      return 'diff=$(git diff --cached); [ -z "$diff" ] && diff=$(git diff); echo "$diff"';
+      return `diff=$(git diff --cached); [ -z "$diff" ] && diff=$(git diff); untracked=$(${UNTRACKED_DIFF}); printf '%s\\n' "$diff" "$untracked"`;
     case "head":
       return "git show HEAD";
     default:
@@ -221,7 +247,7 @@ function gitDiffCommand(scope: string): string {
 function gitDiffFilesCommand(scope: string): string {
   switch (scope) {
     case "uncommitted":
-      return 'files=$(git diff --cached --name-only); [ -z "$files" ] && files=$(git diff --name-only); echo "$files"';
+      return `files=$(git diff --cached --name-only); [ -z "$files" ] && files=$(git diff --name-only); untracked=$(${UNTRACKED_FILES}); printf '%s\\n' "$files" "$untracked"`;
     case "head":
       return "git show HEAD --name-only --format=''";
     default:

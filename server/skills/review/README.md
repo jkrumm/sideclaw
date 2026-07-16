@@ -6,7 +6,7 @@ Deep code review via parallel specialist agents, synthesized into a single actio
 
 ```
 Phase 1 — Data Gathering (parallel shell, ~2s)
-├── git diff (scope-aware)
+├── git diff (scope-aware; "uncommitted" also splices in untracked files)
 ├── fallow audit --quiet (static analysis)
 ├── coderabbit review --prompt-only
 └── package.json (test script detection)
@@ -168,6 +168,21 @@ mcp__sideclaw__review({
 ```
 
 The `/review` skill and `/ship` orchestrator both invoke this tool.
+
+### Untracked files
+
+Under `scope: "uncommitted"`, untracked non-ignored files (`git ls-files
+--others --exclude-standard`) are spliced into the diff as added-file hunks via
+`git diff --no-index -- /dev/null <file>`, and listed among the changed files so
+angle gating sees them. Plain `git diff` omits them, which made a brand-new file
+invisible to the pipeline: the agentic angle workers could still `Read` it off
+disk, but the adversary is a single non-agentic call that sees only the diff
+text — so a changed file importing a new module handed it an import with no
+target and it filed a phantom "file missing / build break" blocking finding.
+
+The other scopes review committed history and deliberately do **not** splice
+untracked files in — there, a new file is already part of the commit, and
+working-tree files are outside what the caller asked to review.
 
 ## File Structure
 
