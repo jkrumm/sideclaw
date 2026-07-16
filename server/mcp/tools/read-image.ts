@@ -3,7 +3,7 @@ import { z } from "zod";
 import { existsSync } from "node:fs";
 import { logger } from "../logger.ts";
 import { mcpHeartbeat } from "../session-runner.ts";
-import { visionRead } from "../../lib/iu-openai.ts";
+import { IU_USAGE_SCHEMA, visionRead } from "../../lib/iu-openai.ts";
 import { loadImageAsBase64 } from "../../lib/image.ts";
 
 // Structural diagram-reading prompt (the bake-off default). Works for arbitrary
@@ -16,13 +16,7 @@ export const DEFAULT_READ_PROMPT = `You are reading an image, often a diagram. D
 - Any free-floating text (titles, annotations).
 Be precise with labels and structure; if text is hard to read, say so rather than guessing.`;
 
-const USAGE_SCHEMA = z
-  .object({
-    inputTokens: z.number(),
-    outputTokens: z.number(),
-    totalTokens: z.number(),
-  })
-  .optional();
+const USAGE_SCHEMA = IU_USAGE_SCHEMA.optional();
 
 const READ_IMAGE_OUTPUT = z.object({
   text: z.string().describe("The model's structured reading of the image."),

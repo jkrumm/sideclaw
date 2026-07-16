@@ -1,6 +1,7 @@
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendFile, mkdir } from "node:fs/promises";
+import { z } from "zod";
 import { logger } from "../mcp/logger.ts";
 
 // ── IU OpenAI transport ───────────────────────────────────────────────────────
@@ -11,7 +12,7 @@ import { logger } from "../mcp/logger.ts";
 //
 // Because they bypass the bridge, the usage-tracker's litellm collector never
 // sees them. `recordIuUsage()` mirrors the bridge's NDJSON shape into a separate
-// sink so a future usage-tracker `sideclaw-iu` collector can ingest the spend.
+// sink, which the usage-tracker's `sideclaw-iu` collector ingests.
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
@@ -21,11 +22,26 @@ const USAGE_SINK =
   process.env.SIDECLAW_IU_USAGE_LOG ??
   join(homedir(), ".local", "share", "usage-tracker", "sideclaw-iu.jsonl");
 
-export interface IuUsage {
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-}
+/**
+ * Token usage for one IU call — the single source of truth for both the
+ * `IuUsage` type and the `usage` field every multimodal tool exposes in its MCP
+ * output schema. Import this rather than re-declaring the shape, so a new field
+ * can't land in the type while the tool contracts silently drop it.
+ */
+export const IU_USAGE_SCHEMA = z.object({
+  inputTokens: z.number().describe("Prompt tokens consumed."),
+  outputTokens: z.number().describe("Visible completion tokens produced."),
+  reasoningTokens: z
+    .number()
+    .default(0)
+    .describe(
+      "Thinking tokens, billed at the output rate. Derived as total - input - output " +
+        "(the gateway reports no discrete field), so it is 0 for non-thinking models.",
+    ),
+  totalTokens: z.number().describe("Total tokens: input + output + reasoning."),
+});
+
+export type IuUsage = z.infer<typeof IU_USAGE_SCHEMA>;
 
 interface IuConfig {
   key: string;
@@ -135,13 +151,39 @@ async function iuFetch(
   throw lastErr ?? new Error("IU request failed after retries");
 }
 
+/** Coerce a reported token count to a usable number; vendors occasionally omit
+ * fields, and the counts feed arithmetic. */
+function num(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * Map a vendor usage object onto IuUsage.
+ *
+ * Reasoning tokens are derived, not read: the IU gateway returns only
+ * `prompt_tokens`/`completion_tokens`/`total_tokens` — no
+ * `completion_tokens_details` — so a thinking model's spend is visible only as
+ * the leftover `total - prompt - completion`. For Gemini that leftover is
+ * `thoughtsTokenCount`, which sits outside `candidatesTokenCount` (Google:
+ * `totalTokenCount = prompt + candidates + thoughts`) and is billed at the
+ * output rate. It is substantial — a 133-token answer routinely hides ~3k
+ * thinking tokens — so dropping it understates cost several-fold.
+ *
+ * The subtraction is safe across vendors: where reasoning is already folded
+ * into the completion count (OpenAI's convention) the leftover is 0, so
+ * nothing is double-counted. gpt-image-2 reconciles exactly and yields 0.
+ */
 function normalizeUsage(raw: unknown): IuUsage | undefined {
   if (!raw || typeof raw !== "object") return undefined;
-  const u = raw as Record<string, number>;
-  const inputTokens = u.prompt_tokens ?? u.input_tokens ?? 0;
-  const outputTokens = u.completion_tokens ?? u.output_tokens ?? 0;
-  const totalTokens = u.total_tokens ?? inputTokens + outputTokens;
-  return { inputTokens, outputTokens, totalTokens };
+  const u = raw as Record<string, unknown>;
+
+  const inputTokens = num(u.prompt_tokens ?? u.input_tokens);
+  const outputTokens = num(u.completion_tokens ?? u.output_tokens);
+  const totalTokens =
+    typeof u.total_tokens === "number" ? num(u.total_tokens) : inputTokens + outputTokens;
+  const reasoningTokens = Math.max(0, totalTokens - inputTokens - outputTokens);
+
+  return { inputTokens, outputTokens, reasoningTokens, totalTokens };
 }
 
 /** Append one usage row to the NDJSON sink. Best-effort: telemetry failure must
@@ -166,6 +208,7 @@ async function recordIuUsage(rec: {
         billing: "iu",
         input_tokens: rec.usage?.inputTokens ?? 0,
         output_tokens: rec.usage?.outputTokens ?? 0,
+        reasoning_tokens: rec.usage?.reasoningTokens ?? 0,
         total_tokens: rec.usage?.totalTokens ?? 0,
         latency_ms: rec.latencyMs,
         bytes: rec.bytes ?? null,

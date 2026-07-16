@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { logger } from "../logger.ts";
 import { mcpHeartbeat } from "../session-runner.ts";
-import { visionRead } from "../../lib/iu-openai.ts";
+import { IU_USAGE_SCHEMA, visionRead } from "../../lib/iu-openai.ts";
 import { loadImageAsBase64 } from "../../lib/image.ts";
 import { parseExcalidraw, formatStructureForPrompt } from "../../lib/excalidraw.ts";
 
@@ -38,10 +38,7 @@ const READ_DRAWING_OUTPUT = z.object({
   excalidrawPath: z.string().nullable().describe("Resolved .excalidraw path, or null if absent."),
   model: z.string().describe("Vision model used."),
   latencyMs: z.number().describe("End-to-end call latency in ms."),
-  usage: z
-    .object({ inputTokens: z.number(), outputTokens: z.number(), totalTokens: z.number() })
-    .optional()
-    .describe("Token usage reported by the model, if present."),
+  usage: IU_USAGE_SCHEMA.optional().describe("Token usage for the call, if reported."),
 });
 
 let promptTemplate: string | null = null;

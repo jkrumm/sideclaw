@@ -2,20 +2,13 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { logger } from "../logger.ts";
 import { mcpHeartbeat } from "../session-runner.ts";
-import { generateImage } from "../../lib/iu-openai.ts";
+import { generateImage, IU_USAGE_SCHEMA } from "../../lib/iu-openai.ts";
 
 const GENERATE_IMAGE_OUTPUT = z.object({
   path: z.string().describe("Absolute path to the written PNG file."),
   model: z.string().describe("Model that produced the image."),
   latencyMs: z.number().describe("End-to-end call latency in ms."),
-  usage: z
-    .object({
-      inputTokens: z.number(),
-      outputTokens: z.number(),
-      totalTokens: z.number(),
-    })
-    .optional()
-    .describe("Token usage reported by the model, if present."),
+  usage: IU_USAGE_SCHEMA.optional().describe("Token usage for the call, if reported."),
 });
 
 export function registerGenerateImageTool(server: McpServer): void {
