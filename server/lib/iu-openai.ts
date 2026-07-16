@@ -35,8 +35,10 @@ export const IU_USAGE_SCHEMA = z.object({
     .number()
     .default(0)
     .describe(
-      "Thinking tokens, billed at the output rate. Derived as total - input - output " +
-        "(the gateway reports no discrete field), so it is 0 for non-thinking models.",
+      "Thinking tokens, billed at the output rate. Read from " +
+        "completion_tokens_details.reasoning_tokens where the vendor reports it (OpenAI, " +
+        "which folds it inside completion_tokens) and otherwise derived as " +
+        "total - input - output (Gemini, which reports it nowhere). 0 for non-thinking models.",
     ),
   totalTokens: z.number().describe("Total tokens: input + output + reasoning."),
 });
@@ -160,30 +162,50 @@ function num(v: unknown): number {
 /**
  * Map a vendor usage object onto IuUsage.
  *
- * Reasoning tokens are derived, not read: the IU gateway returns only
- * `prompt_tokens`/`completion_tokens`/`total_tokens` — no
- * `completion_tokens_details` — so a thinking model's spend is visible only as
- * the leftover `total - prompt - completion`. For Gemini that leftover is
- * `thoughtsTokenCount`, which sits outside `candidatesTokenCount` (Google:
- * `totalTokenCount = prompt + candidates + thoughts`) and is billed at the
- * output rate. It is substantial — a 133-token answer routinely hides ~3k
- * thinking tokens — so dropping it understates cost several-fold.
+ * Thinking tokens bill at the output rate but reach us two different ways, and
+ * the gateway passes each vendor's convention through untouched:
  *
- * The subtraction is safe across vendors: where reasoning is already folded
- * into the completion count (OpenAI's convention) the leftover is 0, so
- * nothing is double-counted. gpt-image-2 reconciles exactly and yields 0.
+ *  - **OpenAI (gpt-5.x)** reports `completion_tokens_details.reasoning_tokens`
+ *    and folds that count *inside* `completion_tokens`, so
+ *    `total = prompt + completion`. Reading it and subtracting from the
+ *    completion count splits visible output from thinking without inventing
+ *    tokens. Measured on gpt-5.6-terra: a 168-token answer at
+ *    `reasoning_effort: high` carried ~4.3k reasoning tokens.
+ *  - **Gemini** reports no details object at all, and its `thoughtsTokenCount`
+ *    sits *outside* `candidatesTokenCount`
+ *    (`totalTokenCount = prompt + candidates + thoughts`), so the thinking
+ *    spend is visible only as the leftover `total - prompt - completion`. It is
+ *    substantial — a 133-token answer routinely hides ~3k thinking tokens.
+ *
+ * Handling both keeps the invariant `input + output + reasoning === total` in
+ * either convention, so a caller can price output and reasoning at the same
+ * rate and count every token exactly once. Non-thinking models report no
+ * details and no leftover, yielding 0 (gpt-image-2 reconciles exactly).
  */
 function normalizeUsage(raw: unknown): IuUsage | undefined {
   if (!raw || typeof raw !== "object") return undefined;
   const u = raw as Record<string, unknown>;
 
   const inputTokens = num(u.prompt_tokens ?? u.input_tokens);
-  const outputTokens = num(u.completion_tokens ?? u.output_tokens);
+  const completionTokens = num(u.completion_tokens ?? u.output_tokens);
   const totalTokens =
-    typeof u.total_tokens === "number" ? num(u.total_tokens) : inputTokens + outputTokens;
-  const reasoningTokens = Math.max(0, totalTokens - inputTokens - outputTokens);
+    typeof u.total_tokens === "number" ? num(u.total_tokens) : inputTokens + completionTokens;
 
-  return { inputTokens, outputTokens, reasoningTokens, totalTokens };
+  // OpenAI convention: reported, and already counted inside completion_tokens.
+  const details = (u.completion_tokens_details ?? u.output_tokens_details) as
+    | Record<string, unknown>
+    | undefined;
+  const reported = details && typeof details === "object" ? num(details.reasoning_tokens) : 0;
+
+  // Gemini convention: unreported, and sitting outside completion_tokens.
+  const external = Math.max(0, totalTokens - inputTokens - completionTokens);
+
+  return {
+    inputTokens,
+    outputTokens: Math.max(0, completionTokens - reported),
+    reasoningTokens: reported + external,
+    totalTokens,
+  };
 }
 
 /** Append one usage row to the NDJSON sink. Best-effort: telemetry failure must
@@ -293,12 +315,26 @@ export interface TextCompleteResult {
 /** Single non-agentic text completion via the IU OpenAI transport. Useful for
  * cross-family review/critique calls that don't need a `claude -p` agent loop:
  * one HTTPS call, one JSON response, billed IU per-token. Default model
- * gemini-3.5-flash. Pass `tool` to tag the usage-tracker row. */
+ * gemini-3.5-flash. Pass `tool` to tag the usage-tracker row.
+ *
+ * `temperature` is omitted from the request unless explicitly passed. Reasoning
+ * models (the gpt-5.x family) accept only the default (1) and reject any
+ * explicit value with a 400 — which the IU gateway relays as a 503, i.e. one
+ * iuFetch treats as retryable and burns every attempt on. Sending nothing is
+ * the only option that works across both thinking and non-thinking models.
+ *
+ * `reasoningEffort` likewise only goes on the wire when passed. It is a gpt-5.x
+ * parameter ("none" | "low" | "medium" | "high" | "xhigh"); the gateway rejects
+ * an unknown value, and non-reasoning models reject the parameter itself.
+ * Omitting it on a gpt-5.x model is NOT a neutral default — it behaves as
+ * "none", i.e. the reasoning model answers with no thinking at all while still
+ * billing at its reasoning-tier rate. Set it explicitly to get what you pay for. */
 export async function textComplete(opts: {
   prompt: string;
   model?: string;
   tool?: string;
   temperature?: number;
+  reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   maxTokens?: number;
   timeoutMs?: number;
 }): Promise<TextCompleteResult> {
@@ -307,9 +343,10 @@ export async function textComplete(opts: {
 
   const body: Record<string, unknown> = {
     model,
-    temperature: opts.temperature ?? 0,
     messages: [{ role: "user", content: opts.prompt }],
   };
+  if (opts.temperature !== undefined) body.temperature = opts.temperature;
+  if (opts.reasoningEffort !== undefined) body.reasoning_effort = opts.reasoningEffort;
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
 
   const data = (await iuFetch("/chat/completions", body, {

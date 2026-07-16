@@ -29,7 +29,7 @@ Phase 2 — Angle Reviews (parallel claude-sonnet-5 sessions, capped at 3 in fli
 └── API Contract        ← router, if the diff changes public API shape
 
 Phase 2b (parallel sidecar) — Adversary Critic
-└── Single non-agentic gemini-3.5-flash call via IU OpenAI transport — the only
+└── Single non-agentic gpt-5.6-terra call via IU OpenAI transport — the only
     cross-family reviewer in the pipeline. Always runs unless disabled.
 
 Phase 3 — Synthesis (single claude-sonnet-5 session, ~15s)
@@ -129,20 +129,43 @@ Each agent loads project context via `--setting-sources user,project`:
 
 All angle + synthesis sessions run on **claude-sonnet-5** via the IU unified
 endpoint's native Anthropic transport — IU per-token billing, zero Max quota. The
-adversary critic uses the **IU OpenAI transport** (`gemini-3.5-flash`) directly —
+adversary critic uses the **IU OpenAI transport** (`gpt-5.6-terra`) directly —
 also IU per-token, also zero Max, but a different model family so its bias
 profile is uncorrelated with the claude-sonnet-5 reviewers.
 
-| Component                                        | Model            |
-| ------------------------------------------------ | ---------------- |
-| 1 router triage session                          | claude-sonnet-5  |
-| 2–8 angle sessions (3 in flight)                 | claude-sonnet-5  |
-| 1 adversary critic (single HTTPS call, no agent) | gemini-3.5-flash |
-| 1 synthesis session                              | claude-sonnet-5  |
+| Component                                        | Model           |
+| ------------------------------------------------ | --------------- |
+| 1 router triage session                          | claude-sonnet-5 |
+| 2–8 angle sessions (3 in flight)                 | claude-sonnet-5 |
+| 1 adversary critic (single HTTPS call, no agent) | gpt-5.6-terra   |
+| 1 synthesis session                              | claude-sonnet-5 |
+
+`gpt-5.6-terra` is a reasoning model — it thinks before answering, so it is
+slower (~50s) and pricier ($2.50/$15 per 1M, ~$0.08 a review) than the
+`gemini-3.5-flash` it replaced, but it is a stronger critic and still a single
+call with no agent loop. Two wiring rules are easy to get wrong:
+
+- **`temperature` must not be sent.** It accepts only the default (1) and 400s
+  on anything else — and the IU gateway relays that 400 as a _retryable-looking_
+  503, so a stray `temperature: 0` burns every `iuFetch` attempt and then fails
+  soft, silently dropping the adversary from every review while the pipeline
+  still reports green.
+- **`reasoning_effort` must be sent.** Omitting it is not a neutral default: it
+  behaves as `"none"`, so the model answers with zero thinking while still
+  billing at the reasoning tier. The adversary runs at `"high"`
+  (`ADVERSARY_EFFORT`). Measured on a real 7.5K-char diff, effort decides how
+  deep the critique reaches — `none`/`medium` stopped at a surface offset bug,
+  `high` found the subtler token-derivation bug ~50 lines further in; `xhigh`
+  doubled the thinking tokens without finding more.
+
+Reasoning tokens bill at the output rate and are folded inside
+`completion_tokens`; `normalizeUsage` splits them back out so the ledger shows
+real thinking spend (a ~170-token critique carries ~4.3k reasoning tokens)
+without counting a token twice.
 
 Wall time: ~60–120s (router adds ~10-20s; phase 2 dominates and is parallel up to
-`ANGLE_CONCURRENCY`; the adversary runs in parallel with phase 2 and finishes in
-~5–10s, so it doesn't extend wall time). Passing an explicit `angles` list skips
+`ANGLE_CONCURRENCY`; the adversary runs in parallel with phase 2, still inside
+phase 2's window). Passing an explicit `angles` list skips
 the router. Set `SIDECLAW_REVIEW_ADVERSARY=false` to disable the adversary.
 
 ### Why the adversary is non-negotiable by default
@@ -150,9 +173,9 @@ the router. Set `SIDECLAW_REVIEW_ADVERSARY=false` to disable the adversary.
 Every other reviewer in this pipeline is a claude-sonnet-5 session. Same-family
 reviewers share correlated blind spots — a consensus of 6 claude-sonnet-5 angles
 is not the same signal as 5 claude-sonnet-5 angles + 1 cross-family critic. The adversary runs as a
-single HTTPS call (no agent loop, no `claude -p`), so it costs cents and adds no
-wall-time overhead while killing the implicit self-attribution bias that
-same-family multi-reviewer pipelines otherwise carry.
+single HTTPS call (no agent loop, no `claude -p`), so it costs cents and runs
+inside phase 2's existing window while killing the implicit self-attribution
+bias that same-family multi-reviewer pipelines otherwise carry.
 
 ## MCP Integration
 

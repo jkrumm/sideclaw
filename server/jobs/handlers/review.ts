@@ -427,16 +427,33 @@ async function routeExtraAngles(
 
 // ── Adversary critic (cross-family, non-agentic) ──────────────────────────────
 //
-// One single HTTPS call to the IU OpenAI transport (gemini-3.5-flash) running
-// in parallel with the claude-sonnet-5 angle sessions. Purpose: kill the implicit
+// One single HTTPS call to the IU OpenAI transport (gpt-5.6-terra) running in
+// parallel with the claude-sonnet-5 angle sessions. Purpose: kill the implicit
 // self-attribution bias every same-family multi-reviewer pipeline has, by
-// adding one genuinely off-policy critic. Cheap (~5–10s, cents per review),
-// fail-soft (returns AngleResult with failureReason on any error so synthesis
-// treats it like a degraded angle, not a pipeline crash).
+// adding one genuinely off-policy critic. Fail-soft (returns AngleResult with
+// failureReason on any error so synthesis treats it like a degraded angle, not
+// a pipeline crash).
+//
+// gpt-5.6-terra is a reasoning model, with two non-obvious wiring rules:
+//
+//  1. It accepts ONLY the default temperature (1) and 400s on any explicit
+//     value, so no temperature is sent. The IU gateway surfaces that 400 as a
+//     503, which iuFetch treats as retryable — a stray `temperature: 0` would
+//     burn all three attempts and then fail soft, silently removing the
+//     adversary from every review while the pipeline still looked green.
+//  2. Omitting `reasoning_effort` is NOT a neutral default: it behaves as
+//     "none", so the model answers with zero thinking while still billing at
+//     the reasoning tier. Measured on a real 7.5K-char diff, effort drives how
+//     deep the critique goes: "none"/"medium" stopped at a surface offset bug,
+//     while "high" reached the subtler token-derivation bug ~50 lines further
+//     in. "high" costs ~$0.08 and ~50s — and since the adversary runs in
+//     parallel with the 60–120s angle phase, that latency is free. "xhigh"
+//     doubled the thinking tokens without finding more.
 //
 // Truncated at 200K chars so a pathological huge diff can't blow the request.
 
-const ADVERSARY_MODEL = "gemini-3.5-flash";
+const ADVERSARY_MODEL = "gpt-5.6-terra";
+const ADVERSARY_EFFORT = "high" as const;
 const ADVERSARY_MAX_DIFF_CHARS = 200_000;
 
 const ADVERSARY_OUTPUT = z.object({
@@ -484,8 +501,11 @@ async function runAdversaryAngle(opts: {
       prompt,
       model: ADVERSARY_MODEL,
       tool: "review:adversary",
-      temperature: 0,
-      timeoutMs: 90_000,
+      reasoningEffort: ADVERSARY_EFFORT,
+      // Generous: thinking on a near-200K-char diff is far slower than the ~50s
+      // a typical diff takes, and this is a single fail-soft call with no
+      // wall-time cost while the angle sessions run.
+      timeoutMs: 300_000,
     });
     opts.bump?.("adversary: parsing");
 
