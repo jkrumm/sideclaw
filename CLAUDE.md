@@ -88,11 +88,15 @@ Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / 
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
-### Worker model — IU native Anthropic transport (claude-sonnet-5 / claude-haiku-4-5)
+### Worker model — backend selection: IU (default) / Max / bridge
 
-Worker sessions run on **Claude via the IU unified endpoint's native Anthropic transport** (the same recipe dotfiles' `ca`/`claude_iu` use), never on the Max subscription (Max is reserved for the orchestrator). `session-runner.ts` selects the backend by model id: plain `claude-*` ids (default `claude-sonnet-5[1m]`, `check` uses `claude-haiku-4-5`) resolve the IU key/base via `getIuConfig()` and inject `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` directly — no `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` (that flag was a bridge-only workaround). Each IU-native session writes a `session_env` line to `~/.claude/logs/<date>.jsonl` (mirroring the dotfiles SessionStart hook) so usage-tracker classifies worker spend as IU, not Max.
+Worker sessions run on **Claude via the IU unified endpoint's native Anthropic transport** by default (the same recipe dotfiles' `ca`/`claude_iu` use) — metered IU per-token billing, off Max. `session-runner.ts` selects the backend by model id: plain `claude-*` ids (default `claude-sonnet-5[1m]`, `check` uses `claude-haiku-4-5`) resolve the IU key/base via `getIuConfig()` and inject `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` directly — no `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` (that flag was a bridge-only workaround). Each IU-native session writes a `session_env` line to `~/.claude/logs/<date>.jsonl` (mirroring the dotfiles SessionStart hook) so usage-tracker classifies worker spend as IU, not Max.
+
+**`SIDECLAW_WORKER_BACKEND`** (`.env`, default `iu`) is a per-installation escape hatch onto the Max subscription: set it to `max` and plain `claude-*` worker sessions delete `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` instead of injecting the IU ones, so the CLI falls through to the inherited OAuth profile — Max subscription rate-limit budget, not metered API tokens. It only affects plain `claude-*` ids; `DeepSeek*`/`*-eu` ids always route to the bridge regardless of the flag. Read once at module load from `sideclaw/.env`, so flipping it requires **`make reload`** (not just a code edit) to take effect. On the `max` backend, `session_env` is still written but with an explicit `base_url: null` (not skipped) — usage-tracker's classifier (`models.ts`) reads `base_url` present → `iu`, `null`/missing → `max`, so this is how a Max-backend run gets attributed `billing="max"`.
 
 The **LiteLLM bridge** (`dotfiles/litellm/`, LaunchAgent on `:4000`, DeepSeek-V4-Pro/Flash via Azure Spain with failover to `claude-sonnet-4-6-eu`) is retained but off the hot path — it only engages when a `DeepSeek*` or `*-eu` model id is passed. Full background: `dotfiles/docs/deepseek-litellm-bridge.md`.
+
+**Caveat:** `check`/`review` run as jobs inside the launchd HTTP server, which loads `sideclaw/.env` via Bun — `SIDECLAW_WORKER_BACKEND` (like every other `SIDECLAW_*` var) applies reliably there. `otel` calls `runSession` directly in the MCP process (`server/mcp/tools/otel.ts`), which Bun starts with the *calling session's* cwd and may not pick up `sideclaw/.env` — for `otel`, the var would need to be exported in the environment instead. Pre-existing limitation, not specific to this flag.
 
 Two constraints carried over regardless of backend:
 - **No `WebSearch`/`WebFetch`** — not wired into worker prompts. For web/library facts, workers shell out via Bash instead — `review` angle workers `curl` the research-gateway (async submit + poll) to validate external claims.
@@ -135,7 +139,7 @@ tail -f /tmp/sideclaw.jsonl | jq .
 tail -f /tmp/sideclaw.jsonl | jq 'select(.source == "mcp")'
 ```
 
-Inner sessions spawned by MCP tools use `claude -p` routed to Claude via the IU unified endpoint's native Anthropic transport (claude-sonnet-5 / claude-haiku-4-5, IU per-token billing — no Max quota). See `.claude/rules/mcp-tools.md` for authoring conventions.
+Inner sessions spawned by MCP tools use `claude -p` routed via `session-runner.ts` (claude-sonnet-5 / claude-haiku-4-5): IU per-token billing by default, or the Max subscription when `SIDECLAW_WORKER_BACKEND=max`. See `.claude/rules/mcp-tools.md` for authoring conventions.
 
 ## Git Workflow
 

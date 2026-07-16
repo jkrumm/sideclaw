@@ -17,17 +17,28 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
 // use. This is the hot path for plain `claude-*` model ids. The LiteLLM bridge
 // (dotfiles litellm/), which translates Anthropic Messages → OpenAI chat/completions
 // against DeepSeek, is retained but dormant by default — it only engages when a
-// `DeepSeek*` or `*-eu` model id is passed (see `useBridge` below). The Max
-// subscription is never used by workers — it is reserved for the orchestrator.
-// A `session_env` line is written per IU-native session (see `writeSessionEnv`)
-// so usage-tracker classifies worker spend as IU, not Max.
+// `DeepSeek*` or `*-eu` model id is passed (see `useBridge` below). For plain
+// `claude-*` ids, SIDECLAW_WORKER_BACKEND selects between IU (default) and Max
+// (inherited OAuth) — see `CONFIGURED_WORKER_BACKEND` below. A `session_env` line is written
+// per non-bridge session (see `writeSessionEnv`) so usage-tracker classifies
+// worker spend correctly (IU vs Max).
 const BRIDGE_URL = process.env.SIDECLAW_BRIDGE_URL ?? "http://localhost:4000";
 // LiteLLM runs unauthenticated (localhost-bound), but claude requires a non-empty
 // auth token — send a static dummy the proxy ignores.
 const BRIDGE_TOKEN = process.env.SIDECLAW_BRIDGE_TOKEN ?? "sk-litellm-master-key";
+
+type Backend = "bridge" | "iu" | "max";
+
+/** Configured worker auth backend for plain `claude-*` model ids — the raw flag, not
+ *  the effective per-session backend (a bridge-routed model id overrides it; see
+ *  `backend` in runSession). "iu" (default) injects the IU key/base; "max" injects
+ *  nothing so the CLI falls through to the inherited OAuth profile (the Max
+ *  subscription). Read once at module load, so a flag flip requires `make reload`. */
+const CONFIGURED_WORKER_BACKEND: Exclude<Backend, "bridge"> =
+  process.env.SIDECLAW_WORKER_BACKEND === "max" ? "max" : "iu";
 // Worker model tiers — single source of truth. Call sites import these instead of
 // hardcoding ids so a tier change is one edit. Both are plain `claude-*` ids, so
-// `useBridge` routes them to the IU native Anthropic transport.
+// they skip the bridge and route via CONFIGURED_WORKER_BACKEND (IU or Max).
 export const WORKER_MODEL = "claude-sonnet-5[1m]"; // reasoning tier: review, otel, excalidraw
 export const CHECK_MODEL = "claude-haiku-4-5"; // fast/cheap tier: mechanical validation (check)
 const DEFAULT_MODEL = WORKER_MODEL;
@@ -35,9 +46,12 @@ const DEFAULT_MODEL = WORKER_MODEL;
 const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
 
 /** Mirror dotfiles' SessionStart hook: record the worker's base_url keyed by its
- * transcript sessionId so usage-tracker classifies the run as IU (not Max).
- * Idempotent — safe if the hook also fires. Never throws. */
-function writeSessionEnv(sessionId: string, baseUrl: string): void {
+ * transcript sessionId so usage-tracker's classifier (base_url present → "iu",
+ * null/missing → "max") tags the run correctly. Called for both the "iu" backend
+ * (real base_url) and the "max" backend (explicit null — see the max branch below
+ * for why null is written rather than skipped). Idempotent — safe if the hook also
+ * fires. Never throws. */
+function writeSessionEnv(sessionId: string, baseUrl: string | null): void {
   try {
     mkdirSync(CLAUDE_LOG_DIR, { recursive: true });
     const now = new Date().toISOString();
@@ -372,6 +386,14 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
 
   const sessionUuid = randomUUID();
   const tsStart = new Date().toISOString();
+  // DeepSeek*/Kimi* and *-eu model ids route through the (dormant-by-default)
+  // LiteLLM bridge; plain "claude-*" ids route via IU or Max per the configured
+  // backend. Mirrors usage-tracker's isBridgeRouted(). The model id always wins for
+  // bridge routing — a DeepSeek id can't run on Max, so the flag never overrides it.
+  // Resolved before emitAttribution so nothing below depends on declaration order.
+  const useBridge = !model.startsWith("claude") || model.endsWith("-eu");
+  const backend: Backend = useBridge ? "bridge" : CONFIGURED_WORKER_BACKEND;
+
   const emitAttribution = (
     outcome: "ok" | "error" | "timeout",
     extras: Record<string, unknown> = {},
@@ -381,17 +403,13 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       tool: tool ?? "unknown",
       project: cwd,
       model,
+      backend,
       tsStart,
       tsEnd: new Date().toISOString(),
       outcome,
       ...extras,
     });
   };
-
-  // DeepSeek*/Kimi* and *-eu model ids route through the (dormant-by-default)
-  // LiteLLM bridge; plain "claude-*" ids route via the IU native Anthropic
-  // transport. Mirrors usage-tracker's isBridgeRouted().
-  const useBridge = !model.startsWith("claude") || model.endsWith("-eu");
 
   if (useBridge && !(await bridgeReachable())) {
     logger.error(
@@ -407,7 +425,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
 
   let anthropicBase = "";
   let iuKey = "";
-  if (!useBridge) {
+  if (backend === "iu") {
     try {
       const cfg = await getIuConfig();
       anthropicBase = cfg.anthropicBase;
@@ -471,18 +489,34 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined) env[k] = v;
   }
-  if (useBridge) {
-    // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 is required or the IU gateway 400s
-    // on Anthropic beta headers when routed through the bridge.
-    env.ANTHROPIC_BASE_URL = BRIDGE_URL;
-    env.ANTHROPIC_AUTH_TOKEN = BRIDGE_TOKEN;
-    env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
-  } else {
-    // IU native Anthropic transport — same recipe as dotfiles' claude_iu(). Do not
-    // set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS here; that was a bridge-only
-    // workaround and dropping it on the native path is the protocol-fidelity win.
-    env.ANTHROPIC_BASE_URL = anthropicBase;
-    env.ANTHROPIC_AUTH_TOKEN = iuKey;
+  // Exhaustive over Backend: a new variant must declare its own auth handling rather
+  // than inheriting another branch's credentials by omission.
+  switch (backend) {
+    case "bridge":
+      // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 is required or the IU gateway 400s
+      // on Anthropic beta headers when routed through the bridge.
+      env.ANTHROPIC_BASE_URL = BRIDGE_URL;
+      env.ANTHROPIC_AUTH_TOKEN = BRIDGE_TOKEN;
+      env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
+      break;
+    case "iu":
+      // IU native Anthropic transport — same recipe as dotfiles' claude_iu(). Do not
+      // set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS here; that was a bridge-only
+      // workaround and dropping it on the native path is the protocol-fidelity win.
+      env.ANTHROPIC_BASE_URL = anthropicBase;
+      env.ANTHROPIC_AUTH_TOKEN = iuKey;
+      break;
+    case "max":
+      // Fall through to the inherited OAuth profile (the Max subscription). Delete
+      // rather than skip — the parent env is copied wholesale above, so an inherited
+      // ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN would silently shadow OAuth and push
+      // the worker back onto IU (or the bridge) despite the flag.
+      delete env.ANTHROPIC_BASE_URL;
+      delete env.ANTHROPIC_AUTH_TOKEN;
+      delete env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS;
+      break;
+    default:
+      backend satisfies never;
   }
   delete env.ANTHROPIC_API_KEY;
   delete env.CLAUDE_SESSION_ID;
@@ -501,6 +535,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       settingSources,
       readOnly,
       useBridge,
+      backend,
       baseUrl: env.ANTHROPIC_BASE_URL,
     },
     "session spawn",
@@ -559,8 +594,12 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   let workerSessionId: string | undefined;
   let sessionEnvWritten = false;
   const maybeWriteSessionEnv = () => {
-    if (useBridge || sessionEnvWritten || !workerSessionId) return;
-    writeSessionEnv(workerSessionId, anthropicBase);
+    if (backend === "bridge" || sessionEnvWritten || !workerSessionId) return;
+    // "max" writes an explicit null rather than skipping the line: both classify
+    // as billing="max" downstream, but an explicit record is distinguishable from
+    // a missing/rotated-out log entry (models.ts documents that ambiguity as a
+    // known silent-default-to-max weak point) and keeps the drift audit meaningful.
+    writeSessionEnv(workerSessionId, backend === "max" ? null : anthropicBase);
     sessionEnvWritten = true;
   };
   const emitActivity = () => {
