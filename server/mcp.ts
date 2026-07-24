@@ -5,7 +5,6 @@ import { registerReviewTool } from "./mcp/tools/review.ts";
 import { registerOtelTool } from "./mcp/tools/otel.ts";
 import { registerJobTools } from "./mcp/tools/jobs.ts";
 import { registerReadImageTool } from "./mcp/tools/read-image.ts";
-import { registerGenerateImageTool } from "./mcp/tools/generate-image.ts";
 import { registerReadDrawingTool } from "./mcp/tools/read-drawing.ts";
 import { registerExcalidrawDiagramTool } from "./mcp/tools/excalidraw-diagram.ts";
 import { logger } from "./mcp/logger.ts";
@@ -20,7 +19,6 @@ registerOtelTool(server);
 registerReviewTool(server);
 registerJobTools(server);
 registerReadImageTool(server);
-registerGenerateImageTool(server);
 registerReadDrawingTool(server);
 registerExcalidrawDiagramTool(server);
 

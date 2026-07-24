@@ -273,7 +273,7 @@ export function mcpProgressCallback(extra: McpExtra): SessionOptions["onProgress
 /**
  * Keep a synchronous (non-runSession) MCP handler alive past the SDK's 60s client
  * timeout by emitting a progress heartbeat every 15s. Use for direct-fetch tools
- * (read_image, generate_image, read_drawing). Returns a cleanup fn — call it in a
+ * (read_image, read_drawing). Returns a cleanup fn — call it in a
  * `finally`. No-op when the client didn't request progress.
  */
 export function mcpHeartbeat(extra: McpExtra, label: string): () => void {

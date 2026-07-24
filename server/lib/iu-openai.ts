@@ -1,4 +1,4 @@
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendFile, mkdir } from "node:fs/promises";
 import { z } from "zod";
@@ -366,55 +366,4 @@ export async function textComplete(opts: {
     latencyMs,
   });
   return { text, model, latencyMs, usage };
-}
-
-export interface GenerateImageResult {
-  path: string;
-  model: string;
-  latencyMs: number;
-  usage?: IuUsage;
-}
-
-/** Generate one image and write the decoded PNG to disk. Default model
- * gpt-image-2 (routes to the OpenAI vendor key — US; fine for generated assets,
- * not for PII). */
-export async function generateImage(opts: {
-  prompt: string;
-  model?: string;
-  size?: string;
-  outputPath?: string;
-}): Promise<GenerateImageResult> {
-  const model = opts.model ?? "gpt-image-2";
-  const size = opts.size ?? "1024x1024";
-  const t0 = performance.now();
-
-  const data = (await iuFetch(
-    "/images/generations",
-    { model, prompt: opts.prompt, n: 1, size },
-    { timeoutMs: 120_000 },
-  )) as { id?: string; data?: { b64_json?: string }[]; usage?: unknown };
-
-  const b64 = data.data?.[0]?.b64_json;
-  if (!b64) throw new Error("Image generation returned no b64_json payload.");
-
-  const bytes = Buffer.from(b64, "base64");
-  // PNG magic: 89 50 4E 47
-  if (!(bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)) {
-    throw new Error("Generated image is not a valid PNG (bad magic bytes).");
-  }
-
-  const outputPath = opts.outputPath ?? join(tmpdir(), `sideclaw-image-${Date.now()}.png`);
-  await Bun.write(outputPath, bytes);
-
-  const usage = normalizeUsage(data.usage);
-  const latencyMs = Math.round(performance.now() - t0);
-  await recordIuUsage({
-    tool: "generate_image",
-    model,
-    usage,
-    requestId: data.id,
-    latencyMs,
-    bytes: bytes.length,
-  });
-  return { path: outputPath, model, latencyMs, usage };
 }
