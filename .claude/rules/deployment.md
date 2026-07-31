@@ -30,4 +30,10 @@ All of the above either exit with an error (Makefile targets) or would conflict 
 ## Validating changes
 
 After `make reload`, check `http://sideclaw.local` in the browser.
-Logs: `tail -f /tmp/sideclaw.log` / `tail -f /tmp/sideclaw.err`
+Logs: `tail -f ~/Library/Logs/sideclaw.log` / `tail -f ~/Library/Logs/sideclaw.err`
+
+Not `/tmp` — a KeepAlive agent opens its stdio once at spawn, and macOS's
+periodic cleanup sweeps `/tmp` files untouched for 3+ days, leaving the process
+writing into an unlinked inode that no `tail` can reach. `make install-agent`
+copies `com.jkrumm.sideclaw.plist` verbatim, so edit the tracked plist, never
+the live one.

@@ -1,8 +1,23 @@
 import { Database } from "bun:sqlite";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
-const db = new Database("/tmp/sideclaw.db");
+// Next to jobs.db (server/jobs/store.ts), NOT /tmp. macOS's periodic cleanup
+// sweeps /tmp files untouched for 3+ days; measured on the mini 2026-07-31,
+// `lsof` showed this DB held open as an UNLINKED inode while `ls /tmp/sideclaw.db`
+// returned No such file. The table below is genuinely ephemeral (dropped every
+// startup, 2h TTL), so nothing durable was lost — but an unlinked SQLite file is
+// still a file the process can never checkpoint, back up, or inspect from
+// outside, and it grows without a path to reclaim it.
+const DB_PATH =
+  process.env.SIDECLAW_DB ?? join(homedir(), ".local", "share", "sideclaw", "sideclaw.db");
+mkdirSync(dirname(DB_PATH), { recursive: true });
 
-// Drop and recreate on schema change (ephemeral data, /tmp is wiped on restart)
+const db = new Database(DB_PATH);
+
+// Drop and recreate on schema change (ephemeral data — completed_tasks is a
+// 2-hour scratch view, never a durable record)
 db.run("DROP TABLE IF EXISTS completed_tasks");
 db.run(`
   CREATE TABLE completed_tasks (

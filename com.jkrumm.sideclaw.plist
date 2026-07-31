@@ -32,10 +32,18 @@
   <key>RunAtLoad</key>
   <true/>
 
+  <!-- ~/Library/Logs, not /tmp. macOS's periodic cleanup sweeps /tmp files
+       untouched for 3+ days, and a KeepAlive agent opens its stdio ONCE at
+       spawn — so after a sweep the process keeps writing into an UNLINKED
+       inode. Measured on this machine 2026-07-31: `lsof -p 895` showed
+       /private/tmp/sideclaw.log and .err held open while `ls /tmp/sideclaw.log`
+       returned No such file. Every line since the sweep was unrecoverable, and
+       sideclaw had no post-mortem at all. Same pattern devhost-health and
+       linewatch-collector already use. -->
   <key>StandardOutPath</key>
-  <string>/tmp/sideclaw.log</string>
+  <string>/Users/jkrumm/Library/Logs/sideclaw.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/tmp/sideclaw.err</string>
+  <string>/Users/jkrumm/Library/Logs/sideclaw.err</string>
 </dict>
 </plist>

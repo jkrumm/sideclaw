@@ -19,7 +19,7 @@ export async function httpReachable(): Promise<boolean> {
 
 export const HTTP_DOWN_MESSAGE =
   `sideclaw HTTP server unreachable at ${BASE}. It hosts the job queue and runs via LaunchAgent — ` +
-  `check 'tail -f /tmp/sideclaw.err' and run 'make reload' in ~/SourceRoot/sideclaw.`;
+  `check 'tail -f ~/Library/Logs/sideclaw.err' and run 'make reload' in ~/SourceRoot/sideclaw.`;
 
 interface JobEnvelope {
   ok: boolean;

@@ -58,11 +58,21 @@ make reload          # After code changes: build + kickstart LaunchAgent
 make install-agent   # One-time: build + install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
-tail -f /tmp/sideclaw.log   # stdout
-tail -f /tmp/sideclaw.err   # stderr
+tail -f ~/Library/Logs/sideclaw.log   # stdout
+tail -f ~/Library/Logs/sideclaw.err   # stderr
 ```
 
 The LaunchAgent starts automatically on login and restarts on crash.
+
+**Logs live in `~/Library/Logs`, never `/tmp`.** A KeepAlive agent opens its
+stdio exactly once, at spawn. macOS's periodic cleanup sweeps `/tmp` files
+untouched for 3+ days, so after a sweep the process keeps writing into an
+unlinked inode: `lsof` still shows the fd, `ls` says the file is gone, and every
+line written since is unrecoverable — which is how sideclaw ended up with no
+post-mortem at all. The paths live in `com.jkrumm.sideclaw.plist`, and
+`make install-agent` copies that file verbatim over the live one, so changing
+the live plist by hand is silently reverted on the next install. Change the
+tracked file.
 
 ## MCP Server
 
@@ -77,7 +87,7 @@ Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`
 The long tools (`check`/`review`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
-2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`/tmp/sideclaw-jobs.db`, separate from the ephemeral `/tmp/sideclaw.db`). See `server/jobs/store.ts`.
+2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`, separate from the ephemeral `~/.local/share/sideclaw/sideclaw.db`). Neither lives in `/tmp` — macOS's periodic cleanup sweeps files there untouched for 3+ days, and a long-running agent then writes into an unlinked inode. See `server/jobs/store.ts`.
 3. The caller polls **`job_wait({ jobId })`** — a long-poll (~50s, heartbeated) that returns the result the moment the job finishes, or `stillRunning: true` to call again. `job_status` is a one-shot peek.
 
 While a job runs, `job_status`/`job_wait` also expose live worker progress derived from the worker's stream-json output: `turns`, `lastAction` (e.g. `"Edit store.ts"`), and **`idleMs`** — ms since the last worker event. `idleMs` is the wedge signal: it stays low while events flow and rises during a single long operation (e.g. a slow test run), so a *large and still-growing* `idleMs` means the session may be stuck — peek at `git status` rather than waiting indefinitely. The runner persists each snapshot via a `ProgressSink` threaded `store → executor → handler → runSession.onActivity`; `review` aggregates one shared liveness bump across its parallel angle sessions.
