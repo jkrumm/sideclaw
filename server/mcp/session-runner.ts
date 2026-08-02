@@ -45,6 +45,19 @@ const DEFAULT_MODEL = WORKER_MODEL;
 
 const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
 
+/** Env var names that look like a credential. Matched case-insensitively against the
+ *  inherited environment and deleted before the worker is spawned. Deliberately broad —
+ *  a false positive costs a worker a variable it almost certainly did not need, while a
+ *  false negative hands a live token to a session whose prompt may be attacker-written. */
+const SENSITIVE_ENV_RE =
+  /(TOKEN|SECRET|PASSWORD|PASSWD|_KEY|APIKEY|API_KEY|CREDENTIAL|BEARER|SESSION_ID)/i;
+
+/** Exempt from the scrub: the CLI's own auth path. On the `max` backend the inherited
+ *  OAuth profile is how the worker authenticates at all, so scrubbing it would break
+ *  every session rather than harden it. The `iu`/`bridge` backends set their own
+ *  ANTHROPIC_* vars after this point regardless. */
+const ALWAYS_KEEP_ENV = new Set(["CLAUDE_CODE_OAUTH_TOKEN"]);
+
 /** Mirror dotfiles' SessionStart hook: record the worker's base_url keyed by its
  * transcript sessionId so usage-tracker's classifier (base_url present → "iu",
  * null/missing → "max") tags the run correctly. Called for both the "iu" backend
@@ -112,10 +125,14 @@ export interface SessionOptions<T = unknown> {
   settingSources?: string;
   /**
    * Read-only worker: removes Edit/Write/NotebookEdit from the tool set via
-   * `--allowedTools`. Bridge workers are eager and will "helpfully" edit files under
+   * `--disallowedTools`. Workers are eager and will "helpfully" edit files under
    * `--dangerously-skip-permissions` (Kimi once auto-fixed lint during a `check`),
-   * so check/review must opt in. Bash stays available (needed to run
-   * validators / curl), so prompts must also instruct "report only".
+   * so check/review/dispatch must opt in. Bash stays available (needed to run
+   * validators / curl / git), so prompts must also instruct "report only".
+   *
+   * NB `--allowedTools` does NOT work here and was the original, silently-broken
+   * implementation — skip-permissions bypasses the permission system an allowlist
+   * feeds, so Write stayed available. See the flag construction below.
    */
   readOnly?: boolean;
   /** Extra env vars merged into the worker (e.g. RESEARCH_GATEWAY_URL/TOKEN for review). */
@@ -146,6 +163,16 @@ export interface SessionOptions<T = unknown> {
    * Zod schema via `zodValidator(MY_OUTPUT)`.
    */
   validate?: (data: unknown) => { ok: true; value: T } | { ok: false; error: string };
+}
+
+/** JSON-stringify for diagnostics only. Never throws — a value that cannot be serialized
+ *  (a cycle, a BigInt) must not turn a salvageable failure into an unhandled one. */
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
 
 /** Build a `SessionOptions.validate` from a Zod schema. Returns the parsed value or a flattened issue string. */
@@ -463,11 +490,25 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     model,
   ];
 
-  // Read-only tools: allowlist read + run tools only, so Edit/Write/NotebookEdit
-  // are unavailable even under --dangerously-skip-permissions. Bash stays (needed
-  // to run validators / curl); prompts enforce "report only" for Bash-level writes.
+  // Read-only tools: remove the editing tools outright.
+  //
+  // This MUST be `--disallowedTools`, not `--allowedTools`. Measured on CLI 2.1.220
+  // (2026-08-02): under `--dangerously-skip-permissions`, `--allowedTools
+  // "Read,Bash,Grep,Glob"` restricts NOTHING — skip-permissions bypasses the
+  // permission system that an allowlist feeds, so Write and Edit stay available and
+  // succeed. A probe run with the old flag overwrote its canary file; the same probe
+  // with `--disallowedTools` got "the call was rejected as disabled" and the canary
+  // survived. So every `readOnly: true` caller — check, review, dispatch — was
+  // read-only by the worker's goodwill alone, which is exactly what the flag existed
+  // to stop being true.
+  //
+  // Bash deliberately stays (validators, git, curl), so a determined worker can still
+  // write via shell redirection; prompts carry the "report only" rule for that. The
+  // point of this flag is removing the *easy, default* path to a mutation, not
+  // sandboxing. Tool names must be exact — an unknown one only logs "matches no known
+  // tool" and is silently ignored (MultiEdit is not a real tool name here).
   if (readOnly) {
-    args.push("--allowedTools", "Read,Bash,Grep,Glob");
+    args.push("--disallowedTools", "Write,Edit,NotebookEdit");
   }
 
   if (jsonSchema) {
@@ -521,6 +562,18 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   delete env.ANTHROPIC_API_KEY;
   delete env.CLAUDE_SESSION_ID;
   delete env.CLAUDE_PARENT_SESSION_ID;
+  // The worker env is copied from this process wholesale, so it carries whatever the
+  // LaunchAgent was started with — including live credentials the worker has no reason
+  // to hold. Scrub them: a worker that never sees a token cannot leak one, and every
+  // tool that genuinely needs one passes it explicitly via `extraEnv` (review does this
+  // for the research-gateway), which is applied AFTER this and therefore still wins.
+  //
+  // This matters most for `dispatch`, whose prompt is assembled from untrusted material
+  // — but it is the right default for every worker, so it lives here rather than in one
+  // handler. `Bash` is available to these sessions, so `env` is one command away.
+  for (const key of Object.keys(env)) {
+    if (SENSITIVE_ENV_RE.test(key) && !ALWAYS_KEEP_ENV.has(key)) delete env[key];
+  }
   env.CLAUDE_ENTRYPOINT = "worker";
   if (extraEnv) Object.assign(env, extraEnv);
 
@@ -774,7 +827,13 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
           "session output failed validation",
         );
         emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
-        return { ok: false, error: v.error };
+        // Carry the worker's output through as `rawText`, exactly as the unparseable
+        // branches below do. A schema-validation failure means the session DID produce
+        // something — it just did not fit the declared shape — so a handler salvaging a
+        // long run has real material to preserve. Returning a bare error here was silently
+        // discarding it on what is, for a strict schema, the LIKELIEST failure path.
+        const asText = typeof value === "string" ? value : safeStringify(value);
+        return { ok: false, error: v.error, noOutput: true, rawText: asText };
       }
       logSessionEnd();
       emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });

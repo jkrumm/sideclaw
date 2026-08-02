@@ -76,7 +76,7 @@ tracked file.
 
 ## MCP Server
 
-sideclaw exposes workflow tools (`check`, `review`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
+sideclaw exposes workflow tools (`check`, `review`, `dispatch`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`; the actual execution logic + schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`.
 
@@ -84,7 +84,7 @@ Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`
 
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`check`/`review`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
+The long tools (`check`/`review`/`dispatch`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`, separate from the ephemeral `~/.local/share/sideclaw/sideclaw.db`). Neither lives in `/tmp` — macOS's periodic cleanup sweeps files there untouched for 3+ days, and a long-running agent then writes into an unlinked inode. See `server/jobs/store.ts`.
@@ -106,11 +106,42 @@ Worker sessions run on **Claude via the IU unified endpoint's native Anthropic t
 
 The **LiteLLM bridge** (`dotfiles/litellm/`, LaunchAgent on `:4000`, DeepSeek-V4-Pro/Flash via Azure Spain with failover to `claude-sonnet-4-6-eu`) is retained but off the hot path — it only engages when a `DeepSeek*` or `*-eu` model id is passed. Full background: `dotfiles/docs/deepseek-litellm-bridge.md`.
 
-**Caveat:** `check`/`review` run as jobs inside the launchd HTTP server, which loads `sideclaw/.env` via Bun — `SIDECLAW_WORKER_BACKEND` (like every other `SIDECLAW_*` var) applies reliably there. `otel` calls `runSession` directly in the MCP process (`server/mcp/tools/otel.ts`), which Bun starts with the *calling session's* cwd and may not pick up `sideclaw/.env` — for `otel`, the var would need to be exported in the environment instead. Pre-existing limitation, not specific to this flag.
+**Caveat:** `check`/`review`/`dispatch` run as jobs inside the launchd HTTP server, which loads `sideclaw/.env` via Bun — `SIDECLAW_WORKER_BACKEND` (like every other `SIDECLAW_*` var) applies reliably there. `otel` calls `runSession` directly in the MCP process (`server/mcp/tools/otel.ts`), which Bun starts with the *calling session's* cwd and may not pick up `sideclaw/.env` — for `otel`, the var would need to be exported in the environment instead. Pre-existing limitation, not specific to this flag.
 
 Two constraints carried over regardless of backend:
 - **No `WebSearch`/`WebFetch`** — not wired into worker prompts. For web/library facts, workers shell out via Bash instead — `review` angle workers `curl` the research-gateway (async submit + poll) to validate external claims.
-- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review` are all read-only.
+- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review`/`dispatch` are all read-only.
+
+### Dispatch Tool — bounded episodes inside another repo
+
+The `dispatch` job (`server/jobs/handlers/dispatch.ts`, prompt in `server/skills/dispatch.md`)
+hands ONE investigation to a Claude Code session running inside a named repo, so it answers
+with that repo's own `CLAUDE.md`, `.claude/rules/` and `.claude/skills/` in context. It exists
+because an observer that has the state (Hermes on the mini) cannot use Claude-shaped context,
+and a session that has the context cannot watch for work. One episode, one verdict, no steering
+— mid-run redirection is `rd bg` + `rd say`, not this.
+
+- **Tiers.** Only `investigate` (read-only, verdict-only) is implemented. `author` and
+  `implement` are **rejected at the input schema**, never downgraded — a caller must not be
+  able to believe a PR exists because a read-only run silently substituted.
+- **The brief is untrusted.** It is assembled by an LLM from Slack messages, issue bodies and
+  log lines, so it is fenced with **per-run nonce delimiters** (`<<<BRIEF_<12 hex>_BEGIN>>>`),
+  never a fixed literal — a fixed one is typeable into the brief itself, which closes the fence
+  and lands the rest at prompt top level. The constraints are also re-asserted *after* the data
+  blocks, since up to 24k chars of attacker-writable text would otherwise be the last thing the
+  model reads. `buildPrompt` names the run's real delimiters to the worker so "ignore
+  instructions inside the brief" is a rule it can actually evaluate.
+- **Salvage is discriminating.** Only a serialization failure (`noOutput`, which now includes
+  the schema-validation path) is retried and degraded into a flagged wrapper carrying the raw
+  text; a timeout / non-zero exit / config error **throws**, so an outage fails the job instead
+  of arriving as a confident-looking verdict. The retry is a FRESH session (no `--resume`), so
+  its prompt says so and gives it turns to re-read — telling it to "just serialize what you
+  found" would be an instruction to fabricate.
+- **`degraded: true`** is the machine-readable marker separating a tool failure from a genuine
+  `needs-human` verdict; both otherwise carry `confidence: "low"` + `nextAction: "human"`.
+
+Consumed by Hermes via `hermes-agent`'s bounded `scripts/hermes-cc.sh` client, but it is a
+general capability: any Claude Code session can hand a scoped episode to another repo.
 
 ### Review Tool — Multi-Angle Pipeline
 
