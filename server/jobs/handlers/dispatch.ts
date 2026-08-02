@@ -14,6 +14,7 @@ import { parseParams } from "./util.ts";
 import {
   commitCount,
   commitPendingWork,
+  createReadWorktree,
   createWorktree,
   diffRefusalReason,
   GIT_DENY_CREDENTIALS_ENV,
@@ -440,15 +441,27 @@ export async function runDispatch(
     identity = await resolveRepoIdentity(cwd);
   }
 
-  // Created INSIDE the try, so the finally owns its teardown on every exit path. (A throw
-  // from createWorktree itself cleans up its own partial state — see dispatch-git.ts.)
+  // EVERY tier runs in its own worktree, not just the writing one. `readOnly: true` disables
+  // Edit and Write but not Bash, and the brief is attacker-influenced text — anyone can open
+  // an issue on a public repo, and its body reaches an episode's context. A read tier sitting
+  // in the live checkout is one injected `sed -i` away from editing a repo other agents are
+  // working in and that deploys on push. The read tiers get a throwaway copy of HEAD (see
+  // createReadWorktree, which needs no identity and no network); implement keeps its branch
+  // cut from the authoritative default. It costs no capability — the difference is which
+  // directory the session starts in.
+  //
+  // Created INSIDE the try, so the finally owns teardown on every exit path. (A throw from
+  // either constructor cleans up its own partial state — see dispatch-git.ts.)
+  const jobKey = randomUUID();
   let worktree: DispatchWorktree | undefined;
   try {
     if (tier === "implement" && identity) {
-      worktree = await createWorktree(cwd, randomUUID(), slugify(brief), identity.defaultBranch);
+      worktree = await createWorktree(cwd, jobKey, slugify(brief), identity.defaultBranch);
       note(`worktree ${worktree.branch}`);
+    } else {
+      worktree = await createReadWorktree(cwd, jobKey);
     }
-    const sessionCwd = worktree?.path ?? cwd;
+    const sessionCwd = worktree.path;
     const runEpisode = (p: string, maxTurns: number) =>
       runSession<DispatchOutput>({
         cwd: sessionCwd,
@@ -622,7 +635,7 @@ async function depositBranch(
   }
 
   const diff = await summarizeDiff(worktree);
-  const refusal = diffRefusalReason(diff);
+  const refusal = await diffRefusalReason(worktree, diff);
   if (refusal) {
     logger.warn(
       {
@@ -703,11 +716,15 @@ async function salvage(
   let branch: string | undefined;
   let branchNote = "";
 
-  if (worktree && identity) {
+  // `worktree.pushable` and not merely `worktree`: every tier has a worktree now, and a read
+  // tier's is a throwaway holding whatever its Bash happened to write — which, in the case
+  // this whole isolation exists for, is an injected edit. Publishing that as a branch would
+  // be strictly worse than the live-checkout write it replaced, since a branch is durable.
+  if (worktree?.pushable && identity) {
     try {
       await commitPendingWork(worktree, `chore: salvaged work from ${worktree.branch}`);
       if ((await commitCount(worktree)) > 0) {
-        const refusal = diffRefusalReason(await summarizeDiff(worktree));
+        const refusal = await diffRefusalReason(worktree, await summarizeDiff(worktree));
         if (refusal) {
           branchNote = ` The edits it made were discarded: ${refusal}.`;
         } else {

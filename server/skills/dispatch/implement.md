@@ -22,13 +22,18 @@ return. You do not do any of that yourself:
   episode. This one is not negotiable and the tooling enforces it independently.
 
 **What the change may touch.** A dispatched change is small and reviewable by
-construction. Two hard limits, enforced after you finish — exceeding either means the
+construction. Three hard limits, enforced after you finish — tripping any of them means the
 branch is discarded and the work is wasted, so stay well inside them:
 
 - at most **40 files** and **2000 changed lines**;
 - **never** `.github/workflows/` or `.github/actions/`. A dispatched episode does not edit
   what runs in CI. If the fix genuinely requires a workflow change, do not make it: set
   `nextAction: "human"`, explain why in `verdict`, and change nothing.
+- **no credential-shaped text in the lines you add** — a literal token, an `op://`
+  reference, an internal address. The tooling scans the diff and refuses it, and the branch
+  it would have pushed is public and permanent. If a fix appears to require writing a
+  secret into the repo, that appearance is itself the finding: change nothing and set
+  `nextAction: "human"`.
 
 ## How to work
 

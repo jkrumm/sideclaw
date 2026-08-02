@@ -398,6 +398,15 @@ export interface DispatchWorktree {
   base: string;
   /** Human-readable ref the OID was resolved from, for logs only. Never used to compare. */
   baseRef: string;
+  /**
+   * May the handler push this branch? True only for the implement tier's worktree.
+   *
+   * A property of the object rather than a re-derivation of the tier at each call site,
+   * because the read tiers now get a worktree too and the difference between the two kinds
+   * is exactly this. Without it, `salvage` — which pushes whatever the session left behind
+   * when it failed to serialize — would happily publish a read-only episode's leftovers.
+   */
+  pushable: boolean;
 }
 
 /** Branch-safe slug from free text. Output is `[a-z0-9-]+`, so it cannot express any of
@@ -462,29 +471,74 @@ export async function createWorktree(
     // never receives a DispatchWorktree in that case, so its `finally` has nothing to clean
     // up and the partial state would be left in the live repo this whole mechanism exists
     // to leave untouched. Clean up here, where the state is still known.
-    await git(["worktree", "remove", "--force", path], cwd);
-    if (existsSync(path)) rmSync(path, { recursive: true, force: true });
-    await git(["worktree", "prune"], cwd);
-    await git(["branch", "-D", branch], cwd);
+    await discardWorktree(cwd, path, branch);
     throw err;
   }
   logger.info(
     { event: "dispatch.worktree", project: cwd, branch, base: baseOid, baseRef: base, path },
     "worktree created",
   );
-  return { path, branch, base: baseOid, baseRef: base };
+  return { path, branch, base: baseOid, baseRef: base, pushable: true };
+}
+
+/**
+ * Create a throwaway worktree at the checkout's current HEAD, for a tier that only reads.
+ *
+ * `readOnly: true` takes Edit and Write off the session. It does not take away Bash, and the
+ * prompt is assembled from a brief the caller built out of Slack messages and issue bodies —
+ * so a read tier running in the live checkout is one injected `sed -i` away from editing a
+ * repo that other agents are working in and that deploys to production on push. It gets its
+ * own copy instead, torn down when the episode ends: the same teardown, and the same "a
+ * failed episode leaves the live checkout untouched" property, that implement already had.
+ *
+ * Cut from HEAD, not from `origin/<default>`: a read tier is answering a question about
+ * *this* checkout, so the commit it is sitting on is the right thing to read, and there is
+ * no artifact that will later need rebasing. That also means no fetch and no GitHub API
+ * call, which is what keeps `investigate` working in a repo whose origin is not GitHub, or
+ * missing entirely — the read tiers resolve no identity.
+ *
+ * The narrow claim, because the wide one would be false: this isolates the WORKING TREE. The
+ * worktree shares `.git` with the live repo, and nothing confines the session's Bash to the
+ * filesystem below it. What it buys is that the natural spelling of an injected write — a
+ * relative path, a tool defaulting to cwd — lands somewhere nobody reads and nothing deploys.
+ */
+export async function createReadWorktree(cwd: string, jobKey: string): Promise<DispatchWorktree> {
+  const branch = `dispatch/read-${jobKey.slice(0, 8)}`;
+  const path = join(WORKTREE_ROOT, jobKey);
+  mkdirSync(WORKTREE_ROOT, { recursive: true });
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+
+  const baseOid = await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
+  try {
+    await gitOrThrow(["worktree", "add", "--quiet", "-b", branch, path, baseOid], cwd, 120_000);
+  } catch (err) {
+    await discardWorktree(cwd, path, branch);
+    throw err;
+  }
+  logger.info(
+    { event: "dispatch.worktree", project: cwd, branch, base: baseOid, baseRef: "HEAD", path },
+    "read worktree created",
+  );
+  return { path, branch, base: baseOid, baseRef: "HEAD", pushable: false };
 }
 
 /** Tear the worktree down. Always safe to call, including after a failure and including
  *  when the worktree was never created — cleanup must never be the thing that turns a
  *  failed episode into a broken repo. The pushed remote branch is untouched. */
 export async function removeWorktree(cwd: string, wt: DispatchWorktree): Promise<void> {
-  await git(["worktree", "remove", "--force", wt.path], cwd);
-  if (existsSync(wt.path)) rmSync(wt.path, { recursive: true, force: true });
+  await discardWorktree(cwd, wt.path, wt.branch);
+}
+
+/** The teardown itself, by path and branch rather than by DispatchWorktree, so the partial
+ *  state a failed `worktree add` leaves behind is cleaned up by the same code that cleans up
+ *  a completed episode. Every step is best effort and none of them throws. */
+async function discardWorktree(cwd: string, path: string, branch: string): Promise<void> {
+  await git(["worktree", "remove", "--force", path], cwd);
+  if (existsSync(path)) rmSync(path, { recursive: true, force: true });
   await git(["worktree", "prune"], cwd);
   // Deleting the local branch is safe after a push: the remote holds the ref the PR points
   // at. Before a push it is the right cleanup too — nothing references it.
-  await git(["branch", "-D", wt.branch], cwd);
+  await git(["branch", "-D", branch], cwd);
 }
 
 // ── Diff inspection and commit ────────────────────────────────────────────────
@@ -541,9 +595,18 @@ export async function commitCount(wt: DispatchWorktree): Promise<number> {
   return Number.parseInt(out, 10) || 0;
 }
 
-/** Why this diff may not be pushed, or null if it may. Separated from the push so the
- *  handler can report the reason in the verdict instead of failing the whole episode. */
-export function diffRefusalReason(diff: DiffSummary): string | null {
+/**
+ * Why this diff may not be pushed, or null if it may. Separated from the push so the handler
+ * can report the reason in the verdict instead of failing the whole episode.
+ *
+ * Checks are ordered cheapest-first and short-circuit, which is not merely tidy: the content
+ * scan reads the whole patch into memory, and it must not run for a diff the size ceiling is
+ * about to reject anyway.
+ */
+export async function diffRefusalReason(
+  wt: DispatchWorktree,
+  diff: DiffSummary,
+): Promise<string | null> {
   const forbidden = diff.files.filter((f) => FORBIDDEN_PATH_RE.test(f));
   if (forbidden.length > 0) {
     return `the change touches the CI execution surface (${forbidden.join(", ")}), which a dispatched episode may never modify`;
@@ -555,20 +618,56 @@ export function diffRefusalReason(diff: DiffSummary): string | null {
   if (lines > MAX_CHANGED_LINES) {
     return `the change is ${lines} lines, over the ${MAX_CHANGED_LINES}-line ceiling for an unattended episode`;
   }
+  const secrets = await addedSecrets(wt);
+  if (secrets.length > 0) {
+    return `the change adds text matching ${secrets.join(", ")} — a dispatched episode must never commit a credential or an internal address to a branch that becomes a public, permanent artifact`;
+  }
   return null;
+}
+
+/**
+ * Secret-shaped strings the episode ADDED, by pattern name.
+ *
+ * The artifact scan (`assertNoSecrets`) covers the issue and PR *bodies*. It says nothing
+ * about the code, and the code is the durable half: a branch pushed to a public repo is in
+ * the timeline, the API and every mirror the moment it exists, and unlike a PR description
+ * it cannot be edited away. An episode that "fixes" a broken config by inlining the value it
+ * read is the ordinary, non-adversarial way this happens.
+ *
+ * It is the handler's scan and not the repo's `pre-commit` hook — which is also why the
+ * commit is made with `--no-verify`. A hook is repo-controlled code, and an implement
+ * episode may be running in a repo whose hook it has just rewritten; a check the audited
+ * party supplies is not a check.
+ *
+ * ADDED lines only. A credential already committed in this repo is not this episode's doing,
+ * and refusing on it would disable the tier in precisely the repo that needs a fix. The
+ * corollary is a real limit: a secret this episode merely MOVES between files is invisible
+ * here, because the addition matches something the base already contained.
+ */
+async function addedSecrets(wt: DispatchWorktree): Promise<string[]> {
+  const patch = await gitOrThrow(["diff", "--no-renames", "-U0", `${wt.base}...HEAD`], wt.path);
+  const added = patch
+    .split("\n")
+    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+    .join("\n");
+  return scanForSecrets(added);
 }
 
 /**
  * Push the episode's branch, and only it.
  *
- * Three refusals, all structural. The refspec is built here and names exactly one branch,
- * so there is no shape of worker output that turns this into a push to another ref; the
- * default-branch check is explicit rather than implied by the refspec, because that is the
- * invariant a reader needs to see stated; and the `dispatch/` prefix means a push can only
- * ever land in the namespace this tool owns. There is no force flag anywhere — the branch
- * is new, so a push that would need one is a bug worth failing on.
+ * Four refusals, all structural. A read tier's worktree is not pushable at all, and saying
+ * so here means the guarantee holds even if a caller forgets it; the refspec is built here
+ * and names exactly one branch, so there is no shape of worker output that turns this into a
+ * push to another ref; the default-branch check is explicit rather than implied by the
+ * refspec, because that is the invariant a reader needs to see stated; and the `dispatch/`
+ * prefix means a push can only ever land in the namespace this tool owns. There is no force
+ * flag anywhere — the branch is new, so a push that would need one is a bug worth failing on.
  */
 export async function pushBranch(wt: DispatchWorktree, id: RepoIdentity): Promise<void> {
+  if (!wt.pushable) {
+    throw new Error(`refusing to push a read tier's throwaway worktree (${wt.branch})`);
+  }
   if (wt.branch === id.defaultBranch) {
     throw new Error(`refusing to push to the default branch (${id.defaultBranch})`);
   }

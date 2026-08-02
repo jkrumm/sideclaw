@@ -122,9 +122,24 @@ session that has the context cannot watch for work. One episode, one verdict, no
 — mid-run redirection is `rd bg` + `rd say`, not this.
 
 - **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict + GitHub
-  issue), `implement` (write in an isolated worktree → verdict + branch + **draft** PR).
+  issue), `implement` (write → verdict + branch + **draft** PR).
   Prompts are `skills/dispatch/_common.md` + one tier file; the shared injection-hardening
   preamble lives in `_common.md` precisely so three copies cannot drift apart.
+- **EVERY tier runs in its own worktree**, torn down in the same `finally`. For the read
+  tiers this is isolation, not restriction — it costs no capability, only the directory the
+  session starts in. The reason it is not implement-only: `readOnly: true` disables Edit and
+  Write but **not** `Bash`, and the brief is attacker-influenced (anyone can open an issue on
+  a public repo, and its body reaches an episode's context), so a read tier in the live
+  checkout was one injected `sed -i` away from editing a repo other agents work in and that
+  deploys on push. Read tiers get `createReadWorktree` — a detached copy of **HEAD**, needing
+  no identity, no fetch and no GitHub API, which is what keeps `investigate` working in a
+  repo whose origin is not GitHub or absent. Implement keeps its branch cut from the
+  authoritative default. `DispatchWorktree.pushable` distinguishes them as a property of the
+  object rather than a re-derived tier check, because `salvage` pushes whatever the session
+  left behind and must never publish a read tier's leftovers. Narrow claim: this isolates the
+  **working tree**. The worktree shares `.git`, and nothing confines the session's `Bash` to
+  the filesystem below it. Consequence worth knowing: untracked/gitignored files are absent
+  from an episode's workspace — `_common.md` tells it to report that rather than guess.
 - **The artifact is created by the HANDLER, never by the session** (`dispatch-git.ts`). That
   is the security argument for the write tiers, not an implementation detail: the session
   holds no GitHub credential, so no brief — however injected — reaches GitHub through it. It
@@ -141,8 +156,18 @@ session that has the context cannot watch for work. One episode, one verdict, no
   closed. Identity is re-supplied explicitly so a session that commits anyway still succeeds.
 - **`implement` bounds.** Worktree cut from the API's authoritative `default_branch` (not the
   stale local `origin/HEAD`); refuses any diff touching `.github/workflows|actions`; refuses
-  over 40 files or 2000 lines; PR opened as a **draft**. A refused diff is discarded and the
-  verdict says so — it is a successful run with no artifact, not a failure.
+  over 40 files or 2000 lines; refuses a diff whose **added lines** match `SECRET_PATTERNS`;
+  PR opened as a **draft**. A refused diff is discarded and the verdict says so — it is a
+  successful run with no artifact, not a failure. The secret check is on the diff and not
+  just on the PR body (`assertNoSecrets`) because the code is the durable half: a pushed
+  branch is permanent and unlike a description cannot be edited away. It is the handler's
+  scan and never the repo's `pre-commit` hook — which is also why the commit is
+  `--no-verify` — since an implement episode may be running in a repo whose hook it just
+  wrote, and a check the audited party supplies is not a check. Added lines only, so a
+  credential the base already carried does not disable the tier in the repo that needs
+  fixing; the corollary limit is that a secret merely *moved* between files is invisible.
+  Refusal checks are ordered cheapest-first so the patch text is never materialized for a
+  diff the size ceiling rejects.
 - **The brief is untrusted.** It is assembled by an LLM from Slack messages, issue bodies and
   log lines, so it is fenced with **per-run nonce delimiters** (`<<<BRIEF_<12 hex>_BEGIN>>>`),
   never a fixed literal — a fixed one is typeable into the brief itself, which closes the fence
