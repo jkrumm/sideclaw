@@ -39,6 +39,61 @@ const MAX_CHANGED_LINES = 2000;
 const SECRETS_RUN = join(homedir(), ".local", "bin", "secrets-run");
 const GITHUB_TOKEN_REF = "op://mini/github/token";
 
+/**
+ * Patterns that must never reach a GitHub issue or pull request body.
+ *
+ * This is new blast radius that no earlier sideclaw tool had: `check` and `review` return
+ * text to one caller, whereas an artifact is durable, indexed and — for most repos in the
+ * allowlist — world-readable. The text being published is authored by a session whose
+ * context holds an untrusted brief AND whatever it read inside the repo, and the provenance
+ * footer quotes the brief verbatim. The brief is assembled from Slack messages and log
+ * lines, which are private; the issue is not. That asymmetry is the leak.
+ *
+ * A prompt instruction telling the worker not to quote secrets is not a control, so this
+ * runs in the handler, after the worker is done and before anything is published.
+ */
+const SECRET_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
+  { name: "1Password reference", re: /\bop:\/\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+/ },
+  { name: "GitHub token", re: /\b(?:gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,})\b/ },
+  { name: "Slack token", re: /\bxox[baprs]-[A-Za-z0-9-]{10,}/ },
+  { name: "AWS access key id", re: /\bAKIA[0-9A-Z]{16}\b/ },
+  { name: "private key block", re: /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/ },
+  { name: "bearer credential", re: /\bBearer\s+[A-Za-z0-9._~+/-]{20,}/ },
+  // Tailscale CGNAT range (100.64.0.0/10) — an internal hostname or tailnet address in a
+  // public issue is exactly what the global security rule forbids in tracked files.
+  { name: "Tailscale IP", re: /\b100\.(?:6[4-9]|[7-9]\d|1[0-2]\d)\.\d{1,3}\.\d{1,3}\b/ },
+  {
+    name: "inline credential assignment",
+    re: /\b(?:api[_-]?key|secret|password|passwd|auth[_-]?token|access[_-]?token)\s*[:=]\s*["']?[A-Za-z0-9_\-+/]{20,}/i,
+  },
+];
+
+/** Names of every secret pattern the text matches. Empty means it looks publishable. */
+export function scanForSecrets(text: string): string[] {
+  return SECRET_PATTERNS.filter((p) => p.re.test(text)).map((p) => p.name);
+}
+
+/**
+ * Refuse to publish text that looks like it carries a credential.
+ *
+ * Refuses rather than redacts, deliberately. A redaction that silently mangles a legitimate
+ * issue body is a worse failure than not filing it: the episode's verdict still reaches the
+ * caller with the reason attached, so nothing is lost except the artifact, and re-running
+ * with a narrower brief is cheap. Publishing a redacted-but-wrong body to a public repo is
+ * not reversible in the same way — it is in the timeline, the API and every mirror the
+ * moment it exists.
+ */
+function assertNoSecrets(text: string, what: string): void {
+  const hits = scanForSecrets(text);
+  if (hits.length > 0) {
+    throw new Error(
+      `refusing to publish ${what}: the text matches ${hits.join(", ")}. A dispatched ` +
+        `episode must never put a credential or an internal address into a durable, ` +
+        `possibly public artifact. Nothing was published.`,
+    );
+  }
+}
+
 /** Worktrees live outside every repo, under sideclaw's own state dir. Inside the repo they
  *  would show up in the live checkout's `git status` as an untracked directory, which is
  *  precisely the "the live checkout is untouched" property the isolation exists to provide. */
@@ -272,6 +327,7 @@ export async function openIssue(
   id: RepoIdentity,
   opts: { title: string; body: string },
 ): Promise<string> {
+  assertNoSecrets(`${opts.title}\n${opts.body}`, "a GitHub issue");
   const gh = await octokit();
   const { data } = await gh.issues
     .create({
@@ -302,6 +358,7 @@ export async function openPullRequest(
   if (opts.head === id.defaultBranch) {
     throw new Error(`refusing to open a PR whose head is the default branch (${opts.head})`);
   }
+  assertNoSecrets(`${opts.title}\n${opts.body}`, "a pull request");
   const gh = await octokit();
   const { data } = await gh.pulls
     .create({
@@ -330,8 +387,17 @@ export interface DispatchWorktree {
   path: string;
   /** Branch created for this episode. Always `dispatch/…`. */
   branch: string;
-  /** Ref the branch was cut from, e.g. `origin/master`. */
+  /**
+   * Immutable OID the branch was cut from, and the fixed point every bound is measured
+   * against. It is a resolved SHA, never a ref NAME, and that is load-bearing: a worktree
+   * shares `.git` with the live repo, so a writable session can `git update-ref
+   * refs/remotes/origin/master <its own commit>` and move a name-based base underneath the
+   * inspection. Then `base...HEAD` shows an innocent diff, `diffRefusalReason` approves it,
+   * and the forbidden change is pushed anyway. A SHA cannot be repointed.
+   */
   base: string;
+  /** Human-readable ref the OID was resolved from, for logs only. Never used to compare. */
+  baseRef: string;
 }
 
 /** Branch-safe slug from free text. Output is `[a-z0-9-]+`, so it cannot express any of
@@ -385,9 +451,28 @@ export async function createWorktree(
     }
   }
 
-  await gitOrThrow(["worktree", "add", "--quiet", "-b", branch, path, base], cwd, 120_000);
-  logger.info({ event: "dispatch.worktree", project: cwd, branch, base, path }, "worktree created");
-  return { path, branch, base };
+  // Pin the base to an OID before anything else can move it. See DispatchWorktree.base.
+  const baseOid = await gitOrThrow(["rev-parse", "--verify", `${base}^{commit}`], cwd);
+
+  try {
+    await gitOrThrow(["worktree", "add", "--quiet", "-b", branch, path, baseOid], cwd, 120_000);
+  } catch (err) {
+    // `git worktree add` can fail after it has already registered `.git/worktrees/<name>`
+    // or created part of the directory — a timeout SIGKILLs it mid-checkout. The caller
+    // never receives a DispatchWorktree in that case, so its `finally` has nothing to clean
+    // up and the partial state would be left in the live repo this whole mechanism exists
+    // to leave untouched. Clean up here, where the state is still known.
+    await git(["worktree", "remove", "--force", path], cwd);
+    if (existsSync(path)) rmSync(path, { recursive: true, force: true });
+    await git(["worktree", "prune"], cwd);
+    await git(["branch", "-D", branch], cwd);
+    throw err;
+  }
+  logger.info(
+    { event: "dispatch.worktree", project: cwd, branch, base: baseOid, baseRef: base, path },
+    "worktree created",
+  );
+  return { path, branch, base: baseOid, baseRef: base };
 }
 
 /** Tear the worktree down. Always safe to call, including after a failure and including

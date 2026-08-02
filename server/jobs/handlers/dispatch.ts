@@ -440,13 +440,14 @@ export async function runDispatch(
     identity = await resolveRepoIdentity(cwd);
   }
 
+  // Created INSIDE the try, so the finally owns its teardown on every exit path. (A throw
+  // from createWorktree itself cleans up its own partial state — see dispatch-git.ts.)
   let worktree: DispatchWorktree | undefined;
-  if (tier === "implement" && identity) {
-    worktree = await createWorktree(cwd, randomUUID(), slugify(brief), identity.defaultBranch);
-    note(`worktree ${worktree.branch}`);
-  }
-
   try {
+    if (tier === "implement" && identity) {
+      worktree = await createWorktree(cwd, randomUUID(), slugify(brief), identity.defaultBranch);
+      note(`worktree ${worktree.branch}`);
+    }
     const sessionCwd = worktree?.path ?? cwd;
     const runEpisode = (p: string, maxTurns: number) =>
       runSession<DispatchOutput>({
@@ -521,32 +522,54 @@ export async function runDispatch(
     let branch: string | undefined;
     let artifactNote = "";
 
-    if (tier === "author") {
-      const text = artifactText(data.issueTitle, data.issueBody);
-      if (text) {
-        note("filing issue");
+    // A switch with an exhaustiveness check, not a pair of ifs: TIERS and WORKER_OUTPUT are
+    // both `Record<DispatchTier, …>` and force a compile error when a tier is added, and the
+    // artifact logic has to fail the same way. Two ifs would silently fall through for a
+    // fourth tier and return a bare verdict with no artifact and no error.
+    switch (tier) {
+      case "investigate":
+        break;
+      case "author": {
+        const text = artifactText(data.issueTitle, data.issueBody);
+        if (!text) {
+          artifactNote =
+            " No issue was filed: the episode concluded there was nothing worth tracking.";
+          break;
+        }
         // Re-asserted rather than assumed: `identity` is resolved for every non-investigate
         // tier above, and if that ever stops being true the episode must fail loudly here
         // instead of silently returning a verdict whose issue was never filed.
         if (!identity) throw new Error("internal: repo identity missing for the author tier");
-        artifactUrl = await openIssue(identity, {
-          title: text.title,
-          body: text.body + provenance(brief),
-        });
-      } else {
-        artifactNote =
-          " No issue was filed: the episode concluded there was nothing worth tracking.";
+        note("filing issue");
+        try {
+          artifactUrl = await openIssue(identity, {
+            title: text.title,
+            body: text.body + provenance(brief),
+          });
+        } catch (err) {
+          // A refused publish (secret scan) or a missing token permission must not turn a
+          // completed investigation into a failed job — the verdict is still worth having,
+          // and the reason belongs in it. Same treatment the PR path gets.
+          logger.error(
+            { event: "dispatch.issue_failed", project: cwd, error: String(err) },
+            "issue could not be filed",
+          );
+          artifactNote = ` No issue was filed: ${err instanceof Error ? err.message : String(err)}`;
+        }
+        break;
       }
-    }
-
-    if (tier === "implement") {
-      if (!identity || !worktree) {
-        throw new Error("internal: repo identity or worktree missing for the implement tier");
+      case "implement": {
+        if (!identity || !worktree) {
+          throw new Error("internal: repo identity or worktree missing for the implement tier");
+        }
+        const outcome = await depositBranch(worktree, identity, data, brief, note);
+        artifactUrl = outcome.artifactUrl;
+        branch = outcome.branch;
+        artifactNote = outcome.note;
+        break;
       }
-      const outcome = await depositBranch(worktree, identity, data, brief, note);
-      artifactUrl = outcome.artifactUrl;
-      branch = outcome.branch;
-      artifactNote = outcome.note;
+      default:
+        tier satisfies never;
     }
 
     logger.info(
