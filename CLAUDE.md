@@ -110,20 +110,39 @@ The **LiteLLM bridge** (`dotfiles/litellm/`, LaunchAgent on `:4000`, DeepSeek-V4
 
 Two constraints carried over regardless of backend:
 - **No `WebSearch`/`WebFetch`** — not wired into worker prompts. For web/library facts, workers shell out via Bash instead — `review` angle workers `curl` the research-gateway (async submit + poll) to validate external claims.
-- **Read-only tools must opt in** (`readOnly: true` → `--allowedTools "Read,Bash,Grep,Glob"`). Workers will edit files under `--dangerously-skip-permissions` otherwise. `check`/`review`/`dispatch` are all read-only.
+- **Read-only tools must opt in** (`readOnly: true` → `--disallowedTools "Write,Edit,NotebookEdit"`). Workers will edit files under `--dangerously-skip-permissions` otherwise. It must be `--disallowedTools`: skip-permissions bypasses the permission system an *allowlist* feeds, so the original `--allowedTools` spelling restricted nothing (measured on CLI 2.1.220 — a probe overwrote its canary). `check`/`review` are read-only; `dispatch` is read-only in its `investigate`/`author` tiers and deliberately writable in `implement`.
 
 ### Dispatch Tool — bounded episodes inside another repo
 
-The `dispatch` job (`server/jobs/handlers/dispatch.ts`, prompt in `server/skills/dispatch.md`)
-hands ONE investigation to a Claude Code session running inside a named repo, so it answers
-with that repo's own `CLAUDE.md`, `.claude/rules/` and `.claude/skills/` in context. It exists
-because an observer that has the state (Hermes on the mini) cannot use Claude-shaped context,
-and a session that has the context cannot watch for work. One episode, one verdict, no steering
+The `dispatch` job (`server/jobs/handlers/dispatch.ts`, prompts in `server/skills/dispatch/`)
+hands ONE episode to a Claude Code session running inside a named repo, so it works with that
+repo's own `CLAUDE.md`, `.claude/rules/` and `.claude/skills/` in context. It exists because an
+observer that has the state (Hermes on the mini) cannot use Claude-shaped context, and a
+session that has the context cannot watch for work. One episode, one verdict, no steering
 — mid-run redirection is `rd bg` + `rd say`, not this.
 
-- **Tiers.** Only `investigate` (read-only, verdict-only) is implemented. `author` and
-  `implement` are **rejected at the input schema**, never downgraded — a caller must not be
-  able to believe a PR exists because a read-only run silently substituted.
+- **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict + GitHub
+  issue), `implement` (write in an isolated worktree → verdict + branch + **draft** PR).
+  Prompts are `skills/dispatch/_common.md` + one tier file; the shared injection-hardening
+  preamble lives in `_common.md` precisely so three copies cannot drift apart.
+- **The artifact is created by the HANDLER, never by the session** (`dispatch-git.ts`). That
+  is the security argument for the write tiers, not an implementation detail: the session
+  holds no GitHub credential, so no brief — however injected — reaches GitHub through it. It
+  also makes "never merges, never pushes to a default branch" a property of `pushBranch`
+  (explicit default-branch check, `dispatch/` namespace check, single-branch refspec, no
+  force flag anywhere) rather than a line in a prompt.
+- **Worker sessions get git's credential helper taken away** (`GIT_DENY_CREDENTIALS_ENV`,
+  applied at **every** tier). Non-obvious and load-bearing: `~/.gitconfig` on this host
+  includes `~/.gitconfig-headless`, which wires the GitHub helper to the offline secrets
+  cache — so any process running as this user can push with no secret of its own, and a
+  read-only session still has `Bash`. Scrubbing `SENSITIVE_ENV_RE` does nothing about it,
+  because the credential never travels through the environment. So the config is removed
+  (`GIT_CONFIG_GLOBAL=/dev/null`) and the fallback paths (terminal prompt, askpass, ssh) are
+  closed. Identity is re-supplied explicitly so a session that commits anyway still succeeds.
+- **`implement` bounds.** Worktree cut from the API's authoritative `default_branch` (not the
+  stale local `origin/HEAD`); refuses any diff touching `.github/workflows|actions`; refuses
+  over 40 files or 2000 lines; PR opened as a **draft**. A refused diff is discarded and the
+  verdict says so — it is a successful run with no artifact, not a failure.
 - **The brief is untrusted.** It is assembled by an LLM from Slack messages, issue bodies and
   log lines, so it is fenced with **per-run nonce delimiters** (`<<<BRIEF_<12 hex>_BEGIN>>>`),
   never a fixed literal — a fixed one is typeable into the brief itself, which closes the fence
