@@ -622,6 +622,80 @@ function describeLeftover(path: string): { main: string; branch: string } {
   }
 }
 
+// ── Repo-supplied session settings ────────────────────────────────────────────
+
+/**
+ * Settings files a session loads from the repo it runs in.
+ *
+ * Only the PROJECT ROOT's are honored — measured on CLI 2.1.220 (2026-08-03): a
+ * `sub/.claude/settings.json` had no effect, so removing these two is sufficient rather than
+ * merely helpful. `settings.local.json` is conventionally untracked and therefore absent from
+ * a fresh worktree; it is listed anyway, because "conventionally" is not a guarantee.
+ */
+const PROJECT_SETTINGS_FILES = [".claude/settings.json", ".claude/settings.local.json"];
+
+/**
+ * Delete the repo's own session settings from the worktree, before the episode starts.
+ *
+ * `WORKER_SETTINGS` (session-runner) already disables hooks, and hooks were the obvious
+ * vector. They are not the only one: measured on the same CLI, a project settings file's
+ * `env` block **overrides the environment the handler supplied**. A repo containing
+ *
+ *     { "env": { "GIT_CONFIG_GLOBAL": "/repo/wins" } }
+ *
+ * gets exactly that inside the session's Bash — which is `GIT_DENY_CREDENTIALS_ENV`, the
+ * overlay that takes git's push credential away from every tier, undone by one line in the
+ * audited repo. `disableAllHooks` does nothing about it, and neither would any other flag
+ * that keeps the project source loaded. So the file is removed instead, in the only place
+ * that can do it without touching anything a human owns: the throwaway copy.
+ *
+ * Returns the paths removed, which the caller hands back to `restoreStrippedSettings`.
+ */
+export function stripProjectSettings(wt: DispatchWorktree): string[] {
+  const stripped: string[] = [];
+  for (const rel of PROJECT_SETTINGS_FILES) {
+    const abs = join(wt.path, rel);
+    if (!existsSync(abs)) continue;
+    rmSync(abs, { force: true });
+    stripped.push(rel);
+  }
+  if (stripped.length > 0) {
+    logger.info(
+      { event: "dispatch.settings_stripped", branch: wt.branch, files: stripped },
+      "removed the repo's session settings from the worktree",
+    );
+  }
+  return stripped;
+}
+
+/**
+ * Put them back, before anything inspects or commits the tree.
+ *
+ * Without this the strip would read as a deletion: `commitPendingWork` stages with `add -A`,
+ * so an implement episode would open a pull request that deletes the repo's `.claude/settings.json`.
+ *
+ * Restored from `wt.base` rather than from `HEAD`, so an episode that edited the file — or
+ * committed an edit to it — ends up with the base version either way. That is deliberate and
+ * narrow: the one file an episode may not change is the one that decides what executes in the
+ * next episode. It is the same reason the CI surface is refused at push time.
+ *
+ * Only paths the base tree actually carries are checked out. A fresh worktree holds tracked
+ * files only, so in practice every stripped path is one of them — but `git checkout <oid> --
+ * <path>` FAILS on a path the commit does not contain, and that would turn the cleanup into
+ * the thing that fails the episode. A stripped path absent from the base needs no restoring
+ * anyway: `add -A` stages no deletion for a file git never knew about.
+ */
+export async function restoreStrippedSettings(
+  wt: DispatchWorktree,
+  stripped: readonly string[],
+): Promise<void> {
+  if (stripped.length === 0) return;
+  const known = await gitOrThrow(["ls-tree", "--name-only", wt.base, "--", ...stripped], wt.path);
+  const restorable = known.split("\n").filter(Boolean);
+  if (restorable.length === 0) return;
+  await gitOrThrow(["checkout", wt.base, "--", ...restorable], wt.path);
+}
+
 // ── Diff inspection and commit ────────────────────────────────────────────────
 
 export interface DiffSummary {

@@ -393,6 +393,105 @@ async function bridgeReachable(): Promise<boolean> {
   }
 }
 
+// ── CLI argument vector ────────────────────────────────────────────────────────
+
+/**
+ * Extra settings layer applied to EVERY worker session, on top of whatever
+ * `--setting-sources` loads.
+ *
+ * A worker must not execute a repository's hooks, and by default it does. Measured on CLI
+ * 2.1.220 (2026-08-03) with a canary in a scratch repo's `.claude/settings.json`: under the
+ * exact flag vector below, a `SessionStart` hook fired before the model took a turn and a
+ * `PreToolUse` hook fired on the worker's first Bash call. That is arbitrary command
+ * execution supplied by the audited repo — the same "repo-controlled code is not a check"
+ * argument that makes the dispatch commit `--no-verify`, one layer up. `-p`'s own help text
+ * says the workspace-trust dialog is skipped in non-interactive mode, so nothing else stops it.
+ *
+ * `--setting-sources user` removes the hooks but also removes the repo's CLAUDE.md (measured:
+ * the codeword probe answered NONE), and that context is the entire reason dispatch exists.
+ * `--settings '{"hooks":{}}'` does NOT help — it merges, and the repo's hooks still fired.
+ * `disableAllHooks` is the one lever that separates them: hooks dead, CLAUDE.md still loaded,
+ * Bash unaffected.
+ */
+export const WORKER_SETTINGS = JSON.stringify({ disableAllHooks: true });
+
+export interface SessionArgsInput {
+  prompt: string;
+  settingSources: string;
+  maxTurns: number;
+  model: string;
+  readOnly: boolean;
+  jsonSchema?: Record<string, unknown>;
+}
+
+/** The full `claude` argument vector for a worker session. Split out from `runSession` so the
+ *  flags that constrain a worker are assertable without spawning anything — several of them
+ *  are load-bearing security bounds whose absence is invisible at runtime. */
+export function buildSessionArgs(input: SessionArgsInput): string[] {
+  const { prompt, settingSources, maxTurns, model, readOnly, jsonSchema } = input;
+
+  const args: string[] = [
+    "-p",
+    prompt,
+    "--dangerously-skip-permissions",
+    // stream-json (NDJSON, one event per line) instead of a single end-of-run blob,
+    // so the runner can track live activity (turns / last tool / idle time) for the
+    // job layer. Requires --verbose. The final `result` event is parsed identically
+    // to the old --output-format json envelope.
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    settingSources,
+    // Repo-supplied hooks must never execute in a worker. See WORKER_SETTINGS.
+    "--settings",
+    WORKER_SETTINGS,
+    "--strict-mcp-config",
+    "--mcp-config",
+    '{"mcpServers": {}}',
+    "--max-turns",
+    String(maxTurns),
+    "--model",
+    model,
+  ];
+
+  // Read-only tools: remove the editing tools outright.
+  //
+  // This MUST be `--disallowedTools`, not `--allowedTools`. Measured on CLI 2.1.220
+  // (2026-08-02): under `--dangerously-skip-permissions`, `--allowedTools
+  // "Read,Bash,Grep,Glob"` restricts NOTHING — skip-permissions bypasses the
+  // permission system that an allowlist feeds, so Write and Edit stay available and
+  // succeed. A probe run with the old flag overwrote its canary file; the same probe
+  // with `--disallowedTools` got "the call was rejected as disabled" and the canary
+  // survived. So every `readOnly: true` caller — check, review, dispatch — was
+  // read-only by the worker's goodwill alone, which is exactly what the flag existed
+  // to stop being true.
+  //
+  // Bash deliberately stays (validators, git, curl), so a determined worker can still
+  // write via shell redirection; prompts carry the "report only" rule for that. The
+  // point of this flag is removing the *easy, default* path to a mutation, not
+  // sandboxing. Tool names must be exact — an unknown one only logs "matches no known
+  // tool" and is silently ignored (MultiEdit is not a real tool name here).
+  if (readOnly) {
+    args.push("--disallowedTools", "Write,Edit,NotebookEdit");
+  }
+
+  if (jsonSchema) {
+    // claude CLI's --json-schema validator treats a top-level "$schema" key as an
+    // unresolvable $ref ("no schema with key or ref ..."), rejecting the payload
+    // outright. z.toJSONSchema() always emits "$schema", so strip it here — the
+    // single point where the flag is serialized — rather than at each call site.
+    let schemaWithoutMeta: unknown = jsonSchema;
+    if (!Array.isArray(jsonSchema)) {
+      const { $schema: _$schema, ...rest } = jsonSchema;
+      schemaWithoutMeta = rest;
+    }
+    args.push("--json-schema", JSON.stringify(schemaWithoutMeta));
+  }
+
+  return args;
+}
+
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
 export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<SessionResult<T>> {
@@ -468,61 +567,14 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     }
   }
 
-  const args: string[] = [
-    "-p",
+  const args = buildSessionArgs({
     prompt,
-    "--dangerously-skip-permissions",
-    // stream-json (NDJSON, one event per line) instead of a single end-of-run blob,
-    // so the runner can track live activity (turns / last tool / idle time) for the
-    // job layer. Requires --verbose. The final `result` event is parsed identically
-    // to the old --output-format json envelope.
-    "--output-format",
-    "stream-json",
-    "--verbose",
-    "--setting-sources",
     settingSources,
-    "--strict-mcp-config",
-    "--mcp-config",
-    '{"mcpServers": {}}',
-    "--max-turns",
-    String(maxTurns),
-    "--model",
+    maxTurns,
     model,
-  ];
-
-  // Read-only tools: remove the editing tools outright.
-  //
-  // This MUST be `--disallowedTools`, not `--allowedTools`. Measured on CLI 2.1.220
-  // (2026-08-02): under `--dangerously-skip-permissions`, `--allowedTools
-  // "Read,Bash,Grep,Glob"` restricts NOTHING — skip-permissions bypasses the
-  // permission system that an allowlist feeds, so Write and Edit stay available and
-  // succeed. A probe run with the old flag overwrote its canary file; the same probe
-  // with `--disallowedTools` got "the call was rejected as disabled" and the canary
-  // survived. So every `readOnly: true` caller — check, review, dispatch — was
-  // read-only by the worker's goodwill alone, which is exactly what the flag existed
-  // to stop being true.
-  //
-  // Bash deliberately stays (validators, git, curl), so a determined worker can still
-  // write via shell redirection; prompts carry the "report only" rule for that. The
-  // point of this flag is removing the *easy, default* path to a mutation, not
-  // sandboxing. Tool names must be exact — an unknown one only logs "matches no known
-  // tool" and is silently ignored (MultiEdit is not a real tool name here).
-  if (readOnly) {
-    args.push("--disallowedTools", "Write,Edit,NotebookEdit");
-  }
-
-  if (jsonSchema) {
-    // claude CLI's --json-schema validator treats a top-level "$schema" key as an
-    // unresolvable $ref ("no schema with key or ref ..."), rejecting the payload
-    // outright. z.toJSONSchema() always emits "$schema", so strip it here — the
-    // single point where the flag is serialized — rather than at each call site.
-    let schemaWithoutMeta: unknown = jsonSchema;
-    if (!Array.isArray(jsonSchema)) {
-      const { $schema: _$schema, ...rest } = jsonSchema;
-      schemaWithoutMeta = rest;
-    }
-    args.push("--json-schema", JSON.stringify(schemaWithoutMeta));
-  }
+    readOnly,
+    jsonSchema,
+  });
 
   // ANTHROPIC_API_KEY is deleted in both branches: it is rejected by claude v2.x
   // ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.

@@ -164,6 +164,32 @@ session that has the context cannot watch for work. One episode, one verdict, no
   because the credential never travels through the environment. So the config is removed
   (`GIT_CONFIG_GLOBAL=/dev/null`) and the fallback paths (terminal prompt, askpass, ssh) are
   closed. Identity is re-supplied explicitly so a session that commits anyway still succeeds.
+- **The audited repo's *executable* config never loads** — two separate defences, because the
+  hole had two halves and only one is fixable with a flag. The episode is supposed to load the
+  repo's CLAUDE.md, rules and skills; that is the point of dispatching. It must not also load
+  the repo's `.claude/settings.json`, and by default it did. Both measured on CLI 2.1.220
+  (2026-08-03) with canaries in a scratch repo, under the exact flag vector sideclaw uses:
+  - **Hooks executed.** A `SessionStart` hook ran *before the model took a turn*, and a
+    `PreToolUse` hook ran on the worker's first Bash call — arbitrary commands, supplied by
+    the repo being audited, in a session whose brief is attacker-influenced. Same
+    "repo-controlled code is not a check" argument that makes the dispatch commit
+    `--no-verify`, one layer up. Fixed by `WORKER_SETTINGS` (`--settings
+    '{"disableAllHooks":true}'`) on **every** sideclaw worker, not just dispatch.
+    `--setting-sources user` also stops it but takes the repo's CLAUDE.md with it (measured:
+    the codeword probe answered `NONE`), and `--settings '{"hooks":{}}'` merges, so the repo's
+    hooks still fired. `disableAllHooks` is the only lever that separates them.
+  - **`env` overrode the handler's environment.** A repo shipping
+    `{"env":{"GIT_CONFIG_GLOBAL":"/repo/wins"}}` got exactly that inside the session's Bash —
+    i.e. `GIT_DENY_CREDENTIALS_ENV`, the bullet directly above, undone by one line in the
+    audited repo. No flag fixes this while the project source is loaded, so the file is
+    removed instead: `stripProjectSettings` deletes `.claude/settings{,.local}.json` from the
+    **throwaway worktree** before the episode starts and `restoreStrippedSettings` puts it
+    back from the pinned base before anything is committed — otherwise an implement episode
+    would open a PR deleting it. Restored from `wt.base`, not `HEAD`, so an episode that
+    *committed* a rewrite still ends up with the base version: the one file an episode may not
+    change is the one deciding what executes in the next episode. Only the project root's file
+    is honored (measured: a nested `sub/.claude/settings.json` had no effect), so removing two
+    paths is sufficient rather than merely helpful.
 - **`implement` bounds.** Worktree cut from the API's authoritative `default_branch` (not the
   stale local `origin/HEAD`); refuses any diff touching `.github/workflows|actions`; refuses
   over 40 files or 2000 lines; refuses a diff whose **added lines** match `SECRET_PATTERNS`;
@@ -199,10 +225,12 @@ general capability: any Claude Code session can hand a scoped episode to another
 
 #### Tests — `bun test` (`tests/`)
 
-Every bound listed above is a regression test, in `tests/dispatch-git-pure.test.ts` (secret
-scanner, `slugify`, `parseGithubRemote` — plus 4000-input fuzz in each direction) and
-`tests/dispatch-worktree.test.ts` (worktree lifecycle, the refusal ladder, the push). Shape
-follows `hermes-agent/tests/*.py`: attack shapes blocked, **real material allowed**, fuzzed.
+Every bound listed above is a regression test, across four files: `dispatch-git-pure`
+(secret scanner, `slugify`, `parseGithubRemote`), `dispatch-worktree` (worktree lifecycle,
+the refusal ladder, the push, the settings strip), `dispatch-prompt` (the nonce fence, the
+salvage rule, tier profiles, the worker schema) and `session-args` (the worker's CLI flag
+vector). Shape follows `hermes-agent/tests/*.py`: attack shapes blocked, **real material
+allowed**, fuzzed.
 The second half is not padding — a scanner that refuses ordinary prose disables the tier it
 protects, and a positive-only suite never sees that. Writing it found and fixed one such
 over-fire: the Tailscale pattern's `1[0-2]\d` also matched 100.128/129, ordinary public
@@ -220,11 +248,19 @@ Three things about the setup are load-bearing:
   a test run is a second process, so against the real root it would tear down a live episode's
   worktree. `tests/setup.ts` (bunfig `[test].preload`) moves the default off it for the whole
   run and silences the shared app logger; each fixture narrows it to its own temp dir.
-- **The suite is mutation-verified, not merely green.** 18 mutations of the bounds — dropping
+- **Several functions are exported only because they are the units worth testing** —
+  `buildSessionArgs` (split out of `runSession`), `buildPrompt`, `isSalvageable`, `TIERS`,
+  `WORKER_OUTPUT`. `runDispatch` cannot be tested without spawning a model, and the flags and
+  the fence are exactly the parts whose absence is invisible at runtime.
+- **The suite is mutation-verified, not merely green.** 28 mutations of the bounds — dropping
   `--no-renames`, making a read worktree pushable, removing each `pushBranch` refusal, adding
   `--force`, reordering the refusal ladder, scanning removed lines as added, raising either
-  ceiling, skipping the post-failure worktree cleanup — were each applied and each turned the
-  suite red. Re-run that check after changing a bound: a test that cannot fail is not a test.
+  ceiling, skipping the post-failure worktree cleanup, removing the hook kill, reverting
+  `--disallowedTools` to the silently-broken `--allowedTools`, no-oping the settings
+  strip/restore, restoring from `HEAD` instead of the pinned base, replacing the per-run nonce
+  with a literal, dropping the post-data re-assertion, making every failure salvageable,
+  loosening the worker schema to `z.object` — were each applied and each turned the suite red.
+  Re-run that check after changing a bound: a test that cannot fail is not a test.
 
 ### Review Tool — Multi-Angle Pipeline
 

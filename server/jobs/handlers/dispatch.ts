@@ -23,7 +23,9 @@ import {
   pushBranch,
   removeWorktree,
   resolveRepoIdentity,
+  restoreStrippedSettings,
   slugify,
+  stripProjectSettings,
   summarizeDiff,
   type DispatchWorktree,
   type RepoIdentity,
@@ -205,7 +207,7 @@ export type DispatchOutput = z.infer<typeof DISPATCH_OUTPUT>;
 // a field the worker can write is not a marker — it is a suggestion. Leaving `degraded` in
 // the --json-schema also advertised its meaning, which is an invitation to a thin answer to
 // flag itself as a tool failure (or an injected brief to disguise a real one).
-const WORKER_OUTPUT = {
+export const WORKER_OUTPUT = {
   investigate: z.strictObject(VERDICT_FIELDS),
   author: z.strictObject({ ...VERDICT_FIELDS, ...ISSUE_FIELDS }),
   implement: z.strictObject({ ...VERDICT_FIELDS, ...PR_FIELDS }),
@@ -225,7 +227,7 @@ interface TierProfile {
   skill: string;
 }
 
-const TIERS: Record<DispatchTier, TierProfile> = {
+export const TIERS: Record<DispatchTier, TierProfile> = {
   investigate: {
     readOnly: true,
     maxTurns: 25,
@@ -291,7 +293,7 @@ exactly. If your reduced budget only supports a partial answer, say so in \`verd
  *  sections — and, since the data blocks come last, it is the most recent text the model
  *  reads. A random per-run nonce cannot be guessed by text composed before the run existed.
  *  Length is 12 hex chars: brute-forcing it inside one brief is not a realistic shape. */
-function newFenceNonce(): string {
+export function newFenceNonce(): string {
   return randomUUID().replace(/-/g, "").slice(0, 12);
 }
 
@@ -303,7 +305,7 @@ function dataBlock(label: string, body: string, nonce: string): string {
 /** Tier prompt = the shared hardening preamble + the tier's own section. Split so the
  *  injection rules exist once: three copies of a security preamble is three chances for one
  *  of them to drift. */
-async function loadSkillPrompt(tier: DispatchTier): Promise<string> {
+export async function loadSkillPrompt(tier: DispatchTier): Promise<string> {
   const dir = join(import.meta.dir, "../../skills/dispatch");
   const parts: string[] = [];
   for (const name of ["_common.md", TIERS[tier].skill]) {
@@ -314,7 +316,7 @@ async function loadSkillPrompt(tier: DispatchTier): Promise<string> {
   return parts.join("\n\n");
 }
 
-function buildPrompt(
+export function buildPrompt(
   skill: string,
   brief: string,
   context: string | undefined,
@@ -357,7 +359,7 @@ function buildPrompt(
  *  clock before returning a "verdict" that describes an outage as if it were a finding about
  *  the repo. `runSession` marks the salvageable class with `noOutput`, which now covers the
  *  schema-validation path too (see finalize() in session-runner.ts). */
-function isSalvageable(r: SessionResult<DispatchOutput>): boolean {
+export function isSalvageable(r: SessionResult<DispatchOutput>): boolean {
   // `noOutput` covers the parse and schema-validation paths. It does NOT cover the CLI
   // giving up on its own structured-output retries (`error_max_structured_output_retries`)
   // or hitting `error_max_turns` — those surface as `is_error`, which runSession returns
@@ -380,7 +382,7 @@ function excerpt(text: string, max: number): string {
  *  at a keyboard, and needs the brief that caused it — without that, "why does this exist"
  *  is unanswerable. It is deliberately a statement of process and inputs, carrying no tool
  *  credit of any kind. */
-function provenance(brief: string): string {
+export function provenance(brief: string): string {
   return `\n\n---\n\nOpened automatically by a bounded dispatch episode, from this brief:\n\n> ${excerpt(
     brief,
     1200,
@@ -390,7 +392,10 @@ function provenance(brief: string): string {
 /** Both artifact fields set, or both empty. One of each is incoherent — the worker either
  *  decided there is something to file or it did not — and is treated as "file nothing",
  *  since half an artifact is strictly worse than none. */
-function artifactText(title?: string, body?: string): { title: string; body: string } | null {
+export function artifactText(
+  title?: string,
+  body?: string,
+): { title: string; body: string } | null {
   const t = (title ?? "").trim();
   const b = (body ?? "").trim();
   if (!t || !b) return null;
@@ -462,6 +467,13 @@ export async function runDispatch(
       worktree = await createReadWorktree(cwd, jobKey);
     }
     const sessionCwd = worktree.path;
+    // The episode loads the repo's Claude-shaped context on purpose — CLAUDE.md, rules,
+    // skills. It must not also load the repo's *executable* config: a project settings file
+    // supplies hooks that run as this user and an `env` block that overrides the environment
+    // the handler set, including the git-credential overlay below. Removed from the copy, put
+    // back before anything is committed. See stripProjectSettings.
+    const strippedSettings = stripProjectSettings(worktree);
+    if (strippedSettings.length > 0) note(`stripped ${strippedSettings.join(", ")}`);
     const runEpisode = (p: string, maxTurns: number) =>
       runSession<DispatchOutput>({
         cwd: sessionCwd,
@@ -515,6 +527,11 @@ export async function runDispatch(
         );
       }
     }
+
+    // Both episodes are over, so the tree can be made whole again. Before `salvage` too — it
+    // pushes whatever the session left behind, and a stripped settings file would otherwise
+    // reach the branch as a deletion.
+    await restoreStrippedSettings(worktree, strippedSettings);
 
     // Degrade rather than discard. The episode may have done minutes of real work; losing it
     // to a serialization failure is strictly worse than handing back a flagged salvage
