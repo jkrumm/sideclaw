@@ -140,6 +140,16 @@ session that has the context cannot watch for work. One episode, one verdict, no
   **working tree**. The worktree shares `.git`, and nothing confines the session's `Bash` to
   the filesystem below it. Consequence worth knowing: untracked/gitignored files are absent
   from an episode's workspace — `_common.md` tells it to report that rather than guess.
+- **Boot sweeps stale worktrees** (`sweepStaleWorktrees`, called from `server/index.ts`
+  beside `initJobStore`). The `finally` teardown covers every exit path *inside* the process;
+  a SIGKILL has none, and that is the ordinary case — launchd restarts on crash and
+  `make reload` kickstarts deliberately. What leaks is not just a directory under sideclaw's
+  state dir: the `.git/worktrees` registration and the `dispatch/…` branch land in the **live
+  repo**, visible in the user's `git branch`. Each leftover is self-describing (a linked
+  worktree's `.git` is a file naming the main repo; that gitdir's HEAD names the branch), so
+  the sweep needs no bookkeeping that would itself have to survive the crash. Unconditional
+  at boot is safe because launchd keeps one instance — at startup every directory under the
+  root is abandoned by definition.
 - **The artifact is created by the HANDLER, never by the session** (`dispatch-git.ts`). That
   is the security argument for the write tiers, not an implementation detail: the session
   holds no GitHub credential, so no brief — however injected — reaches GitHub through it. It
