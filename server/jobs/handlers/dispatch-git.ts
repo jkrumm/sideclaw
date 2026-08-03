@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync } from "fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import { Octokit } from "@octokit/rest";
@@ -538,7 +538,66 @@ async function discardWorktree(cwd: string, path: string, branch: string): Promi
   await git(["worktree", "prune"], cwd);
   // Deleting the local branch is safe after a push: the remote holds the ref the PR points
   // at. Before a push it is the right cleanup too — nothing references it.
-  await git(["branch", "-D", branch], cwd);
+  if (branch) await git(["branch", "-D", branch], cwd);
+}
+
+/**
+ * Delete every worktree a previous process left behind. Call once at HTTP server boot.
+ *
+ * `runDispatch`'s `finally` tears its worktree down on every exit path *inside* the process,
+ * and a SIGKILL has no exit path. That is not an exotic case: launchd restarts this server
+ * on crash, and `make reload` kickstarts it deliberately, so a leftover is the ordinary
+ * outcome of restarting during an episode. What leaks is not confined to this tool's own
+ * state dir either — `git worktree add` registers itself in the LIVE repo and creates a
+ * branch there, so the residue surfaces in the user's `git branch` and `git worktree list`.
+ * Every tier takes a worktree now, including the high-volume read ones, so it accumulates.
+ *
+ * Each leftover is self-describing, which is why this needs no bookkeeping that would itself
+ * have to survive the crash: a linked worktree's `.git` is a FILE reading
+ * `gitdir: <main>/.git/worktrees/<id>`, naming the repo to clean up, and that gitdir's `HEAD`
+ * names the branch. A leftover whose repo has since moved or been deleted still gets its
+ * directory removed — the git calls are best effort and none of them throws.
+ *
+ * Safe to run unconditionally at boot because launchd keeps exactly one instance of this
+ * server: at the moment it starts, no episode of its own is in flight, so every directory
+ * under the root is by definition abandoned.
+ */
+export async function sweepStaleWorktrees(): Promise<number> {
+  if (!existsSync(WORKTREE_ROOT)) return 0;
+  let swept = 0;
+  for (const entry of readdirSync(WORKTREE_ROOT, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const path = join(WORKTREE_ROOT, entry.name);
+    const { main, branch } = describeLeftover(path);
+    if (main) {
+      await discardWorktree(main, path, branch);
+    } else if (existsSync(path)) {
+      rmSync(path, { recursive: true, force: true });
+    }
+    swept++;
+    logger.warn(
+      { event: "dispatch.worktree_swept", path, project: main, branch },
+      "removed a worktree left behind by a previous process",
+    );
+  }
+  return swept;
+}
+
+/** Read a leftover worktree's own pointers to find the repo and branch it belongs to.
+ *  Returns empty fields rather than throwing — a leftover too damaged to describe itself is
+ *  still a directory worth deleting. */
+function describeLeftover(path: string): { main: string; branch: string } {
+  try {
+    const gitdir = readFileSync(join(path, ".git"), "utf8")
+      .trim()
+      .replace(/^gitdir:\s*/, "");
+    const main = gitdir.split("/.git/worktrees/")[0] ?? "";
+    if (!main || !existsSync(join(main, ".git"))) return { main: "", branch: "" };
+    const head = readFileSync(join(gitdir, "HEAD"), "utf8").trim();
+    return { main, branch: head.replace(/^ref:\s*refs\/heads\//, "").trim() };
+  } catch {
+    return { main: "", branch: "" };
+  }
 }
 
 // ── Diff inspection and commit ────────────────────────────────────────────────

@@ -13,6 +13,7 @@ import { githubRoutes } from "./routes/github";
 import { diagramsRoutes } from "./routes/diagrams";
 import { actionsRoutes } from "./routes/actions";
 import { kioskRoute } from "./routes/kiosk";
+import { sweepStaleWorktrees } from "./jobs/handlers/dispatch-git.ts";
 import { jobsRoutes } from "./routes/jobs";
 import { initJobStore } from "./jobs/store";
 import { executeJob } from "./jobs/executor";
@@ -72,6 +73,14 @@ const app = new Elysia()
 // Wire the async job system: register the executor and run startup recovery
 // (in-flight jobs from a previous process → interrupted; re-promote pending).
 initJobStore({ executor: executeJob });
+
+// The filesystem half of that same recovery. A dispatch episode killed with the process
+// never runs its teardown, and what it leaves behind is not confined to sideclaw's own state
+// dir — the worktree is registered, and its branch created, inside the LIVE repo. Not
+// awaited: a slow git call must not delay the listener, and there is nothing to wait for.
+void sweepStaleWorktrees().catch((err: unknown) => {
+  logger.warn({ event: "dispatch.worktree_sweep_failed", error: String(err) }, "sweep failed");
+});
 
 if (!isDev) {
   app.use(staticPlugin({ assets: "dist/assets", prefix: "/assets" })).get("*", ({ set }) => {
