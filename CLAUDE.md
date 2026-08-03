@@ -197,6 +197,35 @@ session that has the context cannot watch for work. One episode, one verdict, no
 Consumed by Hermes via `hermes-agent`'s bounded `scripts/hermes-cc.sh` client, but it is a
 general capability: any Claude Code session can hand a scoped episode to another repo.
 
+#### Tests — `bun test` (`tests/`)
+
+Every bound listed above is a regression test, in `tests/dispatch-git-pure.test.ts` (secret
+scanner, `slugify`, `parseGithubRemote` — plus 4000-input fuzz in each direction) and
+`tests/dispatch-worktree.test.ts` (worktree lifecycle, the refusal ladder, the push). Shape
+follows `hermes-agent/tests/*.py`: attack shapes blocked, **real material allowed**, fuzzed.
+The second half is not padding — a scanner that refuses ordinary prose disables the tier it
+protects, and a positive-only suite never sees that. Writing it found and fixed one such
+over-fire: the Tailscale pattern's `1[0-2]\d` also matched 100.128/129, ordinary public
+addresses.
+
+Three things about the setup are load-bearing:
+
+- **`origin` is a local bare repo, not a mock.** That is what makes `pushBranch` testable at
+  all — the single-branch refspec, the absence of a force flag and "master did not move" are
+  properties of the real git invocation, and the diverged-branch case proves the push fails
+  rather than overwrites. Nothing in the suite reaches the network or needs a credential.
+- **`WORKTREE_ROOT` is read per call** (`worktreeRoot()`, overridable by
+  `SIDECLAW_WORKTREE_ROOT`, never set in production). `sweepStaleWorktrees` deletes *every*
+  directory under that root on the stated assumption that one instance of this server exists;
+  a test run is a second process, so against the real root it would tear down a live episode's
+  worktree. `tests/setup.ts` (bunfig `[test].preload`) moves the default off it for the whole
+  run and silences the shared app logger; each fixture narrows it to its own temp dir.
+- **The suite is mutation-verified, not merely green.** 18 mutations of the bounds — dropping
+  `--no-renames`, making a read worktree pushable, removing each `pushBranch` refusal, adding
+  `--force`, reordering the refusal ladder, scanning removed lines as added, raising either
+  ceiling, skipping the post-failure worktree cleanup — were each applied and each turned the
+  suite red. Re-run that check after changing a bound: a test that cannot fail is not a test.
+
 ### Review Tool — Multi-Angle Pipeline
 
 The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel pipeline inside the HTTP server (see `server/skills/review/README.md` for full docs):

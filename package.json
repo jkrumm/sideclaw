@@ -7,9 +7,10 @@
     "dev:client": "vite",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "lint": "oxlint src server",
-    "format": "oxfmt src server --write",
-    "format:check": "oxfmt src server --check",
+    "test": "bun test",
+    "lint": "oxlint src server tests",
+    "format": "oxfmt src server tests --write",
+    "format:check": "oxfmt src server tests --check",
     "start": "bun server/index.ts",
     "logs:tail": "tail -f /tmp/sideclaw.jsonl | bunx pino-pretty"
   },

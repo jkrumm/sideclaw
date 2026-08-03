@@ -60,8 +60,14 @@ const SECRET_PATTERNS: ReadonlyArray<{ name: string; re: RegExp }> = [
   { name: "private key block", re: /-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----/ },
   { name: "bearer credential", re: /\bBearer\s+[A-Za-z0-9._~+/-]{20,}/ },
   // Tailscale CGNAT range (100.64.0.0/10) — an internal hostname or tailnet address in a
-  // public issue is exactly what the global security rule forbids in tracked files.
-  { name: "Tailscale IP", re: /\b100\.(?:6[4-9]|[7-9]\d|1[0-2]\d)\.\d{1,3}\.\d{1,3}\b/ },
+  // public issue is exactly what the global security rule forbids in tracked files. The
+  // second octet is 64-127 inclusive and the alternation says exactly that: an earlier
+  // `1[0-2]\d` also admitted 100.128/129, which are ordinary public addresses, and a
+  // refusal is only useful if it does not fire on things nobody needs to hide.
+  {
+    name: "Tailscale IP",
+    re: /\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}\b/,
+  },
   {
     name: "inline credential assignment",
     re: /\b(?:api[_-]?key|secret|password|passwd|auth[_-]?token|access[_-]?token)\s*[:=]\s*["']?[A-Za-z0-9_\-+/]{20,}/i,
@@ -94,10 +100,23 @@ function assertNoSecrets(text: string, what: string): void {
   }
 }
 
-/** Worktrees live outside every repo, under sideclaw's own state dir. Inside the repo they
- *  would show up in the live checkout's `git status` as an untracked directory, which is
- *  precisely the "the live checkout is untouched" property the isolation exists to provide. */
-const WORKTREE_ROOT = join(homedir(), ".local", "state", "sideclaw", "worktrees");
+/**
+ * Worktrees live outside every repo, under sideclaw's own state dir. Inside the repo they
+ * would show up in the live checkout's `git status` as an untracked directory, which is
+ * precisely the "the live checkout is untouched" property the isolation exists to provide.
+ *
+ * Read per call rather than frozen at import, so the test suite can point it at a temp dir.
+ * That seam is not optional cosmetics: `sweepStaleWorktrees` deletes EVERY directory under
+ * this root on the stated assumption that only one instance of this server exists, and a
+ * test run is a second process — against the real root it would tear down a live episode's
+ * worktree. The env var is never set in production.
+ */
+function worktreeRoot(): string {
+  return (
+    process.env.SIDECLAW_WORKTREE_ROOT ??
+    join(homedir(), ".local", "state", "sideclaw", "worktrees")
+  );
+}
 
 /**
  * Env overlay that removes git's ambient push credential from a worker session.
@@ -436,8 +455,9 @@ export async function createWorktree(
   defaultBranch: string,
 ): Promise<DispatchWorktree> {
   const branch = `dispatch/${slug}-${jobKey.slice(0, 8)}`;
-  const path = join(WORKTREE_ROOT, jobKey);
-  mkdirSync(WORKTREE_ROOT, { recursive: true });
+  const root = worktreeRoot();
+  const path = join(root, jobKey);
+  mkdirSync(root, { recursive: true });
   if (existsSync(path)) rmSync(path, { recursive: true, force: true });
 
   // Best effort: a stale `origin/<default>` only means the branch is cut from an older
@@ -504,8 +524,9 @@ export async function createWorktree(
  */
 export async function createReadWorktree(cwd: string, jobKey: string): Promise<DispatchWorktree> {
   const branch = `dispatch/read-${jobKey.slice(0, 8)}`;
-  const path = join(WORKTREE_ROOT, jobKey);
-  mkdirSync(WORKTREE_ROOT, { recursive: true });
+  const root = worktreeRoot();
+  const path = join(root, jobKey);
+  mkdirSync(root, { recursive: true });
   if (existsSync(path)) rmSync(path, { recursive: true, force: true });
 
   const baseOid = await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
@@ -563,11 +584,12 @@ async function discardWorktree(cwd: string, path: string, branch: string): Promi
  * under the root is by definition abandoned.
  */
 export async function sweepStaleWorktrees(): Promise<number> {
-  if (!existsSync(WORKTREE_ROOT)) return 0;
+  const root = worktreeRoot();
+  if (!existsSync(root)) return 0;
   let swept = 0;
-  for (const entry of readdirSync(WORKTREE_ROOT, { withFileTypes: true })) {
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
-    const path = join(WORKTREE_ROOT, entry.name);
+    const path = join(root, entry.name);
     const { main, branch } = describeLeftover(path);
     if (main) {
       await discardWorktree(main, path, branch);
