@@ -1,6 +1,15 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "fs";
+import {
+  constants as fsConstants,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  lstatSync,
+} from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { dirname, join } from "path";
 import { Octokit } from "@octokit/rest";
 import { appLogger as logger } from "../../logger.ts";
 
@@ -517,6 +526,14 @@ export async function createWorktree(
  * call, which is what keeps `investigate` working in a repo whose origin is not GitHub, or
  * missing entirely — the read tiers resolve no identity.
  *
+ * `git worktree add` only materializes TRACKED content at the pinned commit — that is a side
+ * effect of the underlying git command, not a deliberate security guard, so a read episode
+ * used to be answering a question about a checkout it could only half see: no `.env`, no
+ * local config, no build output, no untracked scratch files. `copyUntrackedFiles` closes that
+ * gap afterwards, best effort, with `.claude/` excluded for reasons that ARE security (see its
+ * own comment) — reopening nothing, because the exposure this worktree exists to prevent is a
+ * write landing in the live checkout, and copying files IN doesn't touch that.
+ *
  * The narrow claim, because the wide one would be false: this isolates the WORKING TREE. The
  * worktree shares `.git` with the live repo, and nothing confines the session's Bash to the
  * filesystem below it. What it buys is that the natural spelling of an injected write — a
@@ -540,7 +557,165 @@ export async function createReadWorktree(cwd: string, jobKey: string): Promise<D
     { event: "dispatch.worktree", project: cwd, branch, base: baseOid, baseRef: "HEAD", path },
     "read worktree created",
   );
-  return { path, branch, base: baseOid, baseRef: "HEAD", pushable: false };
+  const wt: DispatchWorktree = { path, branch, base: baseOid, baseRef: "HEAD", pushable: false };
+  await copyUntrackedFiles(cwd, wt);
+  return wt;
+}
+
+// ── Untracked-file materialization (read tiers only) ──────────────────────────
+
+/** Total-bytes and file-count ceilings on the untracked-content copy. Purely a cost bound —
+ *  unlike the diff-review ceilings above, there is no review burden here to protect, just the
+ *  time and disk this copy is allowed to spend before it stops being "near-free". */
+const MAX_COPY_BYTES = 100 * 1024 * 1024;
+const MAX_COPY_FILES = 5_000;
+
+/**
+ * Directory segments never copied, regardless of size or count.
+ *
+ * `.claude` is the one that is security-critical, not cost-driven, and must never be relaxed:
+ * `stripProjectSettings` (below) exists because a repo's `.claude/settings.json` can override
+ * the handler's environment, including `GIT_DENY_CREDENTIALS_ENV` — a live hole closed
+ * 2026-08-03. That strip only removes what `git worktree add` materializes from TRACKED
+ * history; an untracked `.claude/settings.local.json` sitting in the live checkout would walk
+ * straight past it if this copy brought it in. So any path with a `.claude` segment is
+ * excluded here, unconditionally, before the strip ever runs. The rest are ordinary
+ * cost-control — the directories most likely to hold thousands of files nobody dispatched an
+ * episode to read.
+ */
+const EXCLUDED_COPY_SEGMENTS = new Set([
+  ".claude",
+  "node_modules",
+  ".venv",
+  "venv",
+  "dist",
+  "build",
+  "target",
+  ".next",
+  ".turbo",
+  ".cache",
+  "coverage",
+  ".git",
+]);
+
+function isExcludedFromCopy(relPath: string): boolean {
+  return relPath.split("/").some((seg) => EXCLUDED_COPY_SEGMENTS.has(seg));
+}
+
+/**
+ * Copy untracked and gitignored files from the live checkout (`cwd`) into a read tier's
+ * throwaway worktree, so the episode can see what `git worktree add` cannot: `.env`, local
+ * state/config, build output, scratch files.
+ *
+ * Enumerated via `git ls-files --others -z` (no `--exclude-standard`) rather than a filesystem
+ * walk, so git's own ignore semantics decide what counts as "untracked" and gitignored files
+ * are included, not filtered out.
+ *
+ * `fs.copyFileSync` with `COPYFILE_FICLONE` is Node/Bun's own "try a COW clone, fall back to a
+ * plain copy" primitive — no platform branch needed. The worktree root and the checkout are
+ * normally on the same volume, so on APFS this is near-free; elsewhere it silently degrades to
+ * an ordinary copy.
+ *
+ * Best effort, end to end, by design: this must degrade to "fewer files present in the
+ * worktree", never to a failed episode. Every failure path logs and continues; the function
+ * itself never throws. Hitting the cost cap is the one case that is loud rather than silent —
+ * `logger.warn` with the count/bytes skipped, because a bound nobody can see approaching reads
+ * as the tool being broken.
+ */
+export async function copyUntrackedFiles(cwd: string, wt: DispatchWorktree): Promise<void> {
+  try {
+    const listing = await git(["ls-files", "--others", "-z"], cwd, 60_000);
+    if (!listing.ok) {
+      logger.warn(
+        {
+          event: "dispatch.untracked_copy_list_failed",
+          branch: wt.branch,
+          error: listing.stderr.trim().slice(0, 200),
+        },
+        "could not enumerate untracked files — the read worktree will only carry tracked content",
+      );
+      return;
+    }
+    const candidates = listing.stdout
+      .split("\0")
+      .filter(Boolean)
+      .filter((p) => !isExcludedFromCopy(p));
+
+    let copiedFiles = 0;
+    let copiedBytes = 0;
+    let cappedFiles = 0;
+    let cappedBytes = 0;
+    let failedFiles = 0;
+
+    for (const rel of candidates) {
+      const src = join(cwd, rel);
+      let size: number;
+      try {
+        // lstat, NOT stat: stat FOLLOWS a symlink, so an untracked `link -> ~/.ssh/id_ed25519`
+        // would report as a regular file and its TARGET's content would be cloned into the
+        // worktree as a real file. The episode's Bash is not confined to the worktree and
+        // could read that path directly either way, so this is not a new capability — but a
+        // read tier's whole job is to sweep the tree it was given, and materializing a secret
+        // INSIDE that tree gets it hoovered into a verdict with nobody intending it. Skip
+        // every non-regular entry, symlinks included; the link target is not this copy's
+        // business.
+        const st = lstatSync(src);
+        if (!st.isFile()) continue; // symlinks/sockets/fifos — nothing safe to clone
+        size = st.size;
+      } catch {
+        continue; // gone between the listing and the stat — nothing to copy
+      }
+
+      if (copiedFiles >= MAX_COPY_FILES || copiedBytes + size > MAX_COPY_BYTES) {
+        cappedFiles++;
+        cappedBytes += size;
+        continue;
+      }
+
+      try {
+        const dest = join(wt.path, rel);
+        mkdirSync(dirname(dest), { recursive: true });
+        copyFileSync(src, dest, fsConstants.COPYFILE_FICLONE);
+        copiedFiles++;
+        copiedBytes += size;
+      } catch (err) {
+        failedFiles++;
+        logger.warn(
+          {
+            event: "dispatch.untracked_copy_file_failed",
+            branch: wt.branch,
+            path: rel,
+            error: String(err),
+          },
+          "could not copy an untracked file into the read worktree",
+        );
+      }
+    }
+
+    if (cappedFiles > 0) {
+      logger.warn(
+        {
+          event: "dispatch.untracked_copy_capped",
+          branch: wt.branch,
+          copiedFiles,
+          copiedBytes,
+          cappedFiles,
+          cappedBytes,
+        },
+        `untracked-file copy hit its bound (${MAX_COPY_FILES} files / ${MAX_COPY_BYTES} bytes) — ${cappedFiles} file(s) (${cappedBytes} bytes) were not copied into the read worktree`,
+      );
+    } else if (copiedFiles > 0) {
+      logger.info(
+        { event: "dispatch.untracked_copy", branch: wt.branch, copiedFiles, copiedBytes },
+        "copied untracked and gitignored files into the read worktree",
+      );
+    }
+  } catch (err) {
+    logger.warn(
+      { event: "dispatch.untracked_copy_failed", branch: wt.branch, error: String(err) },
+      "could not copy untracked files into the read worktree — continuing with tracked content only",
+    );
+  }
 }
 
 /** Tear the worktree down. Always safe to call, including after a failure and including

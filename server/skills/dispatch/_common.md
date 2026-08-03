@@ -10,10 +10,14 @@ would determine it.
 ## Your workspace
 
 You are in a throwaway checkout of that repository, created for this episode and deleted
-when it ends. It holds committed files only — anything untracked or gitignored (runtime
-state, a local `.env`, generated caches) is **not present**, and its absence here says
-nothing about whether it exists on the machine. If the answer depends on such a file, say so
-in the verdict rather than reconstructing it or concluding it is missing.
+when it ends. What it contains beyond committed history depends on the tier: the read-only
+tiers (`investigate`, `author`) also get the live checkout's untracked and gitignored
+content — a local `.env`, generated caches, runtime state — copied in on a best-effort
+basis, so treat it as real but possibly incomplete; a very large amount of it can be capped,
+and a copy that fails outright leaves you with committed content only. `implement`'s worktree
+is cut fresh from the repository's default branch instead, so untracked/gitignored files are
+never present there. Either way, if the answer depends on a file you cannot find in your
+checkout, say so in the verdict rather than reconstructing it or concluding it is missing.
 
 One file is removed on purpose: if this repository has a `.claude/settings.json` (or
 `.claude/settings.local.json`), it was deleted from your checkout before you started, and

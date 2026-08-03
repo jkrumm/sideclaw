@@ -138,8 +138,33 @@ session that has the context cannot watch for work. One episode, one verdict, no
   object rather than a re-derived tier check, because `salvage` pushes whatever the session
   left behind and must never publish a read tier's leftovers. Narrow claim: this isolates the
   **working tree**. The worktree shares `.git`, and nothing confines the session's `Bash` to
-  the filesystem below it. Consequence worth knowing: untracked/gitignored files are absent
-  from an episode's workspace — `_common.md` tells it to report that rather than guess.
+  the filesystem below it.
+- **Read tiers also see untracked and gitignored content, not just HEAD.** `git worktree add`
+  only ever materializes tracked content — a side effect of the command, not a deliberate
+  guard, since the write exposure above is about a *write* landing in the live checkout and
+  copying files *in* doesn't touch that. `createReadWorktree` calls `copyUntrackedFiles`
+  (`dispatch-git.ts`) right after the worktree is created: `git ls-files --others -z` (no
+  `--exclude-standard`, so gitignored content is included, not filtered) enumerates the live
+  checkout, and each candidate is cloned in via `fs.copyFileSync(..., COPYFILE_FICLONE)` —
+  Node/Bun's own "try a COW clone, fall back to a plain copy" primitive, near-free on the
+  common case where the worktree root and the checkout share a volume. `implement` is
+  untouched — `createWorktree` never calls it, because its branch must carry nothing beyond
+  what the episode itself commits. Three exclusions: any path with a `.claude` segment is
+  refused unconditionally (an untracked `.claude/settings.local.json` would walk straight past
+  `stripProjectSettings` and reopen the `GIT_DENY_CREDENTIALS_ENV` hole through a side door —
+  security, not cost); `node_modules`/`.venv`/`venv`/`dist`/`build`/`target`/`.next`/`.turbo`/
+  `.cache`/`coverage`/`.git` segments are skipped as pure cost control; and the whole copy is
+  bounded (100 MB / 5,000 files) with a loud `logger.warn` naming the count/bytes skipped if
+  the bound is hit — no silent truncation. Best effort end to end: any failure degrades to
+  "fewer files present", never to a failed episode. **The stat is an `lstatSync`, and that is
+  load-bearing:** `statSync` follows a symlink, so an untracked `link -> ~/.ssh/id_ed25519`
+  would report as a regular file and its *target's* content would be cloned in as a real file.
+  The episode's `Bash` is unconfined and could read that path directly either way, so it is no
+  new capability — but a read tier's whole job is to sweep the tree it was handed, and
+  materializing a secret *inside* that tree gets it into a verdict with nobody intending it.
+  Every non-regular entry is skipped; the link target is not this copy's business. `_common.md`'s workspace section states
+  the split per tier rather than a blanket "absent" — `implement`'s fresh-cut worktree still
+  has nothing beyond history.
 - **Boot sweeps stale worktrees** (`sweepStaleWorktrees`, called from `server/index.ts`
   beside `initJobStore`). The `finally` teardown covers every exit path *inside* the process;
   a SIGKILL has none, and that is the ordinary case — launchd restarts on crash and

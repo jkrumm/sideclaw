@@ -8,7 +8,16 @@
 // or a credential: the refspec, the absence of a force flag and "only this branch moved" are
 // all observable in the bare repo afterwards.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "fs";
 import { rmSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
@@ -16,6 +25,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   commitCount,
   commitPendingWork,
+  copyUntrackedFiles,
   createReadWorktree,
   createWorktree,
   diffRefusalReason,
@@ -171,6 +181,99 @@ describe("createReadWorktree", () => {
     await run(["sh", "-c", "echo tampered >> README.md"], wt.path);
     expect(await git(["status", "--porcelain"], fx.repo)).toBe("");
     expect(await git(["status", "--porcelain"], wt.path)).toContain("README.md");
+  });
+});
+
+// ── Untracked-file materialization (read tiers only) ──────────────────────────
+//
+// `git worktree add` only materializes tracked content, which used to leave a read episode
+// unable to see `.env`, local state, or scratch files the live checkout carries. These cover
+// what gets copied in, what never does regardless of tracked state, and that the copy is
+// best-effort — a failure here must degrade to fewer files present, never a failed episode.
+
+describe("createReadWorktree copies untracked and gitignored content", () => {
+  test("an untracked file appears in the read worktree", async () => {
+    fx.write("scratch.txt", "not committed, not gitignored\n");
+    const wt = await createReadWorktree(fx.repo, key());
+    expect(readFileSync(join(wt.path, "scratch.txt"), "utf8")).toBe(
+      "not committed, not gitignored\n",
+    );
+  });
+
+  test("a gitignored file appears too", async () => {
+    fx.write(".gitignore", ".env\n");
+    fx.write(".env", "SECRET=local-only\n");
+    const wt = await createReadWorktree(fx.repo, key());
+    expect(readFileSync(join(wt.path, ".env"), "utf8")).toBe("SECRET=local-only\n");
+  });
+
+  test("a .claude/settings.local.json in the live checkout is never copied in", async () => {
+    fx.write(".claude/settings.local.json", '{"env":{"GIT_CONFIG_GLOBAL":"/repo/wins"}}\n');
+    const wt = await createReadWorktree(fx.repo, key());
+    expect(existsSync(join(wt.path, ".claude", "settings.local.json"))).toBe(false);
+    expect(existsSync(join(wt.path, ".claude"))).toBe(false);
+  });
+
+  test("a node_modules/ file does not appear", async () => {
+    fx.write("node_modules/some-pkg/index.js", "module.exports = 1;\n");
+    const wt = await createReadWorktree(fx.repo, key());
+    expect(existsSync(join(wt.path, "node_modules"))).toBe(false);
+  });
+
+  test("an untracked symlink is skipped, and its target's content is never materialized", async () => {
+    // stat() follows the link; lstat() does not. With stat(), an untracked
+    // `link -> <a secret outside the repo>` reports as a regular file and its CONTENT gets
+    // cloned into the tree the episode is about to sweep and summarize.
+    const secret = join(fx.root, "outside-secret.txt");
+    writeFileSync(secret, "PRIVATE KEY MATERIAL\n");
+    symlinkSync(secret, join(fx.repo, "link-to-secret"));
+
+    const wt = await createReadWorktree(fx.repo, key());
+    const landed = join(wt.path, "link-to-secret");
+    expect(existsSync(landed)).toBe(false);
+    // and belt-and-braces: nothing in the worktree carries the target's content
+    expect(
+      readdirSync(wt.path).some(
+        (f) =>
+          statSync(join(wt.path, f)).isFile() &&
+          readFileSync(join(wt.path, f), "utf8").includes("PRIVATE KEY MATERIAL"),
+      ),
+    ).toBe(false);
+  });
+
+  test("createWorktree (implement tier) is unchanged — local dirt does not appear there", async () => {
+    fx.write("scratch.txt", "should stay out of the implement worktree\n");
+    const wt = await createWorktree(fx.repo, key(), "implement-tier", "master");
+    expect(existsSync(join(wt.path, "scratch.txt"))).toBe(false);
+  });
+
+  test("a failure to copy degrades to fewer files, never to a failed episode", async () => {
+    fx.write("scratch.txt", "wanted, but not required\n");
+    const wt = await createReadWorktree(fx.repo, key());
+    expect(existsSync(join(wt.path, "scratch.txt"))).toBe(true);
+
+    // Simulate the copy step itself failing (e.g. a permission error) by making the
+    // destination unwritable, then re-running it directly against the same worktree.
+    chmodSync(wt.path, 0o500);
+    try {
+      fx.write("scratch2.txt", "another file the copy cannot place\n");
+      await expect(copyUntrackedFiles(fx.repo, wt)).resolves.toBeUndefined();
+      expect(existsSync(join(wt.path, "scratch2.txt"))).toBe(false);
+    } finally {
+      chmodSync(wt.path, 0o700);
+    }
+  });
+
+  test("an unreachable source checkout does not throw", async () => {
+    const wt: DispatchWorktree = {
+      path: join(fx.worktrees, "nowhere"),
+      branch: "dispatch/read-nowhere",
+      base: "0".repeat(40),
+      baseRef: "HEAD",
+      pushable: false,
+    };
+    mkdirSync(wt.path, { recursive: true });
+    await expect(copyUntrackedFiles(join(fx.root, "does-not-exist"), wt)).resolves.toBeUndefined();
   });
 });
 
