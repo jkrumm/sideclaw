@@ -35,5 +35,11 @@ Logs: `tail -f ~/Library/Logs/sideclaw.log` / `tail -f ~/Library/Logs/sideclaw.e
 Not `/tmp` — a KeepAlive agent opens its stdio once at spawn, and macOS's
 periodic cleanup sweeps `/tmp` files untouched for 3+ days, leaving the process
 writing into an unlinked inode that no `tail` can reach. `make install-agent`
-copies `com.jkrumm.sideclaw.plist` verbatim, so edit the tracked plist, never
-the live one.
+copies `com.jkrumm.sideclaw-server.plist` verbatim, so edit the tracked plist,
+never the live one.
+
+The label is `com.jkrumm.sideclaw-server` and the program is
+`scripts/sideclaw-start.sh` rather than `bun` directly. Both dodge a macOS
+Background Task Management denial that otherwise makes launchd skip `RunAtLoad`
+and leave the server down after a reboot; the rationale and the verification
+command are in the repo CLAUDE.md. Don't "simplify" either back.

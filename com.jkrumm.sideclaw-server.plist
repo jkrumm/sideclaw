@@ -2,13 +2,29 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <!-- `-server`, not the historical `com.jkrumm.sideclaw`, and the suffix is
+       load-bearing rather than cosmetic. Background Task Management stores a
+       disposition per IDENTIFIER, and this machine's entry for
+       `8.com.jkrumm.sideclaw` is denied. Measured 2026-08-06: removing the
+       plist entirely, re-adding it, and re-adding it under a different filename
+       all re-registered as [enabled, disallowed] — the denial outlives the
+       file. A label BTM has never seen registers allowed. Renaming back
+       resurrects the boot failure. -->
   <key>Label</key>
-  <string>com.jkrumm.sideclaw</string>
+  <string>com.jkrumm.sideclaw-server</string>
 
+  <!-- A wrapper script, NOT /opt/homebrew/bin/bun directly. macOS Background
+       Task Management resolves a launch item's effective disposition from its
+       executable, and bun is denied on this host: a direct-bun agent registers
+       [enabled, allowed] and BTM immediately downgrades it to
+       [enabled, disallowed], which makes launchd skip RunAtLoad and leave the
+       job to a late (or absent) KeepAlive spawn. Measured 2026-08-06 — three
+       reboots produced one no-start and two ~3-minute-late starts, against ~18s
+       for every allowed agent. The same probe via a shell script resolved to
+       [enabled, allowed]. Full argument in scripts/sideclaw-start.sh. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/bun</string>
-    <string>server/index.ts</string>
+    <string>/Users/jkrumm/SourceRoot/sideclaw/scripts/sideclaw-start.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
