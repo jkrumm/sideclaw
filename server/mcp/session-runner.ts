@@ -135,6 +135,22 @@ export interface SessionOptions<T = unknown> {
    * feeds, so Write stayed available. See the flag construction below.
    */
   readOnly?: boolean;
+  /**
+   * MCP servers to expose to the worker, in `claude --mcp-config`'s `mcpServers` shape
+   * (e.g. `{ hyperdx: { type: "http", url, headers } }`). Merged under `--strict-mcp-config`,
+   * so this is the *entire* server set the worker sees — never the repo's own `.mcp.json`.
+   * Omitted (default): the worker gets `{"mcpServers": {}}`, i.e. none, matching every
+   * caller before this field existed.
+   */
+  mcpServers?: Record<string, unknown>;
+  /**
+   * Extra tool names appended to the `readOnly` disallow list (e.g. an MCP server's
+   * mutating tools — `mcp__hyperdx__clickstack_save_*`). Ignored when `readOnly` is false;
+   * a writable session has no disallow list to append to. Tool names must be exact, per
+   * the same caveat as the base `readOnly` list below — no glob support confirmed for
+   * MCP-namespaced tool names.
+   */
+  extraDisallowedTools?: string[];
   /** Extra env vars merged into the worker (e.g. RESEARCH_GATEWAY_URL/TOKEN for review). */
   extraEnv?: Record<string, string>;
   /**
@@ -422,13 +438,24 @@ export interface SessionArgsInput {
   model: string;
   readOnly: boolean;
   jsonSchema?: Record<string, unknown>;
+  mcpServers?: Record<string, unknown>;
+  extraDisallowedTools?: string[];
 }
 
 /** The full `claude` argument vector for a worker session. Split out from `runSession` so the
  *  flags that constrain a worker are assertable without spawning anything — several of them
  *  are load-bearing security bounds whose absence is invisible at runtime. */
 export function buildSessionArgs(input: SessionArgsInput): string[] {
-  const { prompt, settingSources, maxTurns, model, readOnly, jsonSchema } = input;
+  const {
+    prompt,
+    settingSources,
+    maxTurns,
+    model,
+    readOnly,
+    jsonSchema,
+    mcpServers,
+    extraDisallowedTools,
+  } = input;
 
   const args: string[] = [
     "-p",
@@ -448,7 +475,7 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
     WORKER_SETTINGS,
     "--strict-mcp-config",
     "--mcp-config",
-    '{"mcpServers": {}}',
+    mcpServers ? JSON.stringify({ mcpServers }) : '{"mcpServers": {}}',
     "--max-turns",
     String(maxTurns),
     "--model",
@@ -473,7 +500,10 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
   // sandboxing. Tool names must be exact — an unknown one only logs "matches no known
   // tool" and is silently ignored (MultiEdit is not a real tool name here).
   if (readOnly) {
-    args.push("--disallowedTools", "Write,Edit,NotebookEdit");
+    args.push(
+      "--disallowedTools",
+      ["Write", "Edit", "NotebookEdit", ...(extraDisallowedTools ?? [])].join(","),
+    );
   }
 
   if (jsonSchema) {
@@ -504,6 +534,8 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     timeoutMs = 10 * 60 * 1000,
     settingSources = "project",
     readOnly = false,
+    mcpServers,
+    extraDisallowedTools,
     extraEnv,
     tool,
     validate,
@@ -574,6 +606,8 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     model,
     readOnly,
     jsonSchema,
+    mcpServers,
+    extraDisallowedTools,
   });
 
   // ANTHROPIC_API_KEY is deleted in both branches: it is rejected by claude v2.x
@@ -639,6 +673,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       jsonSchema: !!jsonSchema,
       settingSources,
       readOnly,
+      mcpServers: mcpServers ? Object.keys(mcpServers) : [],
       useBridge,
       backend,
       baseUrl: env.ANTHROPIC_BASE_URL,

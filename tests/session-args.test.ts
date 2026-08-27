@@ -45,10 +45,20 @@ describe("buildSessionArgs — the bounds", () => {
     }
   });
 
-  test("ignores every MCP server the repo might define", () => {
+  test("ignores every MCP server the repo might define, by default", () => {
     const a = args();
     expect(a).toContain("--strict-mcp-config");
     expect(valueOf(a, "--mcp-config")).toBe('{"mcpServers": {}}');
+  });
+
+  test("injects an explicit mcpServers set when the caller passes one", () => {
+    const a = args({
+      mcpServers: { hyperdx: { type: "http", url: "http://x/api/mcp", headers: {} } },
+    });
+    expect(a).toContain("--strict-mcp-config");
+    expect(JSON.parse(valueOf(a, "--mcp-config") ?? "{}")).toEqual({
+      mcpServers: { hyperdx: { type: "http", url: "http://x/api/mcp", headers: {} } },
+    });
   });
 
   test("read-only removes the editing tools by DISallowing them", () => {
@@ -57,6 +67,27 @@ describe("buildSessionArgs — the bounds", () => {
     // `--allowedTools` restricts nothing under --dangerously-skip-permissions; it was the
     // original, silently-broken spelling. It must never come back.
     expect(a).not.toContain("--allowedTools");
+  });
+
+  test("extraDisallowedTools appends to, never replaces, the base read-only list", () => {
+    const a = args({
+      readOnly: true,
+      extraDisallowedTools: [
+        "mcp__hyperdx__clickstack_save_dashboard",
+        "mcp__hyperdx__clickstack_delete_dashboard",
+      ],
+    });
+    expect(valueOf(a, "--disallowedTools")).toBe(
+      "Write,Edit,NotebookEdit,mcp__hyperdx__clickstack_save_dashboard,mcp__hyperdx__clickstack_delete_dashboard",
+    );
+  });
+
+  test("extraDisallowedTools is a no-op on a writable session", () => {
+    const a = args({
+      readOnly: false,
+      extraDisallowedTools: ["mcp__hyperdx__clickstack_save_dashboard"],
+    });
+    expect(a).not.toContain("--disallowedTools");
   });
 
   test("a writing session keeps the editing tools", () => {
