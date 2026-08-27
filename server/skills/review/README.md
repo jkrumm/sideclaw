@@ -26,7 +26,8 @@ Phase 2 — Angle Reviews (parallel claude-sonnet-5 sessions, capped at 3 in fli
 ├── Performance         ← router, if the diff has hot paths / scaling cost
 ├── Concurrency         ← router, if the diff has races / shared state / fan-out
 ├── Data & Migration    ← router, if the diff touches schema/migrations/data
-└── API Contract        ← router, if the diff changes public API shape
+├── API Contract        ← router, if the diff changes public API shape
+└── Resilience          ← router, if the diff touches crash/restart/deploy paths
 
 Phase 2b (parallel sidecar) — Adversary Critic
 └── Single non-agentic gpt-5.6-terra call via IU OpenAI transport — the only
@@ -44,6 +45,22 @@ adds content-driven angles that file types can't detect — it reads the diff on
 on claude-sonnet-5 and returns the extra angles it judges relevant. Total angles are
 capped at `MAX_ANGLES` (8); the floor is kept first, router extras fill the rest.
 
+The router prompt carries an **ISO/IEC 25010:2023 coverage checklist** — the nine quality
+characteristics mapped to the angle that owns each one. It is a prompt for the router's
+judgment, not a quota: its job is to stop routing collapsing into "security or nothing" by
+naming the dimensions (recoverability, installability, fail-safe defaults) that neither file
+extensions nor reviewer habit surface on their own.
+
+Use the 2023 names, not the widely-circulated Nov 2022 draft chart: that edition renamed
+_Usability_ → **Interaction capability** and _Portability_ → **Flexibility**, added **Safety**,
+and replaced _maturity_ with _faultlessness_ and _UI aesthetics_ with _user engagement_.
+
+**Known coverage gap:** Interaction capability routes to `frontend`, which is a _floor_ angle
+picked by file extension. A change that degrades user assistance, error messages or
+self-descriptiveness without touching `.tsx/.jsx/.css` — a CLI flag, an API error string, a log
+message — therefore has no reviewer that owns it. Adding a thirteenth angle for it is not
+obviously worth a worker slot on this repo's diffs; revisit if it starts costing findings.
+
 Pass an explicit `angles` array to force a fixed set and skip the router (useful
 when re-running a review). The baseline architect + senior-dev are always kept.
 
@@ -60,13 +77,14 @@ when re-running a review). The baseline architect + senior-dev are always kept.
 
 ### Router (content-driven, picked by `router.md` from the diff)
 
-| Agent            | Picked when the diff…                                                          |
-| ---------------- | ------------------------------------------------------------------------------ |
-| Security         | touches auth, secrets, crypto, input validation, injection, file/env handling  |
-| Performance      | adds hot paths, N+1 queries, unbounded work, scaling-sensitive rendering       |
-| Concurrency      | adds races, shared mutable state, `Promise.all` fan-out, retries/idempotency   |
-| Data & Migration | changes schema, migrations, ORM models, backfills, serialization formats       |
-| API Contract     | changes public API shape, request/response schema, versioning, error contracts |
+| Agent            | Picked when the diff…                                                            |
+| ---------------- | -------------------------------------------------------------------------------- |
+| Security         | touches auth, secrets, crypto, input validation, injection, file/env handling    |
+| Performance      | adds hot paths, N+1 queries, unbounded work, scaling-sensitive rendering         |
+| Concurrency      | adds races, shared mutable state, `Promise.all` fan-out, retries/idempotency     |
+| Data & Migration | changes schema, migrations, ORM models, backfills, serialization formats         |
+| API Contract     | changes public API shape, request/response schema, versioning, error contracts   |
+| Resilience       | touches persisted/in-flight state, cleanup, timeouts/retries, or the deploy path |
 
 External tools run in parallel with agents:
 
@@ -224,6 +242,7 @@ server/skills/review/
 ├── concurrency.md     ← concurrency angle prompt (router)
 ├── data-migration.md  ← data & migration angle prompt (router)
 ├── api-contract.md    ← API contract angle prompt (router)
+├── resilience.md      ← resilience & operability angle prompt (router)
 ├── adversary.md       ← adversary critic prompt (cross-family, IU OpenAI transport)
 └── synthesis.md       ← synthesis/classification prompt
 

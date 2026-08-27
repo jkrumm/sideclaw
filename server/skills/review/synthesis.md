@@ -71,7 +71,7 @@ is discarded. Do any reasoning first, then emit the JSON as your final message a
 ## Rules
 
 - `line` is optional — omit if not identifiable from the original finding
-- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `adversary`, `coderabbit`, `fallow`
+- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `resilience`, `adversary`, `coderabbit`, `fallow`
 - Preserve specificity from the original finding — don't generalize
 - Empty arrays are fine — not every review has blocking issues
 - Bias toward `improvement` over `discussion` — if the fix is obvious and low-risk, it's an improvement

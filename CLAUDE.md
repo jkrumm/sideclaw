@@ -319,7 +319,7 @@ Three things about the setup are load-bearing:
 The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel pipeline inside the HTTP server (see `server/skills/review/README.md` for full docs):
 
 1. **Data gathering** (parallel): git diff, fallow audit, CodeRabbit CLI
-2. **Angle reviews** (parallel claude-sonnet-5 sessions, capped at `ANGLE_CONCURRENCY=3` so the IU endpoint's rate limits aren't tripped): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist)
+2. **Angle reviews** (parallel claude-sonnet-5 sessions, capped at `ANGLE_CONCURRENCY=3` so the IU endpoint's rate limits aren't tripped): architect, senior-dev, + conditionally frontend (.tsx/.jsx), backend (api/server .ts), typescript (.ts), QA (if tests exist), plus router-picked content angles (security, performance, concurrency, data-migration, api-contract, resilience) — the router prompt carries an ISO 25010 coverage checklist so crash/deploy-path dimensions aren't missed
 3. **Synthesis** (claude-sonnet-5): deduplicates, classifies into `blocking` / `improvements` / `discussions` / `testGaps`
 
 Output `outcome`: `"clean"` (ship it), `"actionable"` (apply fixes), `"needs-human"` (has discussions).

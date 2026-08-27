@@ -103,7 +103,7 @@ export const REVIEW_INPUT = z.object({
     .array(z.string())
     .optional()
     .describe(
-      "Explicit reviewer angles to run, overriding the router. Valid: architect, senior-dev, frontend, backend, typescript, qa, security, performance, concurrency, data-migration, api-contract. Baseline architect + senior-dev are always included. Omit to let the router pick based on the diff.",
+      "Explicit reviewer angles to run, overriding the router. Valid: architect, senior-dev, frontend, backend, typescript, qa, security, performance, concurrency, data-migration, api-contract, resilience. Baseline architect + senior-dev are always included. Omit to let the router pick based on the diff.",
     ),
 });
 
@@ -118,7 +118,7 @@ const FINDING = z.object({
   angle: z
     .string()
     .describe(
-      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | adversary | coderabbit | fallow",
+      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | resilience | adversary | coderabbit | fallow",
     ),
 });
 
@@ -331,16 +331,17 @@ function selectAgents(changedFiles: string[], hasTestScript: boolean): AgentConf
 // ── Dynamic angle routing ────────────────────────────────────────────────────────
 
 // Router-only angles: content-driven reviewers that file extensions can't detect.
-const ROUTER_ANGLE_LABELS: Record<string, string> = {
+export const ROUTER_ANGLE_LABELS: Record<string, string> = {
   security: "Security Reviewer",
   performance: "Performance Reviewer",
   concurrency: "Concurrency Reviewer",
   "data-migration": "Data & Migration Reviewer",
   "api-contract": "API Contract Reviewer",
+  resilience: "Resilience Reviewer",
 };
 
 // Every angle the caller may request explicitly via the `angles` input.
-const ALL_ANGLE_LABELS: Record<string, string> = {
+export const ALL_ANGLE_LABELS: Record<string, string> = {
   architect: "Architect",
   "senior-dev": "Senior Dev",
   frontend: "Frontend Expert",

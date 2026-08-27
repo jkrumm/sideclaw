@@ -9,7 +9,7 @@ export function registerReviewTool(server: McpServer): void {
     tool: "review",
     inputSchema: REVIEW_INPUT.shape,
     annotations: { readOnlyHint: true, idempotentHint: false },
-    description: `Run a deep multi-angle code review (architect + senior-dev always, file-type reviewers auto-added, plus a triage router for security/performance/concurrency/data-migration/api-contract). Runs as a BACKGROUND JOB: returns a jobId immediately — it does NOT return the findings.
+    description: `Run a deep multi-angle code review (architect + senior-dev always, file-type reviewers auto-added, plus a triage router for security/performance/concurrency/data-migration/api-contract/resilience). Runs as a BACKGROUND JOB: returns a jobId immediately — it does NOT return the findings.
 
 WHEN TO CALL: before committing, before a PR, or when asked to review code quality.
 ASYNC: returns { jobId }. Call job_wait({ jobId }) to block until done and read the result, or job_status to poll. The result has \`outcome\` (check first: "clean" | "actionable" | "needs-human"), \`blocking\`, \`improvements\`, \`discussions\`, \`testGaps\`.
