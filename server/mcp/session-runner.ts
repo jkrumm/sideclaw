@@ -224,6 +224,11 @@ export interface SessionResult<T = unknown> {
    * emitted prose instead of JSON) instead of discarding minutes of work.
    */
   rawText?: string;
+  /** Total attempts made, including the first. 1 unless a transient transport
+   *  failure was retried — see `isRetryableSessionError`. */
+  attempts?: number;
+  /** True if an earlier attempt failed and was retried before this result. */
+  retried?: boolean;
 }
 
 /** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
@@ -522,9 +527,60 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
   return args;
 }
 
+// ── Retry policy ───────────────────────────────────────────────────────────────
+//
+// Moving a worker off Max onto the IU unified endpoint's gateway models means
+// intermittent 429/503 under burst — measured, plus one transient 502 that three
+// immediate retries cleared. A whole session launch (the `claude -p` subprocess) is
+// expensive to redo, so retrying is bounded and narrow: only transport-level
+// failures, and only before the worker has produced any output a retry could
+// duplicate or corrupt.
+
+/** Total attempts per session, including the first — at most 2 retries. */
+export const MAX_SESSION_ATTEMPTS = 3;
+
+const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+// Deliberately not "any 3-digit number" — that would false-positive on an unrelated
+// exit code or turn count sitting in the same error string. 400/401 are matched and
+// explicitly excluded rather than left to fall through, so a deterministic client
+// error can never retry by accident.
+const CONNECTION_ERROR_RE =
+  /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EHOSTUNREACH|fetch failed|socket hang up/i;
+
+/** Is this session-launch failure worth retrying? Transport-level only: HTTP
+ *  429/502/503/504 and connection-level errors are transient; everything else —
+ *  including 400/401 — is deterministic and a retry just burns turns and money.
+ *  Pure: no network, no process, so it is unit-testable on its own. */
+// The IU gateway re-wraps an upstream client error as its own 503 and puts the
+// real status in the text — a bad request comes back as
+// `503 [Requesty Global Anthropic API StatusCode: BadRequest]`. Matching the
+// leading 503 alone would therefore retry a deterministic failure twice for
+// nothing, so the wrapped status is checked first and wins.
+const WRAPPED_TERMINAL_RE = /StatusCode:\s*(?:BadRequest|Unauthorized|Forbidden|NotFound)/i;
+
+export function isRetryableSessionError(message: string): boolean {
+  if (WRAPPED_TERMINAL_RE.test(message)) return false;
+  const statusMatch = message.match(/\b(400|401|429|502|503|504)\b/);
+  if (statusMatch) return RETRYABLE_STATUS.has(Number(statusMatch[1]));
+  return CONNECTION_ERROR_RE.test(message);
+}
+
+/** Backoff delay (ms) before the retry following a failed attempt N (1-indexed).
+ *  1s, then 3s — the same exponential cadence iuFetch uses for transient IU errors. */
+export function retryBackoffMs(attempt: number): number {
+  return 1000 * 3 ** (attempt - 1);
+}
+
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
-export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<SessionResult<T>> {
+/** One session launch. Renamed out of `runSession` so the retry loop can wrap it —
+ *  `turnsRef` is populated as soon as the worker's first assistant turn streams back,
+ *  which is what lets the wrapper tell "failed before doing anything" from "failed
+ *  after it may have started writing files". */
+async function runSessionAttempt<T = unknown>(
+  opts: SessionOptions<T>,
+  turnsRef: { current: number },
+): Promise<SessionResult<T>> {
   const {
     cwd,
     prompt,
@@ -756,6 +812,7 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     switch (ev.type) {
       case "assistant": {
         turns++;
+        turnsRef.current = turns;
         const content = ev.message?.content ?? [];
         const toolUse = content.find((c) => c.type === "tool_use");
         if (toolUse) lastAction = describeTool(toolUse);
@@ -979,4 +1036,32 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     noOutput: true,
     rawText: lastAssistantText || undefined,
   };
+}
+
+/** Run a worker session, retrying a bounded number of times on a transient
+ *  transport failure. A retry only happens when both hold: `isRetryableSessionError`
+ *  matches the failure, and the worker never produced an assistant turn (so it
+ *  cannot have started writing files) — anything past that point is re-run at the
+ *  caller's own risk, not this one's. */
+export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<SessionResult<T>> {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    const turnsRef = { current: 0 };
+    const result = await runSessionAttempt(opts, turnsRef);
+    const isLastAttempt = attempt >= MAX_SESSION_ATTEMPTS;
+    const canRetry =
+      !result.ok &&
+      !isLastAttempt &&
+      turnsRef.current === 0 &&
+      isRetryableSessionError(result.error ?? "");
+    if (!canRetry) {
+      return { ...result, attempts: attempt, retried: attempt > 1 };
+    }
+    logger.warn(
+      { event: "session.retry", project: opts.cwd, attempt, error: result.error },
+      "session failed with a transient transport error before producing output — retrying",
+    );
+    await Bun.sleep(retryBackoffMs(attempt));
+  }
 }
