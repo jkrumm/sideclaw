@@ -14,14 +14,20 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
 
 // Worker sessions run on Claude via the IU unified endpoint's native Anthropic
 // transport (off Max, IU per-token) — the same recipe dotfiles' `ca`/`claude_iu`
-// use. This is the hot path for plain `claude-*` model ids. The LiteLLM bridge
-// (dotfiles litellm/), which translates Anthropic Messages → OpenAI chat/completions
-// against DeepSeek, is retained but dormant by default — it only engages when a
-// `DeepSeek*` or `*-eu` model id is passed (see `useBridge` below). For plain
-// `claude-*` ids, SIDECLAW_WORKER_BACKEND selects between IU (default) and Max
-// (inherited OAuth) — see `CONFIGURED_WORKER_BACKEND` below. A `session_env` line is written
-// per non-bridge session (see `writeSessionEnv`) so usage-tracker classifies
-// worker spend correctly (IU vs Max).
+// use. This is the hot path for every model id, Claude or not: the IU endpoint is
+// itself a multi-provider gateway (its error text names it "Requesty Global
+// Anthropic API" — see WRAPPED_TERMINAL_RE), so a `DeepSeek*` id resolves through
+// `getIuConfig()` exactly like a plain `claude-*` id. The LiteLLM bridge (dotfiles
+// litellm/), which translates Anthropic Messages → OpenAI chat/completions against
+// DeepSeek over Azure Spain, points at that same underlying gateway — it is
+// retained as an explicit, opt-in escape hatch (`SIDECLAW_WORKER_BACKEND=bridge`),
+// never a model-id-triggered default, because it buys nothing a direct IU call
+// doesn't already have: no prompt caching (every turn is a full uncached re-send),
+// no real cost visibility (it reports total_cost_usd as 0.0), and it can't serve
+// WebSearch/WebFetch. SIDECLAW_WORKER_BACKEND selects among IU (default), Max
+// (inherited OAuth), and bridge — see `CONFIGURED_WORKER_BACKEND` below. A
+// `session_env` line is written per non-bridge session (see `writeSessionEnv`) so
+// usage-tracker classifies worker spend correctly (IU vs Max).
 const BRIDGE_URL = process.env.SIDECLAW_BRIDGE_URL ?? "http://localhost:4000";
 // LiteLLM runs unauthenticated (localhost-bound), but claude requires a non-empty
 // auth token — send a static dummy the proxy ignores.
@@ -29,18 +35,29 @@ const BRIDGE_TOKEN = process.env.SIDECLAW_BRIDGE_TOKEN ?? "sk-litellm-master-key
 
 type Backend = "bridge" | "iu" | "max";
 
-/** Configured worker auth backend for plain `claude-*` model ids — the raw flag, not
- *  the effective per-session backend (a bridge-routed model id overrides it; see
- *  `backend` in runSession). "iu" (default) injects the IU key/base; "max" injects
- *  nothing so the CLI falls through to the inherited OAuth profile (the Max
- *  subscription). Read once at module load, so a flag flip requires `make reload`. */
-const CONFIGURED_WORKER_BACKEND: Exclude<Backend, "bridge"> =
-  process.env.SIDECLAW_WORKER_BACKEND === "max" ? "max" : "iu";
+/** Configured worker auth backend, for every model id — this is now the whole
+ *  selection (see `backend` in runSessionAttempt; there is no more per-model-id
+ *  override). "iu" (default) injects the IU key/base; "max" injects nothing so the
+ *  CLI falls through to the inherited OAuth profile (the Max subscription);
+ *  "bridge" is the explicit, opt-in escape hatch onto the local LiteLLM proxy. Read
+ *  once at module load, so a flag flip requires `make reload`. */
+const CONFIGURED_WORKER_BACKEND: Backend =
+  process.env.SIDECLAW_WORKER_BACKEND === "max"
+    ? "max"
+    : process.env.SIDECLAW_WORKER_BACKEND === "bridge"
+      ? "bridge"
+      : "iu";
 // Worker model tiers — single source of truth. Call sites import these instead of
-// hardcoding ids so a tier change is one edit. Both are plain `claude-*` ids, so
-// they skip the bridge and route via CONFIGURED_WORKER_BACKEND (IU or Max).
-export const WORKER_MODEL = "claude-sonnet-5[1m]"; // reasoning tier: review, otel, excalidraw
-export const CHECK_MODEL = "claude-haiku-4-5"; // fast/cheap tier: mechanical validation (check)
+// hardcoding ids so a tier change is one edit. Both route via CONFIGURED_WORKER_BACKEND
+// (IU by default, Max or bridge on the explicit env override).
+export const WORKER_MODEL = "claude-sonnet-5[1m]"; // reasoning tier: review, otel, excalidraw, dispatch
+// Fast/cheap tier: mechanical validation (check). check is latency-sensitive and its output
+// is a pass/fail + error lines, not judgment — the right place to pilot a cheaper model.
+// review/dispatch/otel/excalidraw-diagram stay on WORKER_MODEL: they're quality-sensitive
+// and there's no evidence yet that DeepSeek-V4-Flash matches claude-sonnet-5's judgment
+// there. Runs on this model are billed as IU tokens, not sunk Max quota — measured rates
+// (2026-08): $0.44/M input, $1.32/M output, $0.014/M cache-read.
+export const CHECK_MODEL = "DeepSeek-V4-Flash";
 const DEFAULT_MODEL = WORKER_MODEL;
 
 const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
@@ -109,9 +126,10 @@ function writeAttribution(record: Record<string, unknown>): void {
 export interface SessionOptions<T = unknown> {
   cwd: string;
   prompt: string;
-  /** Model id. Plain "claude-*" ids (e.g. "claude-sonnet-5[1m]", "claude-haiku-4-5")
-   * route via the IU native Anthropic transport. "DeepSeek-V4-Pro" | "DeepSeek-V4-Flash"
-   * | "*-eu" ids route through the (dormant-by-default) LiteLLM bridge — see `useBridge`. */
+  /** Model id, any provider — "claude-sonnet-5[1m]", "claude-haiku-4-5",
+   * "DeepSeek-V4-Flash", etc. All route via CONFIGURED_WORKER_BACKEND (IU by
+   * default; the LiteLLM bridge only engages when SIDECLAW_WORKER_BACKEND=bridge
+   * is set explicitly — see the module-level comment above). */
   model?: string;
   jsonSchema?: Record<string, unknown>;
   maxTurns?: number;
@@ -536,6 +554,19 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
 // failures, and only before the worker has produced any output a retry could
 // duplicate or corrupt.
 
+/** Effective backend for a model id.
+ *
+ *  `max` means "inject nothing and let the CLI fall through to the inherited
+ *  OAuth profile", which only ever serves Anthropic's own models. A non-Claude
+ *  id sent there is rejected outright, so the configured backend is overridden
+ *  to `iu` for those — this is what keeps `SIDECLAW_WORKER_BACKEND=max` (the
+ *  live setting) from breaking `check` the moment CHECK_MODEL stops being a
+ *  claude-* id. An explicit `bridge` is still honoured; it can serve them. */
+export function resolveBackend(model: string): Backend {
+  if (CONFIGURED_WORKER_BACKEND === "max" && !model.startsWith("claude")) return "iu";
+  return CONFIGURED_WORKER_BACKEND;
+}
+
 /** Total attempts per session, including the first — at most 2 retries. */
 export const MAX_SESSION_ATTEMPTS = 3;
 
@@ -600,13 +631,14 @@ async function runSessionAttempt<T = unknown>(
 
   const sessionUuid = randomUUID();
   const tsStart = new Date().toISOString();
-  // DeepSeek*/Kimi* and *-eu model ids route through the (dormant-by-default)
-  // LiteLLM bridge; plain "claude-*" ids route via IU or Max per the configured
-  // backend. Mirrors usage-tracker's isBridgeRouted(). The model id always wins for
-  // bridge routing — a DeepSeek id can't run on Max, so the flag never overrides it.
+  // The backend is now the same for every model id — see the module-level comment
+  // and CONFIGURED_WORKER_BACKEND above. A DeepSeek (or any other non-Claude) id no
+  // longer forces the LiteLLM bridge; it resolves through IU's native Anthropic
+  // transport exactly like a claude-* id, since IU is itself the multi-provider
+  // gateway the bridge only re-wraps. Bridge routing is opt-in
+  // (SIDECLAW_WORKER_BACKEND=bridge) rather than model-id-triggered.
   // Resolved before emitAttribution so nothing below depends on declaration order.
-  const useBridge = !model.startsWith("claude") || model.endsWith("-eu");
-  const backend: Backend = useBridge ? "bridge" : CONFIGURED_WORKER_BACKEND;
+  const backend: Backend = resolveBackend(model);
 
   const emitAttribution = (
     outcome: "ok" | "error" | "timeout",
@@ -625,7 +657,7 @@ async function runSessionAttempt<T = unknown>(
     });
   };
 
-  if (useBridge && !(await bridgeReachable())) {
+  if (backend === "bridge" && !(await bridgeReachable())) {
     logger.error(
       { event: "session.bridge_down", project: cwd, url: BRIDGE_URL },
       "LiteLLM bridge unreachable",
@@ -685,7 +717,12 @@ async function runSessionAttempt<T = unknown>(
     case "iu":
       // IU native Anthropic transport — same recipe as dotfiles' claude_iu(). Do not
       // set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS here; that was a bridge-only
-      // workaround and dropping it on the native path is the protocol-fidelity win.
+      // workaround for the OpenAI-translation layer 400ing on Anthropic beta
+      // headers, not something any particular model needs. It still doesn't apply
+      // now that non-Claude ids route here too: the beta headers are an Anthropic
+      // Messages-protocol detail the CLI sends regardless of which model it asks
+      // for, and the native transport (unlike the bridge's OpenAI round-trip)
+      // passes them straight through to IU's gateway unmodified.
       env.ANTHROPIC_BASE_URL = anthropicBase;
       env.ANTHROPIC_AUTH_TOKEN = iuKey;
       break;
@@ -730,7 +767,6 @@ async function runSessionAttempt<T = unknown>(
       settingSources,
       readOnly,
       mcpServers: mcpServers ? Object.keys(mcpServers) : [],
-      useBridge,
       backend,
       baseUrl: env.ANTHROPIC_BASE_URL,
     },
