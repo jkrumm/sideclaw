@@ -57,7 +57,7 @@ export const WORKER_MODEL = "claude-sonnet-5[1m]"; // reasoning tier: review, ot
 // and there's no evidence yet that DeepSeek-V4-Flash matches claude-sonnet-5's judgment
 // there. Runs on this model are billed as IU tokens, not sunk Max quota — measured rates
 // (2026-08): $0.44/M input, $1.32/M output, $0.014/M cache-read.
-export const CHECK_MODEL = "DeepSeek-V4-Flash";
+export const CHECK_MODEL = "claude-haiku-4-5";
 const DEFAULT_MODEL = WORKER_MODEL;
 
 const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
