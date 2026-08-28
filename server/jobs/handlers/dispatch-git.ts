@@ -28,8 +28,8 @@ import { appLogger as logger } from "../../logger.ts";
 //
 // It is NOT a claim that the session is incapable of reaching GitHub by itself. It has an
 // unrestricted `Bash` and this host has an ambient git credential helper plus a
-// promptless `secrets-run`; see GIT_DENY_CREDENTIALS_ENV below for what is and is not
-// contained, and docs/dispatch-bridge.md for the residual risk in full.
+// promptless `secrets-run`; see GIT_DENY_CREDENTIALS_ENV below — its own doc comment spells
+// out the residual risk in full ("WHAT THIS IS NOT").
 
 // ── Bounds ────────────────────────────────────────────────────────────────────
 
@@ -163,7 +163,7 @@ function worktreeRoot(): string {
  * raising the cost of an accident, not as containing an adversary.
  *
  * The guarantees that ARE structural live below, in `pushBranch` and `openPullRequest`, and
- * they constrain THE HANDLER — never the session. See docs/dispatch-bridge.md.
+ * they constrain THE HANDLER — never the session.
  *
  * Identity is supplied explicitly because nulling the global config also removes
  * `user.name`/`user.email`: a worker that decides to commit should succeed and produce a

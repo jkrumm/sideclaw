@@ -60,7 +60,7 @@ export const EXCALIDRAW_DIAGRAM_OUTPUT = z.object({
 
 export type ExcalidrawDiagramOutput = z.infer<typeof EXCALIDRAW_DIAGRAM_OUTPUT>;
 
-// ── Worker payload schema (what the bridge worker emits as its final JSON) ──────
+// ── Worker payload schema (what the worker emits as its final JSON) ─────────────
 
 const WORKER_OUTPUT = z.object({
   rationale: z

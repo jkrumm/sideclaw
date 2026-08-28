@@ -3,7 +3,11 @@
 // function rather than folded into it.
 
 import { describe, expect, test } from "bun:test";
-import { isRetryableSessionError, retryBackoffMs } from "../server/mcp/session-runner.ts";
+import {
+  isRetryableSessionError,
+  retryBackoffMs,
+  resolveBackend,
+} from "../server/mcp/session-runner.ts";
 
 describe("isRetryableSessionError", () => {
   test("retries known transient gateway statuses", () => {
@@ -46,5 +50,19 @@ describe("retryBackoffMs", () => {
     ).toBe(false);
     // A genuine gateway-side 503 with no wrapped client status still retries.
     expect(isRetryableSessionError("503 Service Unavailable")).toBe(true);
+  });
+});
+
+describe("resolveBackend", () => {
+  // SIDECLAW_WORKER_BACKEND is read once at module load, so these assert against
+  // the live setting rather than a simulated one. .env pins it to "max".
+  test("a non-Claude id is forced onto iu — max only serves Anthropic models", () => {
+    expect(resolveBackend("DeepSeek-V4-Flash")).toBe("iu");
+    expect(resolveBackend("glm-5.3-flash")).toBe("iu");
+  });
+
+  test("a claude-* id keeps the configured max backend", () => {
+    expect(resolveBackend("claude-sonnet-5[1m]")).toBe("max");
+    expect(resolveBackend("claude-haiku-4-5")).toBe("max");
   });
 });
