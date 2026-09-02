@@ -568,6 +568,27 @@ export function resolveBackend(model: string): Backend {
 }
 
 /** Total attempts per session, including the first — at most 2 retries. */
+/** Real context window per gateway (non-Claude) model id, mirroring `_CA_CTX` in
+ *  dotfiles' `config/zsh/claude.zsh` — keep the two in step. Claude Code only trusts
+ *  api.anthropic.com to self-report a window, so over any custom base URL it assumes
+ *  200k and auto-compacts there. This is a client-side budget, not a server limit:
+ *  set it HIGHER than the real window and a clean auto-compact becomes a hard API
+ *  rejection mid-session — which is why 1M is not a safe blanket default
+ *  (kimi-k2.7-code hard-caps at 262144). Anything absent falls back to 200k:
+ *  deliberately conservative, not measured. `modelpick`'s `bun run pick` measures
+ *  these; re-run it when adding a row. */
+const GATEWAY_CONTEXT_TOKENS: Record<string, number> = {
+  "glm-5.3-flash": 1_000_000, // measured — still accepted at a 1.1M probe ceiling
+  "DeepSeek-V4-Pro": 1_000_000, // documented (IU portal catalog), not yet probed
+  "DeepSeek-V4-Flash": 1_000_000, // measured — still accepted at a 1.1M probe ceiling
+  "kimi-k2.7-code": 262_144, // measured — the gateway names the number in its 400
+};
+const GATEWAY_CONTEXT_FALLBACK = 200_000;
+
+export function gatewayContextTokens(model: string): number {
+  return GATEWAY_CONTEXT_TOKENS[model] ?? GATEWAY_CONTEXT_FALLBACK;
+}
+
 export const MAX_SESSION_ATTEMPTS = 3;
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
@@ -698,12 +719,35 @@ async function runSessionAttempt<T = unknown>(
     extraDisallowedTools,
   });
 
-  // ANTHROPIC_API_KEY is deleted in both branches: it is rejected by claude v2.x
-  // ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (v !== undefined) env[k] = v;
   }
+  delete env.CLAUDE_SESSION_ID;
+  delete env.CLAUDE_PARENT_SESSION_ID;
+  env.CLAUDE_ENTRYPOINT = "worker";
+  // The worker env is copied from this process wholesale, so it carries whatever the
+  // LaunchAgent was started with — including live credentials the worker has no reason
+  // to hold. Scrub them BEFORE the switch below writes the session's own auth
+  // (`ANTHROPIC_AUTH_TOKEN` matches this regex) — a credential the switch sets must
+  // survive it. Measured 2026-08-31 with the scrub AFTER the switch: it deleted the
+  // just-written IU key, the CLI fell through to the inherited OAuth profile, and the
+  // worker died with "401 Unauthorized: Authorization parsing failed". Masked in
+  // production because SIDECLAW_WORKER_BACKEND=max serves every claude-* id via OAuth,
+  // so only a non-Claude model id walks the broken path.
+  //
+  // A worker that never sees a token cannot leak one. This matters most for `dispatch`,
+  // whose prompt is assembled from untrusted material — but it is the right default for
+  // every worker, so it lives here rather than in one handler. `Bash` is available to
+  // these sessions, so `env` is one command away. Tools that genuinely need a credential
+  // pass it explicitly via `extraEnv` (review does this for the research-gateway),
+  // applied after all of this and therefore still winning.
+  for (const key of Object.keys(env)) {
+    if (SENSITIVE_ENV_RE.test(key) && !ALWAYS_KEEP_ENV.has(key)) delete env[key];
+  }
+  // ANTHROPIC_API_KEY is deleted in every branch: it is rejected by claude v2.x
+  // ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
+  delete env.ANTHROPIC_API_KEY;
   // Exhaustive over Backend: a new variant must declare its own auth handling rather
   // than inheriting another branch's credentials by omission.
   switch (backend) {
@@ -738,22 +782,32 @@ async function runSessionAttempt<T = unknown>(
     default:
       backend satisfies never;
   }
-  delete env.ANTHROPIC_API_KEY;
-  delete env.CLAUDE_SESSION_ID;
-  delete env.CLAUDE_PARENT_SESSION_ID;
-  // The worker env is copied from this process wholesale, so it carries whatever the
-  // LaunchAgent was started with — including live credentials the worker has no reason
-  // to hold. Scrub them: a worker that never sees a token cannot leak one, and every
-  // tool that genuinely needs one passes it explicitly via `extraEnv` (review does this
-  // for the research-gateway), which is applied AFTER this and therefore still wins.
-  //
-  // This matters most for `dispatch`, whose prompt is assembled from untrusted material
-  // — but it is the right default for every worker, so it lives here rather than in one
-  // handler. `Bash` is available to these sessions, so `env` is one command away.
-  for (const key of Object.keys(env)) {
-    if (SENSITIVE_ENV_RE.test(key) && !ALWAYS_KEEP_ENV.has(key)) delete env[key];
+  // Gateway-tier env for non-Claude ids, mirroring dotfiles' `ca` gateway branch
+  // (config/zsh/claude.zsh). Three things a gateway id needs that a claude-* id does not:
+  //  - every ANTHROPIC_DEFAULT_* tier pinned to the SAME id, or a CLI-internal call
+  //    (title generation, compaction, a spawned subagent) asks the gateway for a
+  //    claude-* default it does not serve — measured 2026-08-31 as a hard
+  //    `[claude-code:unrecognized_model]` exit 1 on `generate_session_title` that
+  //    killed the whole session even though the main loop was fine;
+  //  - CLAUDE_CODE_MAX_CONTEXT_TOKENS matched to the model's real window via
+  //    GATEWAY_CONTEXT_TOKENS — Claude Code only trusts api.anthropic.com to
+  //    self-report a window, so a 1M gateway model otherwise budgets and
+  //    auto-compacts at 200k, and a blanket 1M would hard-reject on smaller models;
+  //  - API_TIMEOUT_MS raised — these models legitimately take minutes per turn
+  //    (glm-5.3-flash measured 280–737s per benchmark turn), and the default turns
+  //    slow-but-correct into a spurious timeout.
+  // Claude ids keep the inherited defaults: their `[1m]` window handling lives in the
+  // model id itself, and the CLI's own defaults resolve against served models.
+  if (!model.startsWith("claude")) {
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
+    env.ANTHROPIC_DEFAULT_FABLE_MODEL = model;
+    const ctx = String(gatewayContextTokens(model));
+    env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = ctx;
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = ctx;
+    env.API_TIMEOUT_MS = "3000000";
   }
-  env.CLAUDE_ENTRYPOINT = "worker";
   if (extraEnv) Object.assign(env, extraEnv);
 
   const startMs = performance.now();
