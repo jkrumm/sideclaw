@@ -217,7 +217,7 @@ logger.info({ event: "mcp.tool.start", tool: "check", project: cwd }, "check sta
 logger.info({ event: "mcp.tool.end", tool: "check", project: cwd, passed: true, durationMs: Math.round(performance.now() - startMs) }, "check done");
 ```
 
-Logs append to `/tmp/sideclaw.jsonl`. See `.claude/rules/logs.md` for full schema + query patterns.
+Logs append to `~/Library/Logs/sideclaw.jsonl`. See `.claude/rules/logs.md` for full schema + query patterns.
 Always include `event`, `tool`, `project` on tool start/end entries.
 
 ## Skill Prompts
