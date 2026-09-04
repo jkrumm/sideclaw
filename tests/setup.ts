@@ -6,7 +6,7 @@ import { tmpdir } from "os";
 import { join } from "path";
 
 // The suite imports the app logger transitively; without this every run appends to the
-// running server's own /tmp/sideclaw.jsonl.
+// running server's own ~/Library/Logs/sideclaw.jsonl.
 process.env.LOG_LEVEL ??= "silent";
 
 // Point the worktree root away from the real one for the entire run. `sweepStaleWorktrees`

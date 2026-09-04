@@ -12,7 +12,7 @@
     "format": "oxfmt src server tests --write",
     "format:check": "oxfmt src server tests --check",
     "start": "bun server/index.ts",
-    "logs:tail": "tail -f /tmp/sideclaw.jsonl | bunx pino-pretty"
+    "logs:tail": "tail -f ~/Library/Logs/sideclaw.jsonl | bunx pino-pretty"
   },
   "dependencies": {
     "@blueprintjs/core": "6.10.0",

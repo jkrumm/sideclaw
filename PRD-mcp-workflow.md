@@ -37,7 +37,7 @@ These patterns are codified in `.claude/rules/mcp-tools.md` and `.claude/rules/l
 - **Dual response**: Return both `content` (text summary) and `structuredContent` (typed JSON) from handlers.
 - **Tool descriptions**: Optimize for LLM comprehension — include WHEN TO CALL, READ-ONLY/SIDE EFFECTS, CWD meaning, and OUTPUT description.
 - **Session runner**: `server/mcp/session-runner.ts` handles all subprocess spawning. Pre-configured: env hygiene, strict MCP isolation (`--strict-mcp-config --mcp-config '{"mcpServers": {}}'`), `--setting-sources user,project`, no API key.
-- **Structured logging**: All events to `/tmp/sideclaw.jsonl` via pino. Every tool start/end logs `{ event, tool, project, durationMs, passed }`.
+- **Structured logging**: All events to `~/Library/Logs/sideclaw.jsonl` via pino. Every tool start/end logs `{ event, tool, project, durationMs, passed }`.
 - **No `console.log()`**: Corrupts MCP stdio. Use the project logger (`server/mcp/logger.ts`), never bare console calls.
 - **Skill prompts**: Loaded async from `server/skills/*.md` via `Bun.file(path).text()`. Separate from tool implementation.
 
