@@ -8,8 +8,14 @@ import {
   createWriteStream,
 } from "fs";
 import { createInterface } from "readline";
+import { homedir } from "os";
+import { join } from "path";
 
-export const LOG_FILE = "/tmp/sideclaw.jsonl";
+// ~/Library/Logs, never /tmp: macOS sweeps /tmp files untouched for 3+ days and a
+// long-lived process keeps writing into the unlinked inode with nothing reporting
+// it. Override with SIDECLAW_LOG_FILE (tests, scratch runs).
+export const LOG_FILE =
+  process.env.SIDECLAW_LOG_FILE ?? join(homedir(), "Library", "Logs", "sideclaw.jsonl");
 const MB = 1024 * 1024;
 
 export function createLogger(source: "app" | "mcp"): pino.Logger {

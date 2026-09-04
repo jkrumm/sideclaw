@@ -22,7 +22,7 @@ hooks (`server/lib/github-cache.ts`). Two layers:
 Cache keys are the fully resolved request URL (`octokit.request.endpoint()`),
 so per-repo isolation is enforced. Frontend polling (`GitPanel.tsx`) runs at
 30s and pauses while the tab is hidden. Observe via
-`jq 'select(.event | startswith("github.cache"))' /tmp/sideclaw.jsonl`.
+`jq 'select(.event | startswith("github.cache"))' ~/Library/Logs/sideclaw.jsonl`.
 
 ### Enabling the GitPanel
 
@@ -109,7 +109,7 @@ While a job runs, `job_status`/`job_wait` also expose live worker progress deriv
 
 Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart (in-flight jobs reconcile to `interrupted` on boot — `recover()`). A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't trip the IU unified endpoint's rate limits.
 
-Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
+Job lifecycle events log to `~/Library/Logs/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
@@ -327,7 +327,7 @@ Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fe
 - **`read_drawing`** — composite: rasterize+read the `.svg` AND deterministically parse the paired `.excalidraw` JSON (`server/lib/excalidraw.ts` — the structural ground truth: frames, bindings, groups), merged into one synthesis (`server/skills/read-drawing.md`). The dotfiles `/read-drawing` skill's `claude_iu` Haiku path is retired in favor of this.
 - **`generate_image` was retired 2026-07** — superseded by the `image-gen` gateway, which adds the contract validation and library/sidecar this tool never had.
 - **SVG rasterizer:** headless Chrome (`server/lib/chrome.ts` `findChrome`, shared with kiosk) — the only method that resolves web fonts faithfully without cropping. `resvg`/`rsvg-convert`/`qlmanage`/`svglib` all failed the bake-off.
-- **Telemetry:** these bypass `session-runner`, so nothing writes their usage to the normal attribution log. `recordIuUsage` appends an NDJSON line per call to `~/.local/share/usage-tracker/sideclaw-iu.jsonl` (override with `SIDECLAW_IU_USAGE_LOG`) plus `/tmp/sideclaw.jsonl` events. The usage-tracker's `sideclaw-iu` collector ingests that file (`server/routes/usage.ts` is only Max-quota %, not a token ledger).
+- **Telemetry:** these bypass `session-runner`, so nothing writes their usage to the normal attribution log. `recordIuUsage` appends an NDJSON line per call to `~/.local/share/usage-tracker/sideclaw-iu.jsonl` (override with `SIDECLAW_IU_USAGE_LOG`) plus `~/Library/Logs/sideclaw.jsonl` events. The usage-tracker's `sideclaw-iu` collector ingests that file (`server/routes/usage.ts` is only Max-quota %, not a token ledger).
 - **Reasoning tokens are derived, not reported.** The gateway returns only `prompt_tokens`/`completion_tokens`/`total_tokens` — no `completion_tokens_details` — and for Gemini the thinking spend sits *outside* `completion_tokens` (`total = prompt + candidates + thoughts`), billed at the output rate. `normalizeUsage` recovers it as `total - input - output`; the leftover is 0 for non-thinking models, so nothing is double-counted. It is not a rounding detail: a 133-token answer routinely hides ~3k thinking tokens, so dropping it understated cost several-fold. `IU_USAGE_SCHEMA` in `server/lib/iu-openai.ts` is the single source of truth for both `IuUsage` and every tool's `usage` output field — import it, don't re-declare the shape.
 
 ```bash
@@ -336,8 +336,8 @@ Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fe
 claude mcp add --scope user sideclaw -- bun run "$HOME/SourceRoot/sideclaw/server/mcp.ts"
 
 # Structured logs (both HTTP + MCP processes write here)
-tail -f /tmp/sideclaw.jsonl | jq .
-tail -f /tmp/sideclaw.jsonl | jq 'select(.source == "mcp")'
+tail -f ~/Library/Logs/sideclaw.jsonl | jq .
+tail -f ~/Library/Logs/sideclaw.jsonl | jq 'select(.source == "mcp")'
 ```
 
 Inner sessions spawned by MCP tools use `claude -p` routed via `session-runner.ts` (claude-sonnet-5 / claude-haiku-4-5): IU per-token billing by default, or the Max subscription when `SIDECLAW_WORKER_BACKEND=max`. See `.claude/rules/mcp-tools.md` for authoring conventions.

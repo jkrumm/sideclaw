@@ -1,4 +1,4 @@
-# sideclaw Structured Logs — /tmp/sideclaw.jsonl
+# sideclaw Structured Logs — ~/Library/Logs/sideclaw.jsonl
 
 NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and the MCP server
 (`source: "mcp"`) write to the same file. Level is a string (not a numeric code).
@@ -53,31 +53,31 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 
 ```bash
 # Live tail (pretty)
-tail -f /tmp/sideclaw.jsonl | jq .
+tail -f ~/Library/Logs/sideclaw.jsonl | jq .
 
 # MCP logs only
-tail -f /tmp/sideclaw.jsonl | jq 'select(.source == "mcp")'
+tail -f ~/Library/Logs/sideclaw.jsonl | jq 'select(.source == "mcp")'
 
 # All MCP tool results
-jq 'select(.event == "mcp.tool.end")' /tmp/sideclaw.jsonl
+jq 'select(.event == "mcp.tool.end")' ~/Library/Logs/sideclaw.jsonl
 
 # Failed tool runs
-jq 'select(.event == "mcp.tool.end" and .passed == false)' /tmp/sideclaw.jsonl
+jq 'select(.event == "mcp.tool.end" and .passed == false)' ~/Library/Logs/sideclaw.jsonl
 
 # Session cost by project
 jq -s 'group_by(.project) | map({project: .[0].project, totalCostUsd: [.[].costUsd // 0] | add, runs: length})' \
-  <(jq 'select(.event == "session.end")' /tmp/sideclaw.jsonl)
+  <(jq 'select(.event == "session.end")' ~/Library/Logs/sideclaw.jsonl)
 
 # Recent errors (last 50)
-jq 'select(.level == "error")' /tmp/sideclaw.jsonl | tail -50 | jq .
+jq 'select(.level == "error")' ~/Library/Logs/sideclaw.jsonl | tail -50 | jq .
 
 # Slow HTTP requests (>500ms)
-jq 'select(.event == "app.request" and .durationMs > 500)' /tmp/sideclaw.jsonl
+jq 'select(.event == "app.request" and .durationMs > 500)' ~/Library/Logs/sideclaw.jsonl
 
 # Model usage breakdown
 jq -s 'group_by(.model) | map({model: .[0].model, count: length})' \
-  <(jq 'select(.event == "session.end")' /tmp/sideclaw.jsonl)
+  <(jq 'select(.event == "session.end")' ~/Library/Logs/sideclaw.jsonl)
 
 # Today's entries
-jq --arg d "$(date -u +%Y-%m-%d)" 'select(.time | startswith($d))' /tmp/sideclaw.jsonl
+jq --arg d "$(date -u +%Y-%m-%d)" 'select(.time | startswith($d))' ~/Library/Logs/sideclaw.jsonl
 ```
