@@ -1,13 +1,10 @@
 import type { RepoInfo } from "../server/lib/repo-scanner";
-import type { QueueTask } from "../server/lib/parse-queue";
 import type { GitStatus, GitFile, GitCommit, Worktree } from "../server/lib/git";
-import type { CompletedTask } from "../server/lib/db";
 
-export type { RepoInfo, QueueTask, GitStatus, GitFile, GitCommit, Worktree, CompletedTask };
+export type { RepoInfo, GitStatus, GitFile, GitCommit, Worktree };
 
 export interface RepoData {
   repo: RepoInfo;
-  queue: QueueTask[];
   notes: string;
   notesModifiedAt: number;
 }

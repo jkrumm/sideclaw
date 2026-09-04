@@ -17,39 +17,24 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
 // use. This is the hot path for every model id, Claude or not: the IU endpoint is
 // itself a multi-provider gateway (its error text names it "Requesty Global
 // Anthropic API" — see WRAPPED_TERMINAL_RE), so a `DeepSeek*` id resolves through
-// `getIuConfig()` exactly like a plain `claude-*` id. The LiteLLM bridge (dotfiles
-// litellm/), which translates Anthropic Messages → OpenAI chat/completions against
-// DeepSeek over Azure Spain, points at that same underlying gateway — it is
-// retained as an explicit, opt-in escape hatch (`SIDECLAW_WORKER_BACKEND=bridge`),
-// never a model-id-triggered default, because it buys nothing a direct IU call
-// doesn't already have: no prompt caching (every turn is a full uncached re-send),
-// no real cost visibility (it reports total_cost_usd as 0.0), and it can't serve
-// WebSearch/WebFetch. SIDECLAW_WORKER_BACKEND selects among IU (default), Max
-// (inherited OAuth), and bridge — see `CONFIGURED_WORKER_BACKEND` below. A
-// `session_env` line is written per non-bridge session (see `writeSessionEnv`) so
-// usage-tracker classifies worker spend correctly (IU vs Max).
-const BRIDGE_URL = process.env.SIDECLAW_BRIDGE_URL ?? "http://localhost:4000";
-// LiteLLM runs unauthenticated (localhost-bound), but claude requires a non-empty
-// auth token — send a static dummy the proxy ignores.
-const BRIDGE_TOKEN = process.env.SIDECLAW_BRIDGE_TOKEN ?? "sk-litellm-master-key";
+// `getIuConfig()` exactly like a plain `claude-*` id. SIDECLAW_WORKER_BACKEND
+// selects between IU (default) and Max (inherited OAuth) — see
+// `CONFIGURED_WORKER_BACKEND` below. A `session_env` line is written per session
+// (see `writeSessionEnv`) so usage-tracker classifies worker spend correctly
+// (IU vs Max).
 
-type Backend = "bridge" | "iu" | "max";
+type Backend = "iu" | "max";
 
-/** Configured worker auth backend, for every model id — this is now the whole
- *  selection (see `backend` in runSessionAttempt; there is no more per-model-id
+/** Configured worker auth backend, for every model id — this is the whole
+ *  selection (see `backend` in runSessionAttempt; there is no per-model-id
  *  override). "iu" (default) injects the IU key/base; "max" injects nothing so the
- *  CLI falls through to the inherited OAuth profile (the Max subscription);
- *  "bridge" is the explicit, opt-in escape hatch onto the local LiteLLM proxy. Read
+ *  CLI falls through to the inherited OAuth profile (the Max subscription). Read
  *  once at module load, so a flag flip requires `make reload`. */
 const CONFIGURED_WORKER_BACKEND: Backend =
-  process.env.SIDECLAW_WORKER_BACKEND === "max"
-    ? "max"
-    : process.env.SIDECLAW_WORKER_BACKEND === "bridge"
-      ? "bridge"
-      : "iu";
+  process.env.SIDECLAW_WORKER_BACKEND === "max" ? "max" : "iu";
 // Worker model tiers — single source of truth. Call sites import these instead of
 // hardcoding ids so a tier change is one edit. Both route via CONFIGURED_WORKER_BACKEND
-// (IU by default, Max or bridge on the explicit env override).
+// (IU by default, Max on the explicit env override).
 export const WORKER_MODEL = "claude-sonnet-5[1m]"; // reasoning tier: review, otel, excalidraw, dispatch
 // Fast/cheap tier: mechanical validation (check). check is latency-sensitive and its output
 // is a pass/fail + error lines, not judgment — the right place to pilot a cheaper model.
@@ -71,8 +56,8 @@ const SENSITIVE_ENV_RE =
 
 /** Exempt from the scrub: the CLI's own auth path. On the `max` backend the inherited
  *  OAuth profile is how the worker authenticates at all, so scrubbing it would break
- *  every session rather than harden it. The `iu`/`bridge` backends set their own
- *  ANTHROPIC_* vars after this point regardless. */
+ *  every session rather than harden it. The `iu` backend sets its own ANTHROPIC_*
+ *  vars after this point regardless. */
 const ALWAYS_KEEP_ENV = new Set(["CLAUDE_CODE_OAUTH_TOKEN"]);
 
 /** Mirror dotfiles' SessionStart hook: record the worker's base_url keyed by its
@@ -100,9 +85,9 @@ function writeSessionEnv(sessionId: string, baseUrl: string | null): void {
 }
 
 // Per-session attribution log. Each runSession invocation appends one record
-// describing tool / cwd / time window — usage-tracker's litellm collector joins
-// individual bridge requests to it by ts ∈ [tsStart, tsEnd], so token rows get
-// tagged with which sideclaw tool (check/review/…) caused them.
+// describing tool / cwd / time window — usage-tracker joins individual worker
+// requests to it by ts ∈ [tsStart, tsEnd], so token rows get tagged with which
+// sideclaw tool (check/review/…) caused them.
 // Format: NDJSON, one record per session, written on completion.
 const ATTRIBUTION_LOG = join(
   homedir(),
@@ -128,17 +113,17 @@ export interface SessionOptions<T = unknown> {
   prompt: string;
   /** Model id, any provider — "claude-sonnet-5[1m]", "claude-haiku-4-5",
    * "DeepSeek-V4-Flash", etc. All route via CONFIGURED_WORKER_BACKEND (IU by
-   * default; the LiteLLM bridge only engages when SIDECLAW_WORKER_BACKEND=bridge
-   * is set explicitly — see the module-level comment above). */
+   * default; SIDECLAW_WORKER_BACKEND=max switches to the inherited OAuth
+   * profile — see the module-level comment above). */
   model?: string;
   jsonSchema?: Record<string, unknown>;
   maxTurns?: number;
   timeoutMs?: number;
   /**
    * `--setting-sources` value. Default "project" (repo CLAUDE.md only) keeps the
-   * uncached system prompt small — bridge calls lose prompt caching, so global
-   * rules are paid on every turn. Use "user,project" for tools that benefit from
-   * the global code-style/typescript rules (review).
+   * system prompt small — most one-shot workers don't need the global rule set.
+   * Use "user,project" for tools that benefit from the global code-style/typescript
+   * rules (review).
    */
   settingSources?: string;
   /**
@@ -174,7 +159,7 @@ export interface SessionOptions<T = unknown> {
   /**
    * Tool name for usage attribution — e.g. "check", "review".
    * Written to the sideclaw-sessions.jsonl attribution log so
-   * usage-tracker can tag bridge requests back to the sideclaw tool that caused
+   * usage-tracker can tag worker requests back to the sideclaw tool that caused
    * them. Optional but every job handler should set it.
    */
   tool?: string;
@@ -188,7 +173,7 @@ export interface SessionOptions<T = unknown> {
    */
   onActivity?: (progress: SessionProgress) => void;
   /**
-   * Optional output validator. Models over the bridge ignore `--json-schema` and
+   * Optional output validator. Some worker models ignore `--json-schema` and
    * emit prose-fenced JSON that `extractJson` casts WITHOUT type-checking, so
    * schema drift (e.g. a field of the wrong type) otherwise slips through to the
    * MCP `outputSchema` boundary and fails the call opaquely. When provided, the
@@ -269,7 +254,7 @@ interface ClaudeJsonEnvelope {
   structured_output?: unknown; // parsed JSON object when --json-schema is provided
   errors?: string[];
   session_id?: string;
-  total_cost_usd?: number; // unreliable through the bridge — see logSessionEnd
+  total_cost_usd?: number;
   num_turns?: number;
 }
 
@@ -418,20 +403,6 @@ function extractJson<T>(raw: string): T | undefined {
   return undefined;
 }
 
-// ── Bridge health ────────────────────────────────────────────────────────────
-
-/** Quick liveness probe so a down bridge produces a clear error, not an opaque claude failure. */
-async function bridgeReachable(): Promise<boolean> {
-  try {
-    const res = await fetch(`${BRIDGE_URL}/health/liveliness`, {
-      signal: AbortSignal.timeout(3000),
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
 // ── CLI argument vector ────────────────────────────────────────────────────────
 
 /**
@@ -561,7 +532,7 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
  *  id sent there is rejected outright, so the configured backend is overridden
  *  to `iu` for those — this is what keeps `SIDECLAW_WORKER_BACKEND=max` (the
  *  live setting) from breaking `check` the moment CHECK_MODEL stops being a
- *  claude-* id. An explicit `bridge` is still honoured; it can serve them. */
+ *  claude-* id. */
 export function resolveBackend(model: string): Backend {
   if (CONFIGURED_WORKER_BACKEND === "max" && !model.startsWith("claude")) return "iu";
   return CONFIGURED_WORKER_BACKEND;
@@ -652,12 +623,10 @@ async function runSessionAttempt<T = unknown>(
 
   const sessionUuid = randomUUID();
   const tsStart = new Date().toISOString();
-  // The backend is now the same for every model id — see the module-level comment
-  // and CONFIGURED_WORKER_BACKEND above. A DeepSeek (or any other non-Claude) id no
-  // longer forces the LiteLLM bridge; it resolves through IU's native Anthropic
-  // transport exactly like a claude-* id, since IU is itself the multi-provider
-  // gateway the bridge only re-wraps. Bridge routing is opt-in
-  // (SIDECLAW_WORKER_BACKEND=bridge) rather than model-id-triggered.
+  // The backend is the same for every model id — see the module-level comment and
+  // CONFIGURED_WORKER_BACKEND above. A DeepSeek (or any other non-Claude) id
+  // resolves through IU's native Anthropic transport exactly like a claude-* id,
+  // since IU is itself a multi-provider gateway.
   // Resolved before emitAttribution so nothing below depends on declaration order.
   const backend: Backend = resolveBackend(model);
 
@@ -677,18 +646,6 @@ async function runSessionAttempt<T = unknown>(
       ...extras,
     });
   };
-
-  if (backend === "bridge" && !(await bridgeReachable())) {
-    logger.error(
-      { event: "session.bridge_down", project: cwd, url: BRIDGE_URL },
-      "LiteLLM bridge unreachable",
-    );
-    emitAttribution("error", { reason: "bridge_down" });
-    return {
-      ok: false,
-      error: `LiteLLM bridge unreachable at ${BRIDGE_URL}. Run 'make litellm-restart' in dotfiles (see docs/deepseek-litellm-bridge.md).`,
-    };
-  }
 
   let anthropicBase = "";
   let iuKey = "";
@@ -751,22 +708,11 @@ async function runSessionAttempt<T = unknown>(
   // Exhaustive over Backend: a new variant must declare its own auth handling rather
   // than inheriting another branch's credentials by omission.
   switch (backend) {
-    case "bridge":
-      // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 is required or the IU gateway 400s
-      // on Anthropic beta headers when routed through the bridge.
-      env.ANTHROPIC_BASE_URL = BRIDGE_URL;
-      env.ANTHROPIC_AUTH_TOKEN = BRIDGE_TOKEN;
-      env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS = "1";
-      break;
     case "iu":
-      // IU native Anthropic transport — same recipe as dotfiles' claude_iu(). Do not
-      // set CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS here; that was a bridge-only
-      // workaround for the OpenAI-translation layer 400ing on Anthropic beta
-      // headers, not something any particular model needs. It still doesn't apply
-      // now that non-Claude ids route here too: the beta headers are an Anthropic
-      // Messages-protocol detail the CLI sends regardless of which model it asks
-      // for, and the native transport (unlike the bridge's OpenAI round-trip)
-      // passes them straight through to IU's gateway unmodified.
+      // IU native Anthropic transport — same recipe as dotfiles' claude_iu(). The
+      // beta headers are an Anthropic Messages-protocol detail the CLI sends
+      // regardless of which model it asks for, and the native transport passes
+      // them straight through to IU's gateway unmodified.
       env.ANTHROPIC_BASE_URL = anthropicBase;
       env.ANTHROPIC_AUTH_TOKEN = iuKey;
       break;
@@ -774,10 +720,9 @@ async function runSessionAttempt<T = unknown>(
       // Fall through to the inherited OAuth profile (the Max subscription). Delete
       // rather than skip — the parent env is copied wholesale above, so an inherited
       // ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN would silently shadow OAuth and push
-      // the worker back onto IU (or the bridge) despite the flag.
+      // the worker back onto IU despite the flag.
       delete env.ANTHROPIC_BASE_URL;
       delete env.ANTHROPIC_AUTH_TOKEN;
-      delete env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS;
       break;
     default:
       backend satisfies never;
@@ -869,18 +814,18 @@ async function runSessionAttempt<T = unknown>(
   let envelope: ClaudeJsonEnvelope | undefined;
   let turns = 0;
   let lastAction = "starting";
-  // Most recent non-empty assistant text. Bridge workers frequently end a
-  // session on a tool call, leaving the `result` envelope field empty even though
-  // it already emitted its JSON in an earlier text turn. We keep that text so the
+  // Most recent non-empty assistant text. Workers sometimes end a session on a
+  // tool call, leaving the `result` envelope field empty even though it already
+  // emitted its JSON in an earlier text turn. We keep that text so the
   // output-extraction fallback can recover it instead of failing the whole job.
   let lastAssistantText = "";
   // Worker's real transcript session id (from the stream's system/init event, not
-  // sideclaw's own `sessionUuid`). Used to tag the IU-native session_env sidecar
-  // so usage-tracker joins it to the right transcript.
+  // sideclaw's own `sessionUuid`). Used to tag the session_env sidecar so
+  // usage-tracker joins it to the right transcript.
   let workerSessionId: string | undefined;
   let sessionEnvWritten = false;
   const maybeWriteSessionEnv = () => {
-    if (backend === "bridge" || sessionEnvWritten || !workerSessionId) return;
+    if (sessionEnvWritten || !workerSessionId) return;
     // "max" writes an explicit null rather than skipping the line: both classify
     // as billing="max" downstream, but an explicit record is distinguishable from
     // a missing/rotated-out log entry (models.ts documents that ambiguity as a
@@ -1032,10 +977,8 @@ async function runSessionAttempt<T = unknown>(
     return { ok: false, error: errMsg };
   }
 
-  // total_cost_usd is unreliable when routed through the bridge (claude reads
-  // Anthropic usage fields the OpenAI→Anthropic translation does not populate;
-  // real spend there is visible in LiteLLM's logs instead). On the IU native
-  // Anthropic transport the envelope's cost/usage fields are populated normally.
+  // total_cost_usd is populated normally on both the IU native Anthropic transport
+  // and the Max/OAuth path.
   const logSessionEnd = () =>
     logger.info(
       {
@@ -1103,10 +1046,10 @@ async function runSessionAttempt<T = unknown>(
     };
   }
 
-  // Bridge fallback: the `result` field is routinely empty for bridge sessions that
-  // end on a tool call (the OpenAI→Anthropic translation drops the trailing text).
-  // Recover the JSON from the last assistant text message seen in the stream before
-  // declaring failure — this is the single most common false "no output" failure.
+  // Fallback: the `result` field is routinely empty for sessions that end on a
+  // tool call. Recover the JSON from the last assistant text message seen in the
+  // stream before declaring failure — this is the single most common false
+  // "no output" failure.
   if (lastAssistantText) {
     const recovered = extractJson<T>(lastAssistantText);
     if (recovered !== undefined) {

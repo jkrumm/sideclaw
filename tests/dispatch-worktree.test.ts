@@ -1,4 +1,4 @@
-// The structural half of the dispatch bridge: worktree isolation, the diff-refusal ladder and
+// The structural half of the dispatch tool: worktree isolation, the diff-refusal ladder and
 // the push. These are the bounds that hold "an unattended episode never merges, never pushes
 // to a default branch, never publishes a credential" — the file's own claim is that they are
 // properties of the handler rather than lines in a prompt, so they are tested against real git

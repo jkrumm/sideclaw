@@ -8,7 +8,7 @@ const HOME = process.env.HOME ?? homedir();
 const PERSONAL_REPOS_PATH = process.env.PERSONAL_REPOS_PATH ?? "";
 const PLUGIN_DIR = join(HOME, "SourceRoot/.claude");
 
-// Prefer standalone install over cmux-bundled; fall back to PATH resolution
+// Prefer the standalone install; fall back to PATH resolution
 const CLAUDE_BIN = existsSync(join(HOME, ".local/bin/claude"))
   ? join(HOME, ".local/bin/claude")
   : "claude";

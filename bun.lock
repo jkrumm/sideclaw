@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "cqueue",
+      "name": "sideclaw",
       "dependencies": {
         "@blueprintjs/core": "6.10.0",
         "@blueprintjs/icons": "6.7.0",

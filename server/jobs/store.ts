@@ -20,12 +20,11 @@ import {
 // jobs are reconciled to `interrupted` on boot since their worker subprocess
 // died with the previous process).
 //
-// A separate db file from sideclaw.db (server/lib/db.ts): that one DROPs its
-// table on every startup (ephemeral completed_tasks). Jobs must persist across
-// process restarts, so they get their own file and CREATE TABLE IF NOT EXISTS —
-// outside /tmp, since macOS's periodic daily cleanup sweeps files there
-// untouched for 3+ days, and WAL mode only bumps the base file's mtime on
-// checkpoint, not per-write. Both now live in ~/.local/share/sideclaw/.
+// Jobs must persist across process restarts, so they get CREATE TABLE IF NOT
+// EXISTS rather than a drop-and-recreate — outside /tmp, since macOS's periodic
+// daily cleanup sweeps files there untouched for 3+ days, and WAL mode only
+// bumps the base file's mtime on checkpoint, not per-write. Lives in
+// ~/.local/share/sideclaw/.
 
 const DB_PATH =
   process.env.SIDECLAW_JOBS_DB ?? join(homedir(), ".local", "share", "sideclaw", "jobs.db");

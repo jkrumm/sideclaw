@@ -123,7 +123,7 @@ export function RepoList() {
             sideclaw
           </NavbarHeading>
           <NavbarDivider />
-          <span style={{ opacity: 0.6, fontSize: 13 }}>Claude Code task queue dashboard</span>
+          <span style={{ opacity: 0.6, fontSize: 13 }}>Claude Code repo dashboard</span>
         </NavbarGroup>
         <NavbarGroup align={Alignment.END}>
           <UsageTags />
@@ -146,7 +146,7 @@ export function RepoList() {
           <NonIdealState
             icon="folder-open"
             title="No repos found"
-            description="Add sc-queue.md or sc-note.md to a repo to see it here."
+            description="Add sc-note.md to a repo to see it here."
           />
         ) : (
           repos.map((repo) => (
@@ -166,11 +166,6 @@ export function RepoList() {
                   {repo.name}
                 </span>
                 <Tag minimal>{workspaceLabel(repo.path)}</Tag>
-                {repo.hasQueue && (
-                  <Tag intent={Intent.PRIMARY} minimal>
-                    queue
-                  </Tag>
-                )}
                 {repo.hasNotes && <Tag minimal>notes</Tag>}
                 <Button
                   variant="minimal"
@@ -269,7 +264,7 @@ export function RepoList() {
           Remove <strong>{deleteTarget?.name}</strong> from sideclaw?
         </p>
         <p style={{ opacity: 0.7, fontSize: 13, marginBottom: 0 }}>
-          Deletes sc-queue.md and sc-note.md. The directory itself is not removed.
+          Deletes sc-note.md. The directory itself is not removed.
         </p>
       </Alert>
     </div>

@@ -8,7 +8,7 @@ export default defineConfig({
     allowedHosts: ['sideclaw.local'],
     watch: {
       // Ignore content files that change at runtime — not source code
-      ignored: ['**/sc-queue.md', '**/sc-note.md', '**/docs/diagrams/**'],
+      ignored: ['**/sc-note.md', '**/docs/diagrams/**'],
     },
     proxy: {
       '/api': {

@@ -7,17 +7,16 @@ import { logger } from "../mcp/logger.ts";
 // ── IU OpenAI transport ───────────────────────────────────────────────────────
 //
 // Direct, stateless HTTPS calls to the IU unified endpoint's OpenAI transport
-// (`/openai/v1/...`). These bypass the LiteLLM bridge and session-runner
-// entirely — they are plain fetches, billed IU per-token, zero Max quota.
+// (`/openai/v1/...`). These bypass session-runner entirely — they are plain
+// fetches, billed IU per-token, zero Max quota.
 //
-// Because they bypass the bridge, the usage-tracker's litellm collector never
-// sees them. `recordIuUsage()` mirrors the bridge's NDJSON shape into a separate
-// sink, which the usage-tracker's `sideclaw-iu` collector ingests.
+// Because they bypass session-runner, nothing writes their usage to the normal
+// sideclaw-sessions attribution log. `recordIuUsage()` writes a separate NDJSON
+// sink instead, which the usage-tracker's `sideclaw-iu` collector ingests.
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-// NDJSON usage sink. Matches the per-line shape the litellm collector reads, so a
-// usage-tracker `sideclaw-iu` collector can be a near-copy of the litellm one.
+// NDJSON usage sink consumed by the usage-tracker's `sideclaw-iu` collector.
 const USAGE_SINK =
   process.env.SIDECLAW_IU_USAGE_LOG ??
   join(homedir(), ".local", "share", "usage-tracker", "sideclaw-iu.jsonl");

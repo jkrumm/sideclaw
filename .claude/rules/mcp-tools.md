@@ -106,7 +106,7 @@ Treat verdict "pass" or "warn" as passed. Treat verdict "fail" as a failed step.
 All tools spawn inner `claude -p` sessions via `runSession()` from `server/mcp/session-runner.ts`.
 
 Key requirements (already handled by the runner):
-- **Workers select a backend three ways** (`type Backend = "bridge" | "iu" | "max"`), model id first: `DeepSeek*`/`*-eu` ids always route to the retained-but-dormant LiteLLM bridge (`:4000`, dummy token, `DISABLE_EXPERIMENTAL_BETAS=1`), which fails fast if `:4000` is down. Plain `claude-*` ids (default `claude-sonnet-5[1m]`; `check` uses `claude-haiku-4-5`) route per `SIDECLAW_WORKER_BACKEND` (`.env`, read once at module load — a flip needs `make reload`): `"iu"` (default) resolves the IU key/base via `getIuConfig()` and injects `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` (no `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` — bridge-only workaround); `"max"` deletes those vars (not skips — the parent env is copied wholesale, so an inherited value would shadow OAuth) so the CLI falls through to the inherited OAuth profile, i.e. the Max subscription. `ANTHROPIC_API_KEY` is always deleted regardless of backend. Non-bridge sessions write a `session_env` line to `~/.claude/logs/<date>.jsonl`: real `base_url` on `"iu"`, explicit `null` on `"max"` — usage-tracker's classifier reads `base_url` present → `iu`, `null`/missing → `max`.
+- **Workers select a backend two ways** (`type Backend = "iu" | "max"`), per `SIDECLAW_WORKER_BACKEND` (`.env`, read once at module load — a flip needs `make reload`): `"iu"` (default) resolves the IU key/base via `getIuConfig()` and injects `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` for every model id; `"max"` deletes those vars (not skips — the parent env is copied wholesale, so an inherited value would shadow OAuth) so the CLI falls through to the inherited OAuth profile, i.e. the Max subscription — a non-Claude model id is overridden back to `"iu"` regardless, since Max only ever serves Anthropic's own models. `ANTHROPIC_API_KEY` is always deleted regardless of backend. Every session writes a `session_env` line to `~/.claude/logs/<date>.jsonl`: real `base_url` on `"iu"`, explicit `null` on `"max"` — usage-tracker's classifier reads `base_url` present → `iu`, `null`/missing → `max`.
 - **Env ordering is load-bearing:** the credential scrub (`SENSITIVE_ENV_RE`) runs BEFORE the backend switch — `ANTHROPIC_AUTH_TOKEN` matches it, so a scrub placed after the switch deletes the just-injected IU key and the worker 401s (only visible for non-Claude ids while `.env` pins `max`). Non-Claude ids additionally get the gateway-tier env mirrored from dotfiles' `ca`: every `ANTHROPIC_DEFAULT_*_MODEL` pinned to the same id (else `generate_session_title` asks for a claude-* default the gateway doesn't serve → `unrecognized_model` exit 1), `CLAUDE_CODE_MAX_CONTEXT_TOKENS`/`AUTO_COMPACT_WINDOW` from the per-model `GATEWAY_CONTEXT_TOKENS` table (200k fallback — never a blanket 1M, kimi hard-caps at 262144), `API_TIMEOUT_MS` raised.
 - `--strict-mcp-config --mcp-config '{"mcpServers": {}}'` — prevents circular MCP (empty `{}` is invalid schema)
 - `--setting-sources` defaults to `project` (small system prompt); pass `settingSources: "user,project"` where global rules matter (`review`, `implement`)
@@ -114,16 +114,17 @@ Key requirements (already handled by the runner):
 - `extraEnv` merges extra vars into the worker (e.g. `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN` for `review` angle workers)
 - `WebSearch`/`WebFetch` are not wired into worker prompts — do web access via Bash (e.g. `curl` the research-gateway)
 - Delete `CLAUDE_SESSION_ID`, `CLAUDE_PARENT_SESSION_ID`, set `CLAUDE_ENTRYPOINT=worker`
-- `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used. `total_cost_usd` is populated on the IU native transport; through the (dormant) bridge it is unreliable — read real spend from LiteLLM logs there
+- `structured_output` field (not `result`) holds the parsed JSON when `--json-schema` is used. `total_cost_usd` is populated normally on both the IU native transport and the Max/OAuth path.
 
 ## Worker Output Reliability & Worker Discipline
 
-Hard-won lessons from the bridge worker model. They apply to **every** `runSession()`-based
-tool, not just the one that first hit them — design new tools with these baked in.
+Hard-won lessons from running worker sessions unattended. They apply to **every**
+`runSession()`-based tool, not just the one that first hit them — design new tools with these
+baked in.
 
-### 1. Worker output is bridge-fragile — never trust the envelope blindly
+### 1. Worker output can arrive malformed — never trust the envelope blindly
 
-Models over the bridge **ignore `--json-schema`** (so `structured_output` is always empty) and
+Some worker models **ignore `--json-schema`** (so `structured_output` is always empty) and
 routinely **end a session on a tool call**, which leaves the `result` envelope field empty even
 on `subtype: "success"`. The session looks like a hard failure (`"Session produced no output"`)
 while the work is actually complete. This is generic — it has hit `implement`, and will hit

@@ -6,7 +6,6 @@ export interface RepoInfo {
   name: string;
   path: string; // display path: "/SourceRoot/vps"
   containerPath: string; // host path: "/Users/.../SourceRoot/vps"
-  hasQueue: boolean;
   hasNotes: boolean;
 }
 
@@ -31,16 +30,14 @@ export function scanRepos(): RepoInfo[] {
         continue;
       }
 
-      const hasQueue = existsSync(join(repoPath, "sc-queue.md"));
       const hasNotes = existsSync(join(repoPath, "sc-note.md"));
 
-      if (!hasQueue && !hasNotes) continue;
+      if (!hasNotes) continue;
 
       repos.push({
         name: entry,
         path: toDisplayPath(repoPath),
         containerPath: repoPath,
-        hasQueue,
         hasNotes,
       });
     }

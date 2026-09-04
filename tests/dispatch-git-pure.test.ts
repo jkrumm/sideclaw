@@ -1,4 +1,4 @@
-// Pure-function bounds of the dispatch bridge: the secret scanner that decides whether text
+// Pure-function bounds of the dispatch tool: the secret scanner that decides whether text
 // may become a durable public artifact, the slug that becomes a git ref name, and the remote
 // parser that decides which GitHub repo an episode is allowed to talk to.
 //

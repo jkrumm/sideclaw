@@ -26,23 +26,13 @@ so per-repo isolation is enforced. Frontend polling (`GitPanel.tsx`) runs at
 
 ### Enabling the GitPanel
 
-Both git and queue surfaces are **off by default** — opt in per `.env`.
+The git surface is **off by default** — opt in per `.env`.
 
 Set `SIDECLAW_GIT_ENABLED=true` + `VITE_SIDECLAW_GIT_ENABLED=true` in `.env`
 to turn on the whole git surface — GitPanel renders, `/api/repo/git` and
 `/api/github` return live data, and `/api/actions/{chain,git}` are active.
 Left unset, the git surface stays off (`data: null`, actions return 503),
 which avoids GitHub rate-limit pressure.
-
-### Enabling the QueuePanel
-
-Set `SIDECLAW_QUEUE_ENABLED=true` + `VITE_SIDECLAW_QUEUE_ENABLED=true` in
-`.env` to turn on the whole queue surface — QueuePanel renders, `GET
-/api/queue` and `/api/completed-tasks` return live data, `PUT /api/queue`
-writes, `/api/repo` includes the queue, the SSE watcher tracks `sc-queue.md`,
-and repo init creates the file. Left unset, the queue surface stays off
-(empty arrays, `PUT` returns 503). Enable it when the task-queue workflow
-(Stop-hook injection from dotfiles) is in play.
 
 ## Running sideclaw
 
@@ -112,7 +102,7 @@ Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`
 The long tools (`check`/`review`/`dispatch`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
-2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`, separate from the ephemeral `~/.local/share/sideclaw/sideclaw.db`). Neither lives in `/tmp` — macOS's periodic cleanup sweeps files there untouched for 3+ days, and a long-running agent then writes into an unlinked inode. See `server/jobs/store.ts`.
+2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`). Not `/tmp` — macOS's periodic cleanup sweeps files there untouched for 3+ days, and a long-running agent then writes into an unlinked inode. See `server/jobs/store.ts`.
 3. The caller polls **`job_wait({ jobId })`** — a long-poll (~50s, heartbeated) that returns the result the moment the job finishes, or `stillRunning: true` to call again. `job_status` is a one-shot peek.
 
 While a job runs, `job_status`/`job_wait` also expose live worker progress derived from the worker's stream-json output: `turns`, `lastAction` (e.g. `"Edit store.ts"`), and **`idleMs`** — ms since the last worker event. `idleMs` is the wedge signal: it stays low while events flow and rises during a single long operation (e.g. a slow test run), so a *large and still-growing* `idleMs` means the session may be stuck — peek at `git status` rather than waiting indefinitely. The runner persists each snapshot via a `ProgressSink` threaded `store → executor → handler → runSession.onActivity`; `review` aggregates one shared liveness bump across its parallel angle sessions.
@@ -123,13 +113,11 @@ Job lifecycle events log to `/tmp/sideclaw.jsonl` (`job.create` / `job.start` / 
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
-### Worker model — backend selection: IU (default) / Max / bridge
+### Worker model — backend selection: IU (default) / Max
 
-Worker sessions run on **Claude via the IU unified endpoint's native Anthropic transport** by default (the same recipe dotfiles' `ca`/`claude_iu` use) — metered IU per-token billing, off Max. `session-runner.ts` selects the backend by model id: plain `claude-*` ids (default `claude-sonnet-5[1m]`, `check` uses `claude-haiku-4-5`) resolve the IU key/base via `getIuConfig()` and inject `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` directly — no `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` (that flag was a bridge-only workaround). Each IU-native session writes a `session_env` line to `~/.claude/logs/<date>.jsonl` (mirroring the dotfiles SessionStart hook) so usage-tracker classifies worker spend as IU, not Max.
+Worker sessions run on **Claude via the IU unified endpoint's native Anthropic transport** by default (the same recipe dotfiles' `ca`/`claude_iu` use) — metered IU per-token billing, off Max. `session-runner.ts` selects the backend by `SIDECLAW_WORKER_BACKEND`, for every model id: `"iu"` (default) resolves the IU key/base via `getIuConfig()` and injects `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` directly. Each IU-native session writes a `session_env` line to `~/.claude/logs/<date>.jsonl` (mirroring the dotfiles SessionStart hook) so usage-tracker classifies worker spend as IU, not Max.
 
-**`SIDECLAW_WORKER_BACKEND`** (`.env`, default `iu`) is a per-installation escape hatch onto the Max subscription: set it to `max` and plain `claude-*` worker sessions delete `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` instead of injecting the IU ones, so the CLI falls through to the inherited OAuth profile — Max subscription rate-limit budget, not metered API tokens. It only affects plain `claude-*` ids; `DeepSeek*`/`*-eu` ids always route to the bridge regardless of the flag. Read once at module load from `sideclaw/.env`, so flipping it requires **`make reload`** (not just a code edit) to take effect. On the `max` backend, `session_env` is still written but with an explicit `base_url: null` (not skipped) — usage-tracker's classifier (`models.ts`) reads `base_url` present → `iu`, `null`/missing → `max`, so this is how a Max-backend run gets attributed `billing="max"`.
-
-The **LiteLLM bridge** (`dotfiles/litellm/`, LaunchAgent on `:4000`, DeepSeek-V4-Pro/Flash via Azure Spain with failover to `claude-sonnet-4-6-eu`) is retained but off the hot path — it only engages when a `DeepSeek*` or `*-eu` model id is passed. Full background: `dotfiles/docs/deepseek-litellm-bridge.md`.
+**`SIDECLAW_WORKER_BACKEND`** (`.env`, default `iu`) is a per-installation escape hatch onto the Max subscription: set it to `max` and plain `claude-*` worker sessions delete `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` instead of injecting the IU ones, so the CLI falls through to the inherited OAuth profile — Max subscription rate-limit budget, not metered API tokens. A non-Claude model id is overridden back to `"iu"` regardless of the flag, since Max only ever serves Anthropic's own models. Read once at module load from `sideclaw/.env`, so flipping it requires **`make reload`** (not just a code edit) to take effect. On the `max` backend, `session_env` is still written but with an explicit `base_url: null` (not skipped) — usage-tracker's classifier (`models.ts`) reads `base_url` present → `iu`, `null`/missing → `max`, so this is how a Max-backend run gets attributed `billing="max"`.
 
 **Caveat:** `check`/`review`/`dispatch` run as jobs inside the launchd HTTP server, which loads `sideclaw/.env` via Bun — `SIDECLAW_WORKER_BACKEND` (like every other `SIDECLAW_*` var) applies reliably there. `otel` calls `runSession` directly in the MCP process (`server/mcp/tools/otel.ts`), which Bun starts with the *calling session's* cwd and may not pick up `sideclaw/.env` — for `otel`, the var would need to be exported in the environment instead. Pre-existing limitation, not specific to this flag.
 
@@ -331,7 +319,7 @@ Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fe
 
 ### Multimodal tools — direct IU OpenAI transport (synchronous)
 
-`read_image` and `read_drawing` are **not** bridge worker sessions and **not** async jobs. They are plain `fetch` calls to the IU unified endpoint's **OpenAI transport** (`/openai/v1/...`) — stateless, synchronous MCP tools (single call well under the 60s SDK timeout; a `mcpHeartbeat` in `session-runner.ts` keeps the client alive past 15s). Billed IU per-token, zero Max, zero bridge worker, no `session-runner` / `claude -p` / read-only allowlist.
+`read_image` and `read_drawing` are **not** `runSession()` worker sessions and **not** async jobs. They are plain `fetch` calls to the IU unified endpoint's **OpenAI transport** (`/openai/v1/...`) — stateless, synchronous MCP tools (single call well under the 60s SDK timeout; a `mcpHeartbeat` in `session-runner.ts` keeps the client alive past 15s). Billed IU per-token, zero Max, no `session-runner` / `claude -p` / read-only allowlist.
 
 - **Credentials** (`server/lib/iu-openai.ts`): IU key + base from Keychain (`claude-sdk-api-key`, `claude-sdk-base-url`) or `IU_API_KEY`/`IU_BASE_URL` env. The OpenAI base is derived by replacing the base's trailing `/anthropic` → `/openai/v1` (never hardcoded). `iuFetch` retries 503/429/5xx with backoff; fails fast on 410 (dead model — e.g. `dall-e-3`).
 - **Model (fixed, not a residency knob):** vision = `gemini-3.5-flash` (fast, strong on dense diagrams). Routes to a **non-EU vendor** — fine for git-committed/non-sensitive content, not PII.
@@ -339,7 +327,7 @@ Frontend agent loads react/tanstack rules; backend agent loads elysia rules + fe
 - **`read_drawing`** — composite: rasterize+read the `.svg` AND deterministically parse the paired `.excalidraw` JSON (`server/lib/excalidraw.ts` — the structural ground truth: frames, bindings, groups), merged into one synthesis (`server/skills/read-drawing.md`). The dotfiles `/read-drawing` skill's `claude_iu` Haiku path is retired in favor of this.
 - **`generate_image` was retired 2026-07** — superseded by the `image-gen` gateway, which adds the contract validation and library/sidecar this tool never had.
 - **SVG rasterizer:** headless Chrome (`server/lib/chrome.ts` `findChrome`, shared with kiosk) — the only method that resolves web fonts faithfully without cropping. `resvg`/`rsvg-convert`/`qlmanage`/`svglib` all failed the bake-off.
-- **Telemetry:** these bypass the LiteLLM bridge, so the usage-tracker's litellm collector never sees them. `recordIuUsage` appends an NDJSON line per call to `~/.local/share/usage-tracker/sideclaw-iu.jsonl` (litellm-collector-compatible shape; override with `SIDECLAW_IU_USAGE_LOG`) plus `/tmp/sideclaw.jsonl` events. The usage-tracker's `sideclaw-iu` collector ingests that file (`server/routes/usage.ts` is only Max-quota %, not a token ledger).
+- **Telemetry:** these bypass `session-runner`, so nothing writes their usage to the normal attribution log. `recordIuUsage` appends an NDJSON line per call to `~/.local/share/usage-tracker/sideclaw-iu.jsonl` (override with `SIDECLAW_IU_USAGE_LOG`) plus `/tmp/sideclaw.jsonl` events. The usage-tracker's `sideclaw-iu` collector ingests that file (`server/routes/usage.ts` is only Max-quota %, not a token ledger).
 - **Reasoning tokens are derived, not reported.** The gateway returns only `prompt_tokens`/`completion_tokens`/`total_tokens` — no `completion_tokens_details` — and for Gemini the thinking spend sits *outside* `completion_tokens` (`total = prompt + candidates + thoughts`), billed at the output rate. `normalizeUsage` recovers it as `total - input - output`; the leftover is 0 for non-thinking models, so nothing is double-counted. It is not a rounding detail: a 133-token answer routinely hides ~3k thinking tokens, so dropping it understated cost several-fold. `IU_USAGE_SCHEMA` in `server/lib/iu-openai.ts` is the single source of truth for both `IuUsage` and every tool's `usage` output field — import it, don't re-declare the shape.
 
 ```bash

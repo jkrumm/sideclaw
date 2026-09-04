@@ -30,7 +30,7 @@ body.bp6-dark {
   background-color: var(--bp-palette-dark-gray-1);
 }
 
-/* Section panel headers — QUEUE, NOTES etc */
+/* Section panel headers — NOTES etc */
 .section-label {
   font-family: var(--bp-typography-family-mono);
   font-size: var(--bp-typography-size-body-medium);

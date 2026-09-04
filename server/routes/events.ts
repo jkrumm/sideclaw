@@ -5,7 +5,6 @@ import { join } from "path";
 import { toContainerPath } from "../lib/workspace";
 import { subscribeDiagrams } from "../lib/diagram-bus";
 import { getNotesWriteSource } from "../lib/notes-bus";
-import { queueEnabled } from "../lib/feature-flags";
 
 // Stable identity for this process lifetime.
 // Clients compare this on reconnect — a change means the server restarted
@@ -24,11 +23,9 @@ export const eventsRoutes = new Elysia({ prefix: "/api" }).get(
     }
 
     const containerPath = toContainerPath(path);
-    const queuePath = join(containerPath, "sc-queue.md");
     const notesPath = join(containerPath, "sc-note.md");
 
     type PendingEvent =
-      | { file: "queue" }
       | { file: "notes"; sourceTabId?: string }
       | { file: "diagram"; name: string; modifiedAt: number }
       | { file: "ping" };
@@ -45,9 +42,6 @@ export const eventsRoutes = new Elysia({ prefix: "/api" }).get(
 
     const watchers: ReturnType<typeof watch>[] = [];
 
-    if (queueEnabled && existsSync(queuePath)) {
-      watchers.push(watch(queuePath, () => push({ file: "queue" })));
-    }
     if (existsSync(notesPath)) {
       watchers.push(
         watch(notesPath, () => {

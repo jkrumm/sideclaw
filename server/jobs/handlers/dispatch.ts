@@ -354,7 +354,7 @@ export function buildPrompt(
 
 /** Is this failure worth retrying and salvaging? Only a SERIALIZATION failure is: the
  *  session ran, produced something, and merely failed to shape it. Everything else — a
- *  timeout, a non-zero exit, an unreachable bridge, a missing result event — means the
+ *  timeout, a non-zero exit, an unreachable worker backend, a missing result event — means the
  *  episode produced nothing or never started, and for those a retry just doubles the wall
  *  clock before returning a "verdict" that describes an outage as if it were a finding about
  *  the repo. `runSession` marks the salvageable class with `noOutput`, which now covers the

@@ -3,11 +3,9 @@ import { staticPlugin } from "@elysiajs/static";
 import { existsSync, readFileSync } from "fs";
 import { appLogger as logger, cleanupLogFile } from "./logger.ts";
 import { reposRoutes } from "./routes/repos";
-import { queueRoutes } from "./routes/queue";
 import { notesRoutes } from "./routes/notes";
 import { eventsRoutes } from "./routes/events";
 import { markdownRoutes } from "./routes/markdown";
-import { completedRoutes } from "./routes/completed";
 import { usageRoutes } from "./routes/usage";
 import { githubRoutes } from "./routes/github";
 import { diagramsRoutes } from "./routes/diagrams";
@@ -58,11 +56,9 @@ const app = new Elysia()
   .get("/health", () => ({ ok: true }))
   .get("/api/build-id", () => ({ buildId: BUILD_ID }))
   .use(reposRoutes)
-  .use(queueRoutes)
   .use(notesRoutes)
   .use(eventsRoutes)
   .use(markdownRoutes)
-  .use(completedRoutes)
   .use(usageRoutes)
   .use(githubRoutes)
   .use(diagramsRoutes)

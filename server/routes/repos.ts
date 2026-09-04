@@ -3,10 +3,9 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { scanRepos } from "../lib/repo-scanner";
-import { parseQueue } from "../lib/parse-queue";
 import { getGitStatus } from "../lib/git";
 import { toContainerPath, toDisplayPath, WORKSPACES } from "../lib/workspace";
-import { gitEnabled, queueEnabled } from "../lib/feature-flags";
+import { gitEnabled } from "../lib/feature-flags";
 
 async function ensureFile(filePath: string): Promise<string> {
   if (!existsSync(filePath)) {
@@ -65,9 +64,6 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
       if (!existsSync(repoPath)) {
         await fs.mkdir(repoPath, { recursive: true });
       }
-      if (queueEnabled) {
-        await Bun.write(join(repoPath, "sc-queue.md"), "");
-      }
       await Bun.write(join(repoPath, "sc-note.md"), `# ${name} — Notes\n`);
       return { ok: true as const, data: { name, path: toDisplayPath(repoPath) } };
     },
@@ -84,9 +80,7 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
       set.status = 404;
       return { ok: false, error: "Repo not found" };
     }
-    const queuePath = join(containerPath, "sc-queue.md");
     const notesPath = join(containerPath, "sc-note.md");
-    if (existsSync(queuePath)) await fs.rm(queuePath);
     if (existsSync(notesPath)) await fs.rm(notesPath);
     return { ok: true };
   })
@@ -121,25 +115,20 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
     }
 
     const containerPath = toContainerPath(path);
-    const queuePath = join(containerPath, "sc-queue.md");
     const notesPath = join(containerPath, "sc-note.md");
 
-    const [queueRaw, notes, notesStat] = await Promise.all([
-      queueEnabled ? ensureFile(queuePath) : Promise.resolve(""),
+    const [notes, notesStat] = await Promise.all([
       ensureFile(notesPath),
       fs.stat(notesPath).catch(() => null),
     ]);
-
-    const queue = queueEnabled ? parseQueue(queueRaw) : [];
 
     const repo = {
       name: path.split("/").pop() ?? path,
       path,
       containerPath,
-      hasQueue: queueEnabled ? existsSync(queuePath) : false,
       hasNotes: existsSync(notesPath),
     };
 
     const notesModifiedAt = notesStat?.mtimeMs ?? 0;
-    return { ok: true, data: { repo, queue, notes, notesModifiedAt } };
+    return { ok: true, data: { repo, notes, notesModifiedAt } };
   });

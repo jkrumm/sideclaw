@@ -186,8 +186,8 @@ describe("isSalvageable", () => {
     { name: "timeout", r: { ok: false as const, error: "Session timed out after 480000ms" } },
     { name: "non-zero exit", r: { ok: false as const, error: "Session exited with code 1" } },
     {
-      name: "bridge down",
-      r: { ok: false as const, error: "LiteLLM bridge unreachable at http://127.0.0.1:4000" },
+      name: "worker backend unreachable",
+      r: { ok: false as const, error: "IU config unavailable: fetch failed" },
     },
     {
       name: "no result event",

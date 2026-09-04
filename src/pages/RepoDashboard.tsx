@@ -10,18 +10,15 @@ import {
 } from "@blueprintjs/core";
 import { GitPanel } from "../components/GitPanel";
 import { UsageTags } from "../components/UsageTags";
-import { QueuePanel } from "../components/QueuePanel";
 import { NotesPanel } from "../components/NotesPanel";
 import { DiagramPanel } from "../components/DiagramPanel";
 import { PanelSkeleton } from "../components/PanelSkeleton";
 import { useTheme } from "../main";
 import type { GitPanelHandle } from "../components/GitPanel";
-import type { QueuePanelHandle } from "../components/QueuePanel";
 import type { NotesPanelHandle } from "../components/NotesPanel";
 import type { GitStatus, RepoData } from "../types";
 
 const GIT_ENABLED = import.meta.env.VITE_SIDECLAW_GIT_ENABLED === "true";
-const QUEUE_ENABLED = import.meta.env.VITE_SIDECLAW_QUEUE_ENABLED === "true";
 
 async function fetchRepoData(path: string): Promise<RepoData> {
   const res = await fetch(`/api/repo?path=${encodeURIComponent(path)}`);
@@ -73,7 +70,6 @@ function RepoDashboardInner() {
   const [sseDisconnected, setSseDisconnected] = useState(false);
 
   const gitRef = useRef<GitPanelHandle>(null);
-  const queueRef = useRef<QueuePanelHandle>(null);
   const notesRef = useRef<NotesPanelHandle>(null);
   const evtSourceRef = useRef<EventSource | null>(null);
 
@@ -132,7 +128,6 @@ function RepoDashboardInner() {
           knownServerStart = data.serverStart;
         }
         // Refresh panels to catch any events missed during a disconnect gap
-        if (QUEUE_ENABLED) queueRef.current?.refresh();
         if (GIT_ENABLED) gitRef.current?.refresh();
         resetWatchdog(evtSource);
       });
@@ -142,12 +137,10 @@ function RepoDashboardInner() {
       evtSource.addEventListener("change", (e: MessageEvent) => {
         resetWatchdog(evtSource);
         const payload = JSON.parse(e.data as string) as {
-          file: "queue" | "notes" | "diagram";
+          file: "notes" | "diagram";
           sourceTabId?: string;
         };
-        if (payload.file === "queue") {
-          if (QUEUE_ENABLED) queueRef.current?.refresh();
-        } else if (payload.file === "notes") notesRef.current?.notifyExternal(payload.sourceTabId);
+        if (payload.file === "notes") notesRef.current?.notifyExternal(payload.sourceTabId);
       });
 
       evtSource.addEventListener("error", () => {
@@ -234,16 +227,6 @@ function RepoDashboardInner() {
         {GIT_ENABLED && (
           <Suspense fallback={<PanelSkeleton height={100} />}>
             <GitPanel key={repoPath} ref={gitRef} repoPath={repoPath} initialPromise={gitPromise} />
-          </Suspense>
-        )}
-        {QUEUE_ENABLED && (
-          <Suspense fallback={<PanelSkeleton height={160} />}>
-            <QueuePanel
-              key={repoPath}
-              ref={queueRef}
-              repoPath={repoPath}
-              initialPromise={repoPromise}
-            />
           </Suspense>
         )}
         <DiagramPanel repoPath={repoPath} />

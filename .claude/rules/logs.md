@@ -38,7 +38,7 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `session.end` | mcp | Session completed successfully (carries `costUsd`, `turns`, `durationMs`) |
 | `session.timeout` | mcp | Session hit timeout |
 | `session.error` | mcp | Session returned `is_error` or produced no output |
-| `session.recovered_output` | mcp/app | `result` field was empty; JSON recovered from the last assistant text (bridge dropped trailing text) |
+| `session.recovered_output` | mcp/app | `result` field was empty; JSON recovered from the last assistant text (worker ended on a tool call) |
 | `implement.git_recovery` | app | `implement` got no parseable report; result reconstructed from `git status` (carries `newlyChanged`) |
 | `github.cache.hit` | app | Octokit request served from cache (carries `kind: "soft" \| "304"`, `url`) |
 | `github.cache.miss` | app | Octokit response stored to cache (carries `url`, `status`) |
