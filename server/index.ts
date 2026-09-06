@@ -11,6 +11,7 @@ import { githubRoutes } from "./routes/github";
 import { diagramsRoutes } from "./routes/diagrams";
 import { actionsRoutes } from "./routes/actions";
 import { kioskRoute } from "./routes/kiosk";
+import { agentsRoutes } from "./routes/agents";
 import { sweepStaleWorktrees } from "./jobs/handlers/dispatch-git.ts";
 import { jobsRoutes } from "./routes/jobs";
 import { initJobStore } from "./jobs/store";
@@ -64,7 +65,8 @@ const app = new Elysia()
   .use(diagramsRoutes)
   .use(actionsRoutes)
   .use(kioskRoute)
-  .use(jobsRoutes);
+  .use(jobsRoutes)
+  .use(agentsRoutes);
 
 // Wire the async job system: register the executor and run startup recovery
 // (in-flight jobs from a previous process → interrupted; re-promote pending).

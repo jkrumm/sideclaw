@@ -155,6 +155,18 @@ export function listJobs(limit = 50): JobView[] {
   return rows.map((r) => toJobView(rowToRecord(r)));
 }
 
+/**
+ * Same query as `listJobs`, but returns the full `JobRecord` (including `params`) rather than
+ * the MCP-facing `JobView`, which drops it. Added for `server/lib/agents.ts`: the agent
+ * overview needs `params.cwd`/`params.tier` off dispatch jobs, which `JobView` has no field for.
+ */
+export function listJobRecords(limit = 50): JobRecord[] {
+  const rows = db
+    .query<JobRow, [number]>("SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?")
+    .all(limit);
+  return rows.map((r) => rowToRecord(r));
+}
+
 /** Snapshot of queue depth — for monitoring/logging. */
 export function queueStats(): { running: number; pending: number; max: number } {
   const pending =

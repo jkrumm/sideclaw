@@ -91,7 +91,7 @@ log show --last 2m --info | grep -A3 sideclaw-server.plist | grep effectiveItemD
 
 ## MCP Server
 
-sideclaw exposes workflow tools (`check`, `review`, `dispatch`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport.
+sideclaw exposes workflow tools (`check`, `review`, `dispatch`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport. `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP surface — see `### agents`.
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`; the actual execution logic + schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`.
 
@@ -110,6 +110,44 @@ While a job runs, `job_status`/`job_wait` also expose live worker progress deriv
 Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart (in-flight jobs reconcile to `interrupted` on boot — `recover()`). A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't trip the IU unified endpoint's rate limits.
 
 Job lifecycle events log to `~/Library/Logs/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
+
+### agents
+
+`GET /api/agents` and `GET /api/agents.txt` (`server/lib/agents.ts`, `server/routes/agents.ts`)
+are a **deterministic, read-only, no-LLM** snapshot of every Claude Code agent on this Mac
+mini, grouped by project — the single producer behind an agent overview rendered by Hermes, an
+Argo dashboard, a brain page and a herdr pane. Unlike `check`/`review`/`dispatch` it is plain
+synchronous HTTP, not a job: no queue, no worker session, answers in one request.
+
+- **Sources, merged by Claude sessionId:** `herdr agent list` (panes) + `herdr workspace list`
+  (workspace_id → project label), `claude agents --json` (Claude's own registry, including
+  `claude --bg` daemons with no herdr pane), and this server's own dispatch job store
+  (`listJobRecords`). A herdr pane and a `claude agents` entry sharing a sessionId collapse
+  into one entry; herdr's identity wins (source stays `"herdr"`), both raw statuses are kept.
+- **Per-agent `state`** (`needs_you > working > stale > idle > done > unknown`, see
+  `deriveState()`'s doc comment) is the only field consumers should branch on — `herdrStatus`/
+  `claudeStatus` are raw passthrough for debugging, not a second source of truth.
+  `SIDECLAW_AGENT_STALE_HOURS` (default 24) sets the stale threshold.
+  A dispatch job's own needs-human verdict is **not** distinguished into `needs_you` — that
+  signal isn't cheaply available without a tool-specific parse of `job.result`, so a dispatch
+  entry only ever resolves to working/done/unknown (noted, not fixed, in this pass).
+- **Session transcript reads are tail-only, progressively** (`readSessionTail` →
+  `readTranscriptTailFile`): transcripts reach 16 MB, so only the tail of
+  `~/.claude/projects/<encoded cwd>/<sessionId>.jsonl` is read (cwd encoded by replacing every
+  non-alphanumeric character with `-`), never the whole file — **512 KB, growing to 8 MB when
+  the tail lands inside an oversized line** (e.g. an extended-thinking signature blob larger
+  than the window, which otherwise pushes every parseable assistant/user line out of it).
+  A missing transcript yields nulls, never a thrown error. File **mtime is never used** as an
+  activity signal: Claude Code touches an idle session's transcript file (measured — a session
+  last active 2026-09-04 had today's mtime), so mtime tracks process residency, not the user.
+- **No MCP tool for this** — HTTP-only for now. A read-only MCP tool would cost every session a
+  deferred tool name for something no session needs to call itself; the intended callers are
+  external services polling over HTTP.
+- Binds on `0.0.0.0` like the rest of the LaunchAgent HTTP server, so **port 7705 must stay
+  ungranted in the tailnet ACL** — this endpoint carries no auth of its own.
+- Pure units (`encodeProjectDir`, `parseTranscriptTail`, `deriveState`, `mergeAgents`,
+  `renderText`) are covered by `tests/agents.test.ts` — no subprocess, no mocks, per repo
+  convention.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 

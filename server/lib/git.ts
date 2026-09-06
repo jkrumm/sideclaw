@@ -9,6 +9,9 @@ export interface GitCommit {
   subject: string;
   body: string;
   relativeTime: string;
+  /** ISO 8601 committer date (%cI) — added for consumers (server/lib/agents.ts) that need an
+   *  absolute timestamp rather than a human-relative string. */
+  committedAt: string;
 }
 
 export interface Worktree {
@@ -105,7 +108,8 @@ function parseCommits(output: string | null): GitCommit[] {
         sha: lines[0]?.trim() ?? "",
         subject: lines[1]?.trim() ?? "",
         relativeTime: lines[2]?.trim() ?? "",
-        body: lines.slice(3).join("\n").trim(),
+        committedAt: lines[3]?.trim() ?? "",
+        body: lines.slice(4).join("\n").trim(),
       };
     })
     .filter((c) => c.sha);
@@ -148,8 +152,8 @@ export async function getGitStatus(repoPath: string): Promise<GitStatus | null> 
   // Phase 2 — depend on phase 1 results, run in parallel
   const [aheadBehind, logOutput, masterLogOutput, distStr] = await Promise.all([
     g(["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]),
-    g(["log", `${mainBranch}..HEAD`, `--format=%h%n%s%n%ar%n%b%n${LOG_SEP}`, "--"]),
-    g(["log", mainBranch, "-n", "10", `--format=%h%n%s%n%ar%n%b%n${LOG_SEP}`, "--"]),
+    g(["log", `${mainBranch}..HEAD`, `--format=%h%n%s%n%ar%n%cI%n%b%n${LOG_SEP}`, "--"]),
+    g(["log", mainBranch, "-n", "10", `--format=%h%n%s%n%ar%n%cI%n%b%n${LOG_SEP}`, "--"]),
     lastTag ? g(["rev-list", `${lastTag}..HEAD`, "--count"]) : Promise.resolve(null),
   ]);
 
