@@ -166,7 +166,7 @@ synchronous HTTP, not a job: no queue, no worker session, answers in one request
 - **Argo push** (`server/lib/argo-push.ts`): after every completed `overview` job and every 10
   min, `POST ${ARGO_URL:-https://argo.jkrumm.com/api}/agents/overview` with the same JSON
   `GET /api/overview` returns (plus `machine: "mini"`, `generatedAt`), bearer from
-  `secrets-run read op://vps/argo/API_SECRET` (cached in memory; a failed resolve is not
+  `secrets-run read op://common/api/SECRET` (cached in memory; a failed resolve is not
   cached). Never fatal — one `app.argo_push` log line with `status`.
 - Pure units (`encodeProjectDir`, `parseTranscriptTail`, `deriveState`, `mergeAgents`,
   `renderText`) are covered by `tests/agents.test.ts` — no subprocess, no mocks, per repo

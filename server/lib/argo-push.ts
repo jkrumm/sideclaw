@@ -25,7 +25,7 @@ const PUSH_TIMEOUT_MS = 15_000;
 // line — a ref missing from the offline cache (until the next `make secrets-seed`) is one
 // fact, not a 144-line/day warn stream from the 10-minute timer.
 const SECRETS_RUN = join(homedir(), ".local", "bin", "secrets-run");
-const ARGO_SECRET_REF = "op://vps/argo/API_SECRET";
+const ARGO_SECRET_REF = "op://common/api/SECRET";
 
 let cachedSecret: string | undefined;
 let secretMissWarned = false;
