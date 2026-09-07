@@ -2,15 +2,11 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import {
-  runSession,
-  WORKER_MODEL,
-  zodValidator,
-  type SessionResult,
-} from "../../mcp/session-runner.ts";
+import { runSession, zodValidator, type SessionResult } from "../../mcp/session-runner.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
+import { routeFor } from "../../lib/routing.ts";
 import {
   commitCount,
   commitPendingWork,
@@ -479,7 +475,8 @@ export async function runDispatch(
         cwd: sessionCwd,
         prompt: p,
         tool: "dispatch",
-        model: model ?? WORKER_MODEL,
+        route: routeFor("dispatch"),
+        model,
         jsonSchema: z.toJSONSchema(WORKER_OUTPUT[tier]),
         maxTurns,
         timeoutMs: profile.timeoutMs,

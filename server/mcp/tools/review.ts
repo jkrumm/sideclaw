@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { REVIEW_INPUT } from "../../jobs/handlers/review.ts";
 import { registerJobSubmitTool } from "./_job-tool.ts";
+import { describeRoute, routeFor } from "../../lib/routing.ts";
 
 export function registerReviewTool(server: McpServer): void {
   registerJobSubmitTool(server, {
@@ -14,6 +15,7 @@ export function registerReviewTool(server: McpServer): void {
 WHEN TO CALL: before committing, before a PR, or when asked to review code quality.
 ASYNC: returns { jobId }. Call job_wait({ jobId }) to block until done and read the result, or job_status to poll. The result has \`outcome\` (check first: "clean" | "actionable" | "needs-human"), \`blocking\`, \`improvements\`, \`discussions\`, \`testGaps\`.
 READ-ONLY: never modifies files.
-CWD: absolute path of the repo to review. SCOPE: "uncommitted" (default) = working changes; "head" = last commit; a ref like "HEAD~3"/SHA = the range up to HEAD (last N commits); an explicit range like "main..HEAD" or a file path.`,
+CWD: absolute path of the repo to review. SCOPE: "uncommitted" (default) = working changes; "head" = last commit; a ref like "HEAD~3"/SHA = the range up to HEAD (last N commits); an explicit range like "main..HEAD" or a file path.
+MODEL: angles + synthesis ${describeRoute(routeFor("review"))}; adversary ${describeRoute(routeFor("adversary"))} — see GET /api/routing.`,
   });
 }

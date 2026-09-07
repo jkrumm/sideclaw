@@ -250,17 +250,17 @@ export interface VisionResult {
   usage?: IuUsage;
 }
 
-/** Single vision call: image (base64) + prompt → text. Default model
- * gemini-3.5-flash (fast, strong on dense diagrams). */
+/** Single vision call: image (base64) + prompt → text. `model` comes from the caller's
+ * route (server/lib/routing.ts) — no default here, so an env override cannot be bypassed. */
 export async function visionRead(opts: {
   imageBase64: string;
   mimeType?: string;
   prompt: string;
-  model?: string;
+  model: string;
   tool?: string;
   timeoutMs?: number;
 }): Promise<VisionResult> {
-  const model = opts.model ?? "gemini-3.5-flash";
+  const model = opts.model;
   const mimeType = opts.mimeType ?? "image/png";
   const t0 = performance.now();
 
@@ -313,8 +313,8 @@ export interface TextCompleteResult {
 
 /** Single non-agentic text completion via the IU OpenAI transport. Useful for
  * cross-family review/critique calls that don't need a `claude -p` agent loop:
- * one HTTPS call, one JSON response, billed IU per-token. Default model
- * gemini-3.5-flash. Pass `tool` to tag the usage-tracker row.
+ * one HTTPS call, one JSON response, billed IU per-token. `model` comes from the
+ * caller's route (server/lib/routing.ts). Pass `tool` to tag the usage-tracker row.
  *
  * `temperature` is omitted from the request unless explicitly passed. Reasoning
  * models (the gpt-5.x family) accept only the default (1) and reject any
@@ -330,14 +330,14 @@ export interface TextCompleteResult {
  * billing at its reasoning-tier rate. Set it explicitly to get what you pay for. */
 export async function textComplete(opts: {
   prompt: string;
-  model?: string;
+  model: string;
   tool?: string;
   temperature?: number;
   reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   maxTokens?: number;
   timeoutMs?: number;
 }): Promise<TextCompleteResult> {
-  const model = opts.model ?? "gemini-3.5-flash";
+  const model = opts.model;
   const t0 = performance.now();
 
   const body: Record<string, unknown> = {

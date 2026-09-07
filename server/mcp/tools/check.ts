@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { CHECK_INPUT } from "../../jobs/handlers/check.ts";
 import { registerJobSubmitTool } from "./_job-tool.ts";
+import { describeRoute, routeFor } from "../../lib/routing.ts";
 
 export function registerCheckTool(server: McpServer): void {
   registerJobSubmitTool(server, {
@@ -15,6 +16,7 @@ WHEN TO CALL: before committing, before a PR, or when validating code quality.
 FAST PATH: on non-Node repos, pass \`commands\` (e.g. ['.venv/bin/ruff check', '.venv/bin/pytest -q']) to run them verbatim and skip ecosystem discovery — avoids wasting wall-clock hunting for the runner.
 ASYNC: returns { jobId }. Then call job_wait({ jobId }) to block until it finishes and read the result, or job_status for a one-shot poll. The result object has \`passed\` (check first) and \`steps[n].errors\`.
 READ-ONLY: the underlying validation never modifies files.
-CWD: absolute path of the repo to validate — not necessarily this session's CWD.`,
+CWD: absolute path of the repo to validate — not necessarily this session's CWD.
+MODEL: ${describeRoute(routeFor("check"))} — see GET /api/routing.`,
   });
 }

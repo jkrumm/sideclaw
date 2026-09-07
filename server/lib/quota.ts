@@ -9,8 +9,10 @@ import { logger } from "../mcp/logger.ts";
 // first:
 //
 // 1. The statusline's own cache (`/tmp/claude_sl/usage_api.json`, written by
-//    dotfiles' `fetch_usage.py` every ~60s via LaunchAgent) — free, no network,
-//    no keychain touch. Only trusted while fresh.
+//    dotfiles' `fetch_usage.py` whenever an interactive Claude Code session renders
+//    its statusline — statusline-driven, NOT a LaunchAgent, so it goes stale the
+//    moment no interactive session is open) — free, no network, no keychain touch.
+//    Only trusted while fresh.
 // 2. The live `api.anthropic.com/api/oauth/usage` endpoint, using the same
 //    OAuth access token Claude Code itself keeps in the macOS Keychain. This is
 //    the same recipe `fetch_usage.py` uses. Rate-limited per-token (429 within a

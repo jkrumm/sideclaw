@@ -55,13 +55,36 @@ describe("retryBackoffMs", () => {
 });
 
 describe("resolveBackend", () => {
-  // resolveBackend is now async (it may read live Max quota — see
+  // resolveBackend is async (it may read live Max quota — see
   // tests/backend-select.test.ts for the full quota-fallback decision matrix via
-  // the pure chooseBackend). Only the non-claude short circuit is IO-free and
-  // deterministic enough to assert here; it never touches readMaxQuota.
+  // the pure chooseBackend). Only the IO-free short circuits are deterministic
+  // enough to assert here; none of them touch readMaxQuota.
   test("a non-Claude id is forced onto iu — max only serves Anthropic models, no quota lookup", async () => {
-    expect((await resolveBackend("DeepSeek-V4-Flash")).backend).toBe("iu");
-    expect((await resolveBackend("glm-5.3-flash")).backend).toBe("iu");
+    expect(
+      (await resolveBackend({ model: "DeepSeek-V4-Flash", backend: "max", fallback: null }))
+        .backend,
+    ).toBe("iu");
+    expect(
+      (await resolveBackend({ model: "glm-5.3-flash", backend: "max", fallback: null })).backend,
+    ).toBe("iu");
+  });
+
+  test("an iu-routed Claude id stays on iu with no quota lookup", async () => {
+    const r = await resolveBackend({
+      model: "claude-sonnet-5[1m]",
+      backend: "iu",
+      fallback: { backend: "max" },
+    });
+    expect(r).toEqual({ backend: "iu", reason: "ok" });
+  });
+
+  test("a max route with no iu fallback never consults quota", async () => {
+    const r = await resolveBackend({
+      model: "claude-sonnet-5[1m]",
+      backend: "max",
+      fallback: null,
+    });
+    expect(r).toEqual({ backend: "max", reason: "fallback-disabled" });
   });
 });
 
@@ -79,5 +102,166 @@ describe("gatewayContextTokens", () => {
 
   test("an unknown id falls back to the conservative 200k, never 1M", () => {
     expect(gatewayContextTokens("some-new-gateway-model")).toBe(200_000);
+  });
+});
+
+// ── planNextAttempt — the two fallback lanes + the transient retry, as one pure decision ──
+
+import { planNextAttempt, MAX_SESSION_ATTEMPTS } from "../server/mcp/session-runner.ts";
+
+describe("planNextAttempt", () => {
+  const base = {
+    attempt: 1,
+    noOutputYet: true,
+    usedFallback: false,
+    routeModel: "claude-sonnet-5[1m]",
+  };
+  const maxToIu = { backend: "iu" as const };
+  const iuToHaiku = { backend: "max" as const, model: "claude-haiku-4-5" };
+  const iuToSame = { backend: "max" as const };
+
+  test("a successful attempt returns, whatever the route", () => {
+    expect(
+      planNextAttempt({ ...base, result: { ok: true, backend: "iu" }, fallback: iuToHaiku }),
+    ).toEqual({ kind: "return" });
+  });
+
+  test("max + quota-flavoured failure before output → iu, same model", () => {
+    const plan = planNextAttempt({
+      ...base,
+      result: { ok: false, backend: "max", error: "You've hit your usage limit" },
+      fallback: maxToIu,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "iu", model: "claude-sonnet-5[1m]", reason: "rate-limited" },
+    });
+  });
+
+  test("the quota lane wins over the transient retry for a bare 429 on max", () => {
+    const plan = planNextAttempt({
+      ...base,
+      result: { ok: false, backend: "max", error: "429" },
+      fallback: maxToIu,
+    });
+    expect(plan.kind).toBe("fallback");
+  });
+
+  test("iu transport failure: one same-backend retry first, then max on the fixed fallback model", () => {
+    const result = { ok: false, backend: "iu" as const, error: "503 Service Unavailable" };
+    expect(planNextAttempt({ ...base, result, fallback: iuToHaiku })).toEqual({ kind: "retry" });
+    expect(planNextAttempt({ ...base, attempt: 2, result, fallback: iuToHaiku })).toEqual({
+      kind: "fallback",
+      forced: { backend: "max", model: "claude-haiku-4-5", reason: "iu-unavailable" },
+    });
+  });
+
+  test("a same-model fallback runs the route's own model on max", () => {
+    const plan = planNextAttempt({
+      ...base,
+      attempt: 2,
+      result: { ok: false, backend: "iu", error: "fetch failed: ECONNRESET" },
+      fallback: iuToSame,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "max", model: "claude-sonnet-5[1m]", reason: "iu-unavailable" },
+    });
+  });
+
+  test("missing IU credentials skip the same-backend retry — nothing to retry", () => {
+    const plan = planNextAttempt({
+      ...base,
+      result: { ok: false, backend: "iu", error: "IU key not found", iuConfigError: true },
+      fallback: iuToHaiku,
+    });
+    expect(plan.kind).toBe("fallback");
+    // …and with no fallback there is nothing to do but return: never a retry loop on a
+    // credential that will not appear between attempts.
+    expect(
+      planNextAttempt({
+        ...base,
+        result: { ok: false, backend: "iu", error: "x", iuConfigError: true },
+        fallback: null,
+      }),
+    ).toEqual({ kind: "return" });
+  });
+
+  test("a timeout with ZERO worker events on iu goes straight to max (the glm stall)", () => {
+    const plan = planNextAttempt({
+      ...base,
+      result: { ok: false, backend: "iu", error: "Session timed out after 240000ms" },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "max", model: "claude-haiku-4-5", reason: "iu-unavailable" },
+    });
+  });
+
+  test("a timeout AFTER output is neither retried nor switched by default — the work may be half done", () => {
+    const plan = planNextAttempt({
+      ...base,
+      noOutputYet: false,
+      result: { ok: false, backend: "iu", error: "Session timed out after 240000ms" },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  test("retryAfterOutput: a side-effect-free worker's timeout AFTER output still goes to max (the glm stall after 2 turns)", () => {
+    const plan = planNextAttempt({
+      ...base,
+      noOutputYet: false,
+      retryAfterOutput: true,
+      result: { ok: false, backend: "iu", error: "Session timed out after 240000ms" },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "max", model: "claude-haiku-4-5", reason: "iu-unavailable" },
+    });
+  });
+
+  test("retryAfterOutput widens ONLY the timeout lane — a transport error after output still returns", () => {
+    const plan = planNextAttempt({
+      ...base,
+      attempt: 2,
+      noOutputYet: false,
+      retryAfterOutput: true,
+      result: { ok: false, backend: "iu", error: "503 Service Unavailable" },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  test("MUTATION GUARD: a lane switch happens once — the fallback attempt's own failure returns", () => {
+    const plan = planNextAttempt({
+      ...base,
+      attempt: 2,
+      usedFallback: true,
+      result: { ok: false, backend: "max", error: "rate limit" },
+      fallback: maxToIu,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  test("no declared fallback → transient errors only ever retry the same backend", () => {
+    const result = { ok: false, backend: "iu" as const, error: "502 Bad Gateway" };
+    expect(planNextAttempt({ ...base, attempt: 2, result, fallback: null })).toEqual({
+      kind: "retry",
+    });
+    expect(
+      planNextAttempt({ ...base, attempt: MAX_SESSION_ATTEMPTS, result, fallback: null }),
+    ).toEqual({ kind: "return" });
+  });
+
+  test("a deterministic client error never retries or switches", () => {
+    const plan = planNextAttempt({
+      ...base,
+      result: { ok: false, backend: "iu", error: "401 Unauthorized" },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({ kind: "return" });
   });
 });

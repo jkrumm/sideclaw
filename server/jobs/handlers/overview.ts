@@ -3,7 +3,8 @@ import { join } from "path";
 import { existsSync } from "fs";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { CHECK_MODEL, runSession, zodValidator, type Backend } from "../../mcp/session-runner.ts";
+import { runSession, zodValidator, type Backend } from "../../mcp/session-runner.ts";
+import { describeRoute, routeFor, withModel } from "../../lib/routing.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
@@ -33,12 +34,10 @@ export const OVERVIEW_INPUT = z.object({
     .string()
     .optional()
     .describe(
-      `Override worker model. Default: "${CHECK_MODEL}" — the same cheap/fast tier "check" ` +
-        "uses, since this is triage classification over a prompt, not code judgment. Any " +
-        "model id (Claude or not) routes through the same worker backend as every other " +
-        "sideclaw job — the IU unified endpoint by default, or the Max subscription when " +
-        "SIDECLAW_WORKER_BACKEND=max; a non-Claude id still runs on the IU endpoint " +
-        "regardless of that flag.",
+      `Override worker model. Default route: ${describeRoute(routeFor("overview"))} — the same ` +
+        'cheap/fast tier "check" uses, since this is triage classification over a prompt, ' +
+        "not code judgment. A Claude id keeps the route's backend; a non-Claude id always " +
+        "runs on the IU endpoint (Max cannot serve it). Per-tool routing: GET /api/routing.",
     ),
   staleAfterHours: z
     .number()
@@ -94,9 +93,9 @@ export const OVERVIEW_OUTPUT = z.object({
     .optional()
     .describe(
       "Worker auth backend actually used for this run — 'iu' (IU unified endpoint) or 'max' " +
-        "(Max subscription). Surfaces the dynamic Max-quota fallback (session-runner.ts's " +
-        "chooseBackend): a run can land on 'iu' even with SIDECLAW_WORKER_BACKEND=max if Max " +
-        "quota was tight. Absent on results from before this field existed.",
+        `(Max subscription). Route: ${describeRoute(routeFor("overview"))}; a run lands on the ` +
+        "fallback lane when the primary stalls or is rate-limited (session-runner.ts). " +
+        "Per-tool routing: GET /api/routing. Absent on results from before this field existed.",
     ),
   snapshotGeneratedAt: z
     .number()
@@ -385,7 +384,8 @@ export async function runOverview(
   const skill = await loadSkillPrompt();
   const nonce = newFenceNonce();
   const prompt = buildPrompt(skill, snapshot, nonce);
-  const resolvedModel = model ?? CHECK_MODEL;
+  const route = withModel(routeFor("overview"), model);
+  const resolvedModel = route.model;
 
   const result = await runSession<OverviewWorkerOutput>({
     // No repo tools needed — every fact is already in the prompt. homedir() rather than the
@@ -394,11 +394,19 @@ export async function runOverview(
     prompt,
     tool: "overview",
     jsonSchema: OVERVIEW_WORKER_JSON_SCHEMA,
-    model: resolvedModel,
+    route,
     // Classification over a prompt, not an investigation: no discovery, no repo reads.
     maxTurns: 3,
-    timeoutMs: 120 * 1000,
+    // The gateway tier (glm-5.3-flash) is slow and erratic on this prompt — measured
+    // 2026-09-07: halves of the facts block took 34–149 s, the whole 10 KB prompt produced
+    // NO event in 480 s, and one run stalled after 2 assistant turns until the cap. Any
+    // timeout moves the job onto the route's fallback (Haiku on Max, session-runner.ts —
+    // `retryAfterOutput`, safe because this worker has no tools and no side effects), so
+    // this cap is the most a stalled gateway may cost before the fallback lane answers in
+    // ~60 s: ≈3 min end to end, instead of the 4 + 4 the earlier per-attempt cap allowed.
+    timeoutMs: 2 * 60 * 1000,
     readOnly: true,
+    retryAfterOutput: true,
     // Disallow every tool `readOnly` doesn't already remove — the worker must reason over the
     // prompt alone, never read a live file (the same transcripts it was already given, this
     // time ungated by the caps/fence above) or shell out.

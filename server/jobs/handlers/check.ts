@@ -1,7 +1,9 @@
 import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
-import { CHECK_MODEL, runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { routeFor } from "../../lib/routing.ts";
+import { appLogger as logger } from "../../logger.ts";
 import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
 
@@ -106,6 +108,17 @@ async function loadSkillPrompt(commands: string[] | undefined): Promise<string> 
   return template.replace("{{COMMANDS}}\n", "").replace("{{COMMANDS}}", "");
 }
 
+// Same one-shot salvage narrative/review have: the cheap tier occasionally answers the
+// output contract in prose ("All 3 steps passed!") with no structured_output, which
+// surfaces as `noOutput` after minutes of validators actually ran.
+const JSON_ONLY_RETRY = `
+
+────────────────────────────────────────────────────────
+RETRY — your previous response was REJECTED because it was not valid JSON matching the schema.
+Return ONLY the JSON object specified above. Your entire message must be a single JSON object
+(optionally wrapped in one \`\`\`json fence) — no preamble, no markdown headings, no commentary
+before or after. Emit it as your final message and stop.`;
+
 // ── Core ───────────────────────────────────────────────────────────────────────
 
 /** Run all available validation steps and return structured pass/fail. Throws on failure. */
@@ -118,20 +131,36 @@ export async function runCheck(
 
   const cmdCount = commands?.length ?? 0;
   const prompt = await loadSkillPrompt(commands);
-  const result = await runSession<CheckOutput>({
-    cwd,
-    prompt,
-    tool: "check",
-    jsonSchema: CHECK_JSON_SCHEMA,
-    model: CHECK_MODEL,
-    // Fast path needs only one Bash turn per command + the JSON turn — cap tight so
-    // a churny worker can't burn the discovery-sized budget it no longer needs.
-    maxTurns: cmdCount > 0 ? cmdCount + 6 : 30,
-    timeoutMs: 10 * 60 * 1000,
-    readOnly: true,
-    validate: zodValidator(CHECK_OUTPUT),
-    onActivity: onProgress,
-  });
+  const runWorker = (p: string) =>
+    runSession<CheckOutput>({
+      cwd,
+      prompt: p,
+      tool: "check",
+      jsonSchema: CHECK_JSON_SCHEMA,
+      route: routeFor("check"),
+      // Fast path needs only one Bash turn per command + the JSON turn — cap tight so
+      // a churny worker can't burn the discovery-sized budget it no longer needs.
+      maxTurns: cmdCount > 0 ? cmdCount + 6 : 30,
+      timeoutMs: 10 * 60 * 1000,
+      readOnly: true,
+      // Report-only worker (Write/Edit disallowed): a gateway stall after first output is
+      // still a stall, so any timeout may move onto the Haiku lane.
+      retryAfterOutput: true,
+      validate: zodValidator(CHECK_OUTPUT),
+      onActivity: onProgress,
+    });
+
+  let result = await runWorker(prompt);
+  // Only the prose-instead-of-JSON case is retried (`noOutput`): a timeout, non-zero exit
+  // or transport failure has already been through the runner's own retry policy and a
+  // second full validator run would just double the cost of a real outage.
+  if (!result.ok && result.noOutput) {
+    logger.warn(
+      { event: "check.retry", tool: "check", project: cwd, error: result.error },
+      "check output was not schema JSON — retrying once with JSON-only directive",
+    );
+    result = await runWorker(prompt + JSON_ONLY_RETRY);
+  }
 
   if (!result.ok || !result.data) {
     throw new Error(result.error ?? "check produced no result");

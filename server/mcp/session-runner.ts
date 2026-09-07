@@ -6,6 +6,13 @@ import { z } from "zod";
 import { logger } from "./logger.ts";
 import { getIuConfig } from "../lib/iu-openai.ts";
 import { readMaxQuota, type MaxQuota } from "../lib/quota.ts";
+import {
+  isClaudeModel,
+  withModel,
+  type Backend,
+  type RouteFallback,
+  type ToolRoute,
+} from "../lib/routing.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -13,32 +20,22 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
   ? join(homedir(), ".local/bin/claude")
   : "claude";
 
-// Worker sessions run on Claude via the IU unified endpoint's native Anthropic
-// transport (off Max, IU per-token) — the same recipe dotfiles' `ca`/`claude_iu`
-// use. This is the hot path for every model id, Claude or not: the IU endpoint is
-// itself a multi-provider gateway (its error text names it "Requesty Global
-// Anthropic API" — see WRAPPED_TERMINAL_RE), so a `DeepSeek*` id resolves through
-// `getIuConfig()` exactly like a plain `claude-*` id. SIDECLAW_WORKER_BACKEND
-// selects between IU (default) and Max (inherited OAuth) — see
-// `CONFIGURED_WORKER_BACKEND` below. A `session_env` line is written per session
-// (see `writeSessionEnv`) so usage-tracker classifies worker spend correctly
-// (IU vs Max).
+// Worker sessions run on either the IU unified endpoint's native Anthropic transport
+// (metered per token, off Max — the same recipe dotfiles' `ca`/`claude_iu` use; the
+// endpoint is itself a multi-provider gateway, its error text names it "Requesty Global
+// Anthropic API" — see WRAPPED_TERMINAL_RE — so a `glm-*` id resolves through
+// `getIuConfig()` exactly like a plain `claude-*` id) or the inherited Claude Code OAuth
+// profile (the Max subscription, Claude ids only). WHICH one a given tool uses, and where
+// it falls back to, is `server/lib/routing.ts`'s table — every caller passes
+// `route: routeFor("<tool>")`. A `session_env` line is written per session (see
+// `writeSessionEnv`) so usage-tracker classifies worker spend correctly (IU vs Max).
 
-export type Backend = "iu" | "max";
+export type { Backend } from "../lib/routing.ts";
 
-/** Configured worker auth backend, for every model id — this is the whole
- *  selection (see `backend` in runSessionAttempt; there is no per-model-id
- *  override). "iu" (default) injects the IU key/base; "max" injects nothing so the
- *  CLI falls through to the inherited OAuth profile (the Max subscription). Read
- *  once at module load, so a flag flip requires `make reload`. */
-const CONFIGURED_WORKER_BACKEND: Backend =
-  process.env.SIDECLAW_WORKER_BACKEND === "max" ? "max" : "iu";
-
-/** Dynamic-fallback escape hatch for `CONFIGURED_WORKER_BACKEND === "max"`: "iu"
- *  (default) lets `resolveBackend` fall a claude-* session off Max onto the IU
- *  endpoint once quota gets tight; "none" disables the check entirely (stay on
- *  Max no matter what — the pre-existing behavior). Read once at module load,
- *  like `CONFIGURED_WORKER_BACKEND` — a flip needs `make reload`. */
+/** Global kill switch for BOTH fallback directions (`max`→`iu` on quota, `iu`→`max`
+ *  on an IU transport failure): "iu" (default) keeps them on, "none" pins every
+ *  session to its route's primary backend. Read once at module load — a flip needs
+ *  `make reload`. */
 const WORKER_FALLBACK: "iu" | "none" =
   process.env.SIDECLAW_WORKER_FALLBACK === "none" ? "none" : "iu";
 
@@ -48,18 +45,6 @@ const MAX_QUOTA_CEILING = Number(process.env.SIDECLAW_MAX_QUOTA_CEILING ?? 90);
 /** Seven-day-window utilization percent (0-100) at or above which a `max`
  *  session falls back to `iu`. */
 const MAX_WEEKLY_CEILING = Number(process.env.SIDECLAW_MAX_WEEKLY_CEILING ?? 95);
-// Worker model tiers — single source of truth. Call sites import these instead of
-// hardcoding ids so a tier change is one edit. Both route via CONFIGURED_WORKER_BACKEND
-// (IU by default, Max on the explicit env override).
-export const WORKER_MODEL = "claude-sonnet-5[1m]"; // reasoning tier: review, otel, excalidraw, dispatch
-// Fast/cheap tier: mechanical validation (check). check is latency-sensitive and its output
-// is a pass/fail + error lines, not judgment — the right place to pilot a cheaper model.
-// review/dispatch/otel/excalidraw-diagram stay on WORKER_MODEL: they're quality-sensitive
-// and there's no evidence yet that DeepSeek-V4-Flash matches claude-sonnet-5's judgment
-// there. Runs on this model are billed as IU tokens, not sunk Max quota — measured rates
-// (2026-08): $0.44/M input, $1.32/M output, $0.014/M cache-read.
-export const CHECK_MODEL = "claude-haiku-4-5";
-const DEFAULT_MODEL = WORKER_MODEL;
 
 const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
 
@@ -82,7 +67,12 @@ const ALWAYS_KEEP_ENV = new Set(["CLAUDE_CODE_OAUTH_TOKEN"]);
  * (real base_url) and the "max" backend (explicit null — see the max branch below
  * for why null is written rather than skipped). Idempotent — safe if the hook also
  * fires. Never throws. */
-function writeSessionEnv(sessionId: string, baseUrl: string | null): void {
+function writeSessionEnv(
+  sessionId: string,
+  baseUrl: string | null,
+  model: string,
+  backend: Backend,
+): void {
   try {
     mkdirSync(CLAUDE_LOG_DIR, { recursive: true });
     const now = new Date().toISOString();
@@ -92,7 +82,7 @@ function writeSessionEnv(sessionId: string, baseUrl: string | null): void {
         src: "sideclaw",
         event: "session_env",
         level: "info",
-        data: { session: sessionId, base_url: baseUrl },
+        data: { session: sessionId, base_url: baseUrl, model, backend },
       }) + "\n";
     appendFileSync(join(CLAUDE_LOG_DIR, `${now.slice(0, 10)}.jsonl`), line);
   } catch {
@@ -127,10 +117,11 @@ function writeAttribution(record: Record<string, unknown>): void {
 export interface SessionOptions<T = unknown> {
   cwd: string;
   prompt: string;
-  /** Model id, any provider — "claude-sonnet-5[1m]", "claude-haiku-4-5",
-   * "DeepSeek-V4-Flash", etc. All route via CONFIGURED_WORKER_BACKEND (IU by
-   * default; SIDECLAW_WORKER_BACKEND=max switches to the inherited OAuth
-   * profile — see the module-level comment above). */
+  /** The tool's `{ model, backend, fallback }` from `routeFor()` in
+   *  `server/lib/routing.ts` — the only source of a worker's model and auth path. */
+  route: ToolRoute;
+  /** Per-call model override on top of `route.model` (a job's `model` param). Applied
+   *  via `withModel`: a gateway id forces the backend to `iu` since Max cannot serve it. */
   model?: string;
   jsonSchema?: Record<string, unknown>;
   maxTurns?: number;
@@ -154,6 +145,15 @@ export interface SessionOptions<T = unknown> {
    * feeds, so Write stayed available. See the flag construction below.
    */
   readOnly?: boolean;
+  /**
+   * Let a timeout AFTER first output still move onto the fallback lane. Default false:
+   * a worker that already produced turns may have half-done its work (dispatch,
+   * excalidraw), so only a silent timeout switches. Callers whose worker has no side
+   * effects (overview: every tool disallowed; check: report-only, Write/Edit disallowed)
+   * opt in — measured 2026-09-07, glm-5.3-flash produced 2 assistant turns on overview
+   * and then hung to the 240 s cap, and the job failed with no Haiku attempt.
+   */
+  retryAfterOutput?: boolean;
   /**
    * MCP servers to expose to the worker, in `claude --mcp-config`'s `mcpServers` shape
    * (e.g. `{ hyperdx: { type: "http", url, headers } }`). Merged under `--strict-mcp-config`,
@@ -253,6 +253,13 @@ export interface SessionResult<T = unknown> {
    *  auth path a given result came from (relevant once a quota fallback can
    *  switch mid-session-launch from "max" to "iu"). */
   backend?: Backend;
+  /** Model the attempt actually ran on — differs from the route's primary after a
+   *  fixed-model fallback (check's glm-5.3-flash → claude-haiku-4-5 on Max). */
+  model?: string;
+  /** The attempt never spawned a worker: IU credentials could not be resolved. The
+   *  reverse fallback treats this like an IU transport failure, without a same-backend
+   *  retry first (there is nothing to retry). */
+  iuConfigError?: boolean;
 }
 
 /** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
@@ -589,31 +596,32 @@ export function chooseBackend(input: ChooseBackendInput): ChooseBackendResult {
   return { backend: configured, reason: "ok" };
 }
 
-/** Effective backend for a model id, resolved once per session launch.
+/** Effective backend for a route, resolved once per session launch.
  *
  *  Reads live Max quota (network + Keychain) ONLY when it could actually change
- *  the answer: `CONFIGURED_WORKER_BACKEND === "max"` and `model` is a claude-*
- *  id — every other case is decided by `chooseBackend`'s cheap, I/O-free rules
- *  1/2 and short-circuits before touching `readMaxQuota()`. This is what keeps
- *  `check`/`review`/etc. on the `iu` backend, or an install with
- *  `SIDECLAW_WORKER_BACKEND=iu`, from paying a quota lookup on every session. */
+ *  the answer: the route's primary is `max`, its model is a claude-* id and it
+ *  declares an `iu` fallback — every other case is decided by `chooseBackend`'s
+ *  cheap, I/O-free rules 1/2 and short-circuits before touching `readMaxQuota()`.
+ *  This is what keeps an `iu`-routed tool (check, overview, narrative) from paying
+ *  a quota lookup on every session. */
 export async function resolveBackend(
-  model: string,
+  route: ToolRoute,
 ): Promise<ChooseBackendResult & { quota?: MaxQuota }> {
-  if (!model.startsWith("claude")) return { backend: "iu", reason: "non-claude-model" };
-  if (CONFIGURED_WORKER_BACKEND !== "max") {
-    return { backend: CONFIGURED_WORKER_BACKEND, reason: "ok" };
-  }
-  if (WORKER_FALLBACK === "none") return { backend: "max", reason: "fallback-disabled" };
+  const { model, backend, fallback } = route;
+  if (!isClaudeModel(model)) return { backend: "iu", reason: "non-claude-model" };
+  if (backend !== "max") return { backend, reason: "ok" };
+  const fallbackMode: "iu" | "none" =
+    WORKER_FALLBACK === "none" || fallback?.backend !== "iu" ? "none" : "iu";
+  if (fallbackMode === "none") return { backend: "max", reason: "fallback-disabled" };
 
   const quota = await readMaxQuota();
   const choice = chooseBackend({
-    configured: CONFIGURED_WORKER_BACKEND,
+    configured: "max",
     model,
     quota,
     ceilingFiveHour: MAX_QUOTA_CEILING,
     ceilingSevenDay: MAX_WEEKLY_CEILING,
-    fallback: WORKER_FALLBACK,
+    fallback: fallbackMode,
   });
   return { ...choice, quota };
 }
@@ -693,6 +701,36 @@ export function retryBackoffMs(attempt: number): number {
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
+/** Worker subprocesses alive in THIS process. The HTTP server's SIGTERM handler
+ *  (`server/index.ts`) reads the count to decide how long to wait, then terminates
+ *  what is left so a `make reload` never orphans a `claude -p` that keeps editing a
+ *  worktree the boot sweep is about to delete. */
+const activeProcs = new Set<ReturnType<typeof Bun.spawn>>();
+
+export function activeSessionCount(): number {
+  return activeProcs.size;
+}
+
+export function terminateActiveSessions(): number {
+  let n = 0;
+  for (const proc of activeProcs) {
+    if (proc.exitCode === null) {
+      proc.kill("SIGTERM");
+      n++;
+    }
+  }
+  return n;
+}
+
+/** A retry that skips `resolveBackend`: the loop already decided where the next
+ *  attempt goes. `rate-limited` is the `max`→`iu` quota lane, `iu-unavailable` the
+ *  reverse `iu`→`max` lane. */
+export interface ForcedAttempt {
+  backend: Backend;
+  model: string;
+  reason: "rate-limited" | "iu-unavailable";
+}
+
 /** One session launch. Renamed out of `runSession` so the retry loop can wrap it —
  *  `turnsRef` is populated as soon as the worker's first assistant turn streams back,
  *  which is what lets the wrapper tell "failed before doing anything" from "failed
@@ -700,16 +738,11 @@ export function retryBackoffMs(attempt: number): number {
 async function runSessionAttempt<T = unknown>(
   opts: SessionOptions<T>,
   turnsRef: { current: number },
-  /** Set by `runSession`'s reactive retry: skip `resolveBackend` entirely and
-   *  force this one attempt onto the given backend (a quota-flavored `max`
-   *  failure retrying once on `iu`). Logs `backend.fallback` instead of the
-   *  normal `backend.select`. */
-  forcedBackend?: Backend,
+  forced?: ForcedAttempt,
 ): Promise<SessionResult<T>> {
   const {
     cwd,
     prompt,
-    model = DEFAULT_MODEL,
     jsonSchema,
     maxTurns = 30,
     timeoutMs = 10 * 60 * 1000,
@@ -722,6 +755,8 @@ async function runSessionAttempt<T = unknown>(
     validate,
     onActivity,
   } = opts;
+  const route = withModel(opts.route, opts.model);
+  const model = forced?.model ?? route.model;
 
   const sessionUuid = randomUUID();
   const tsStart = new Date().toISOString();
@@ -729,14 +764,16 @@ async function runSessionAttempt<T = unknown>(
   // `chooseBackend`'s full rule set (model id, fallback flag, quota ceilings) —
   // see the module-level comment on `resolveBackend`/`chooseBackend` above. A
   // forced retry skips it outright: the caller already decided.
-  const resolved: ChooseBackendResult & { quota?: MaxQuota } = forcedBackend
-    ? { backend: forcedBackend, reason: "quota" }
-    : await resolveBackend(model);
+  const resolved: ChooseBackendResult & { quota?: MaxQuota } = forced
+    ? { backend: forced.backend, reason: "quota" }
+    : await resolveBackend(route);
   const backend: Backend = resolved.backend;
-  if (forcedBackend) {
+  if (forced) {
     logger.warn(
-      { event: "backend.fallback", tool, model, backend, reason: "rate-limited" },
-      "falling back to iu after a max-quota-flavored failure",
+      { event: "backend.fallback", tool, model, backend, reason: forced.reason },
+      forced.reason === "rate-limited"
+        ? "falling back to iu after a max-quota-flavored failure"
+        : "falling back to max — IU produced no output (transport failure, no credentials, or a silent timeout)",
     );
   } else {
     logger.info(
@@ -785,7 +822,7 @@ async function runSessionAttempt<T = unknown>(
         "IU config unavailable",
       );
       emitAttribution("error", { reason: "iu_config_error" });
-      return { ok: false, error: message, backend };
+      return { ok: false, error: message, backend, model, iuConfigError: true };
     }
   }
 
@@ -813,9 +850,9 @@ async function runSessionAttempt<T = unknown>(
   // (`ANTHROPIC_AUTH_TOKEN` matches this regex) — a credential the switch sets must
   // survive it. Measured 2026-08-31 with the scrub AFTER the switch: it deleted the
   // just-written IU key, the CLI fell through to the inherited OAuth profile, and the
-  // worker died with "401 Unauthorized: Authorization parsing failed". Masked in
-  // production because SIDECLAW_WORKER_BACKEND=max serves every claude-* id via OAuth,
-  // so only a non-Claude model id walks the broken path.
+  // worker died with "401 Unauthorized: Authorization parsing failed". Masked on a `max`
+  // route, which serves every claude-* id via OAuth, so only an `iu` route walks the
+  // broken path.
   //
   // A worker that never sees a token cannot leak one. This matters most for `dispatch`,
   // whose prompt is assembled from untrusted material — but it is the right default for
@@ -867,7 +904,7 @@ async function runSessionAttempt<T = unknown>(
   //    slow-but-correct into a spurious timeout.
   // Claude ids keep the inherited defaults: their `[1m]` window handling lives in the
   // model id itself, and the CLI's own defaults resolve against served models.
-  if (!model.startsWith("claude")) {
+  if (!isClaudeModel(model)) {
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
     env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
@@ -902,6 +939,8 @@ async function runSessionAttempt<T = unknown>(
     stderr: "pipe",
     env,
   });
+  activeProcs.add(proc);
+  void proc.exited.finally(() => activeProcs.delete(proc));
 
   // Progress heartbeat: keeps MCP client timeout alive during long-running sessions
   const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -954,7 +993,7 @@ async function runSessionAttempt<T = unknown>(
     // as billing="max" downstream, but an explicit record is distinguishable from
     // a missing/rotated-out log entry (models.ts documents that ambiguity as a
     // known silent-default-to-max weak point) and keeps the drift audit meaningful.
-    writeSessionEnv(workerSessionId, backend === "max" ? null : anthropicBase);
+    writeSessionEnv(workerSessionId, backend === "max" ? null : anthropicBase, model, backend);
     sessionEnvWritten = true;
   };
   const emitActivity = () => {
@@ -1052,8 +1091,21 @@ async function runSessionAttempt<T = unknown>(
   if (heartbeatHandle !== null) clearInterval(heartbeatHandle);
   const stderrTrimmed = stderr.trim();
 
+  // A failed worker's stderr is the post-mortem — at debug it was invisible in the
+  // default log pass and every "why did check die at 03:00" ended in a shrug.
   if (stderrTrimmed) {
-    logger.debug({ stderr: stderrTrimmed.slice(0, 1000) }, "session stderr");
+    const failed = timedOut || exitCode !== 0 || !envelope || envelope.is_error === true;
+    const fields = {
+      event: "session.stderr",
+      tool,
+      project: cwd,
+      model,
+      backend,
+      exitCode,
+      stderr: stderrTrimmed.slice(0, failed ? 4000 : 1000),
+    };
+    if (failed) logger.warn(fields, "session stderr (failed worker)");
+    else logger.debug(fields, "session stderr");
   }
 
   logger.debug({ exitCode, timedOut, turns, lastAction }, "session stream done");
@@ -1062,7 +1114,7 @@ async function runSessionAttempt<T = unknown>(
 
   if (timedOut) {
     emitAttribution("timeout", { durationMs, turns });
-    return { ok: false, error: `Session timed out after ${timeoutMs}ms`, backend };
+    return { ok: false, error: `Session timed out after ${timeoutMs}ms`, backend, model };
   }
 
   if (exitCode !== 0) {
@@ -1071,13 +1123,14 @@ async function runSessionAttempt<T = unknown>(
       ok: false,
       error: `Session exited with code ${exitCode}${stderrTrimmed ? `. stderr: ${stderrTrimmed}` : ""}`,
       backend,
+      model,
     };
   }
 
   if (!envelope) {
     logger.error({ event: "session.error", project: cwd }, "no result event in stream");
     emitAttribution("error", { durationMs, turns, reason: "no_envelope" });
-    return { ok: false, error: "Session ended without a result event", backend };
+    return { ok: false, error: "Session ended without a result event", backend, model };
   }
 
   logger.debug(
@@ -1099,7 +1152,7 @@ async function runSessionAttempt<T = unknown>(
       "session is_error",
     );
     emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
-    return { ok: false, error: errMsg, backend };
+    return { ok: false, error: errMsg, backend, model };
   }
 
   // total_cost_usd is populated normally on both the IU native Anthropic transport
@@ -1136,15 +1189,15 @@ async function runSessionAttempt<T = unknown>(
         // long run has real material to preserve. Returning a bare error here was silently
         // discarding it on what is, for a strict schema, the LIKELIEST failure path.
         const asText = typeof value === "string" ? value : safeStringify(value);
-        return { ok: false, error: v.error, noOutput: true, rawText: asText, backend };
+        return { ok: false, error: v.error, noOutput: true, rawText: asText, backend, model };
       }
       logSessionEnd();
       emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
-      return { ok: true, data: v.value, backend };
+      return { ok: true, data: v.value, backend, model };
     }
     logSessionEnd();
     emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
-    return { ok: true, data: value, backend };
+    return { ok: true, data: value, backend, model };
   };
 
   // --json-schema puts the parsed object in structured_output; fall back to result string
@@ -1170,6 +1223,7 @@ async function runSessionAttempt<T = unknown>(
       noOutput: true,
       rawText: raw,
       backend,
+      model,
     };
   }
 
@@ -1196,6 +1250,7 @@ async function runSessionAttempt<T = unknown>(
     noOutput: true,
     rawText: lastAssistantText || undefined,
     backend,
+    model,
   };
 }
 
@@ -1205,41 +1260,133 @@ async function runSessionAttempt<T = unknown>(
  *  cannot have started writing files) — anything past that point is re-run at the
  *  caller's own risk, not this one's.
  *
- *  A second, narrower retry sits ahead of that one: an attempt that ran on `max`,
- *  produced no output yet, and failed with text `isQuotaError` recognizes (Max
- *  quota/rate-limit exhaustion, not a generic transport blip) forces exactly one
- *  retry onto `iu` instead of re-trying the same exhausted backend. It takes
- *  precedence over the transient-transport retry (same failure would otherwise
- *  also match a bare "429" in `isRetryableSessionError`) and never re-triggers —
- *  `usedQuotaFallback` latches after the first switch, so a quota-flavored
- *  failure on the fallback `iu` attempt itself is not retried again. */
+ *  Two narrower, once-only lane switches sit ahead of that retry, both gated on the
+ *  route's declared `fallback` (and the global `SIDECLAW_WORKER_FALLBACK=none` off
+ *  switch) and both latched by `usedFallback` so a failure on the fallback attempt
+ *  itself is never switched again:
+ *
+ *  - `max` → `iu`: an attempt that ran on `max`, produced no output yet, and failed
+ *    with text `isQuotaError` recognizes (Max quota/rate-limit exhaustion, not a
+ *    generic transport blip) forces the next attempt onto `iu`, same model. Takes
+ *    precedence over the transient retry (the same failure would otherwise also match
+ *    a bare "429" in `isRetryableSessionError`).
+ *  - `iu` → `max`: an attempt that ran on `iu` and failed with a transport error
+ *    before producing output is first retried once on `iu` (a single 503 is the common
+ *    case and should not spend Max quota); if THAT fails the same way, the next attempt
+ *    runs on `max` — on `fallback.model` when the route names one (check/overview:
+ *    glm-5.3-flash cannot run on Max, so Haiku does), else the same model. Missing IU
+ *    credentials (`iuConfigError`) skip the same-backend retry: nothing to retry. This
+ *    is what keeps "IU down, Max fine" from being a dead lane. */
+// ── Retry / fallback decision (pure) ──────────────────────────────────────────
+
+/** What `planNextAttempt` needs from a finished attempt — the subset of `SessionResult`
+ *  the decision reads, so tests can build one without a session. */
+export interface AttemptOutcome {
+  ok: boolean;
+  error?: string;
+  backend?: Backend;
+  iuConfigError?: boolean;
+}
+
+export interface NextAttemptInput {
+  result: AttemptOutcome;
+  /** 1-based index of the attempt that just finished. */
+  attempt: number;
+  /** The worker produced no assistant turn — the only state a retry may re-run. */
+  noOutputYet: boolean;
+  /** `SessionOptions.retryAfterOutput`: a timeout may switch lanes even after output,
+   *  because this worker has no side effects to half-finish. Off for every other lane. */
+  retryAfterOutput?: boolean;
+  /** A lane switch already happened in this session — never a second one. */
+  usedFallback: boolean;
+  /** The route's fallback after the global `SIDECLAW_WORKER_FALLBACK=none` gate. */
+  fallback: RouteFallback | null;
+  /** The route's (override-applied) primary model — the same-model fallback runs it. */
+  routeModel: string;
+}
+
+export type NextAttemptPlan =
+  | { kind: "return" }
+  | { kind: "retry" }
+  | { kind: "fallback"; forced: ForcedAttempt };
+
+/** Pure: given a finished attempt, decide whether to return it, retry the same backend,
+ *  or switch lanes once. Rules, in order (see `runSession`'s doc comment for the why):
+ *  1. `max` + iu fallback + quota-flavoured failure → fallback to `iu`, same model.
+ *  2. `iu` + max fallback + "IU never answered" → fallback to `max` on `fallback.model`
+ *     (or the same model). Immediately for missing credentials or a timeout with zero
+ *     events (any timeout when `retryAfterOutput` is set); after one same-backend retry
+ *     for an ordinary transport error.
+ *  3. Transient transport error → retry the same backend (bounded by MAX_SESSION_ATTEMPTS).
+ *  4. Otherwise return. A fallback attempt that fails is never switched again. */
+export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
+  const { result, attempt, noOutputYet, usedFallback, fallback, routeModel } = input;
+  const retryAfterOutput = input.retryAfterOutput === true;
+  const isLastAttempt = attempt >= MAX_SESSION_ATTEMPTS;
+  const error = result.error ?? "";
+  // A timeout with ZERO worker events is "IU never answered", not "the worker was slow":
+  // measured 2026-09-07, glm-5.3-flash produced nothing in 480 s on overview's 10 KB
+  // prompt while answering a one-line prompt in 11 s. The same day it also stalled AFTER
+  // two assistant turns until the cap — so a side-effect-free worker (`retryAfterOutput`)
+  // treats any timeout as stuck. Same-backend retry is pointless either way (it doubles
+  // the wasted wait), so a stuck timeout goes straight to the fallback lane like a missing
+  // IU credential does. The quota and transport lanes below keep the no-output guard.
+  const timedOutStuck = (noOutputYet || retryAfterOutput) && error.startsWith("Session timed out");
+  const switchable =
+    !result.ok && !usedFallback && !isLastAttempt && (noOutputYet || timedOutStuck);
+
+  if (switchable && result.backend === "max" && fallback?.backend === "iu" && isQuotaError(error)) {
+    return {
+      kind: "fallback",
+      forced: { backend: "iu", model: routeModel, reason: "rate-limited" },
+    };
+  }
+
+  const noCredentials = result.iuConfigError === true;
+  const iuDown = noCredentials || timedOutStuck || isRetryableSessionError(error);
+  if (
+    switchable &&
+    result.backend === "iu" &&
+    fallback?.backend === "max" &&
+    iuDown &&
+    (noCredentials || timedOutStuck || attempt >= 2)
+  ) {
+    return {
+      kind: "fallback",
+      forced: { backend: "max", model: fallback.model ?? routeModel, reason: "iu-unavailable" },
+    };
+  }
+
+  const canRetry =
+    !result.ok && !isLastAttempt && noOutputYet && !noCredentials && isRetryableSessionError(error);
+  return { kind: canRetry ? "retry" : "return" };
+}
+
 export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<SessionResult<T>> {
+  const route = withModel(opts.route, opts.model);
+  const fallback = WORKER_FALLBACK === "none" ? null : route.fallback;
   let attempt = 0;
-  let usedQuotaFallback = false;
-  let forcedBackend: Backend | undefined;
+  let usedFallback = false;
+  let forced: ForcedAttempt | undefined;
   while (true) {
     attempt++;
     const turnsRef = { current: 0 };
-    const result = await runSessionAttempt(opts, turnsRef, forcedBackend);
-    const isLastAttempt = attempt >= MAX_SESSION_ATTEMPTS;
-    const noOutputYet = turnsRef.current === 0;
-
-    const quotaFallback =
-      !result.ok &&
-      !usedQuotaFallback &&
-      !isLastAttempt &&
-      result.backend === "max" &&
-      noOutputYet &&
-      isQuotaError(result.error ?? "");
-    if (quotaFallback) {
-      usedQuotaFallback = true;
-      forcedBackend = "iu";
+    const result = await runSessionAttempt(opts, turnsRef, forced);
+    const plan = planNextAttempt({
+      result,
+      attempt,
+      noOutputYet: turnsRef.current === 0,
+      retryAfterOutput: opts.retryAfterOutput,
+      usedFallback,
+      fallback,
+      routeModel: route.model,
+    });
+    if (plan.kind === "fallback") {
+      usedFallback = true;
+      forced = plan.forced;
       continue;
     }
-
-    const canRetry =
-      !result.ok && !isLastAttempt && noOutputYet && isRetryableSessionError(result.error ?? "");
-    if (!canRetry) {
+    if (plan.kind === "return") {
       return { ...result, attempts: attempt, retried: attempt > 1 };
     }
     logger.warn(

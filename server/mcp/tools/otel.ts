@@ -3,7 +3,8 @@ import { homedir } from "os";
 import { join } from "path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { mcpProgressCallback, runSession, WORKER_MODEL, zodValidator } from "../session-runner.ts";
+import { mcpProgressCallback, runSession, zodValidator } from "../session-runner.ts";
+import { describeRoute, routeFor } from "../../lib/routing.ts";
 import { logger } from "../logger.ts";
 
 // ── Output schema — single source of truth ────────────────────────────────────
@@ -176,7 +177,8 @@ export function registerOtelTool(server: McpServer): void {
 WHEN TO CALL: investigating application errors, slow or missing traces, log anomalies, service health issues, or any observability question in local dev or VPS production.
 READ-ONLY: never modifies files or data. Only reads from ClickHouse.
 CWD: optional working directory for the spawned worker. Defaults to $HOME.
-OUTPUT: inspect \`status\` first. "errors" means active error spans/logs were found; "degraded" means elevated latency or warnings; "healthy" means data is flowing normally. Review \`findings\` and \`recommendations\` for details.`,
+OUTPUT: inspect \`status\` first. "errors" means active error spans/logs were found; "degraded" means elevated latency or warnings; "healthy" means data is flowing normally. Review \`findings\` and \`recommendations\` for details.
+MODEL: ${describeRoute(routeFor("otel"))} — see GET /api/routing.`,
       inputSchema: {
         investigation: z
           .string()
@@ -246,7 +248,7 @@ OUTPUT: inspect \`status\` first. "errors" means active error spans/logs were fo
         cwd: workDir,
         prompt,
         tool: "otel",
-        model: WORKER_MODEL,
+        route: routeFor("otel"),
         jsonSchema: OTEL_JSON_SCHEMA,
         maxTurns: 20,
         timeoutMs: 8 * 60 * 1000,

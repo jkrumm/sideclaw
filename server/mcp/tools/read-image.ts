@@ -5,6 +5,7 @@ import { logger } from "../logger.ts";
 import { mcpHeartbeat } from "../session-runner.ts";
 import { IU_USAGE_SCHEMA, visionRead } from "../../lib/iu-openai.ts";
 import { loadImageAsBase64 } from "../../lib/image.ts";
+import { routeFor } from "../../lib/routing.ts";
 
 // Structural diagram-reading prompt (the bake-off default). Works for arbitrary
 // images too; it just asks for a faithful, structured description.
@@ -35,7 +36,7 @@ export function registerReadImageTool(server: McpServer): void {
 WHEN TO CALL: to understand a screenshot, diagram, photo, or any image as text. For paired Excalidraw drawings (.svg + .excalidraw) prefer read_drawing.
 READ-ONLY: never modifies files (SVGs are rasterized to a temp PNG that is cleaned up). Safe to retry.
 CWD: pass an absolute file path. SVGs are rasterized via headless Chrome first; other formats read as-is.
-OUTPUT: \`text\` holds the reading. Default model gemini-3.5-flash (fast, strong on dense diagrams). Routes to a non-EU vendor — fine for git-committed/non-sensitive images.`,
+OUTPUT: \`text\` holds the reading. Default model ${routeFor("read_image").model} (fast, strong on dense diagrams; SIDECLAW_MODEL_READ_IMAGE overrides). Routes to a non-EU vendor — fine for git-committed/non-sensitive images.`,
       inputSchema: {
         path: z.string().describe("Absolute path to the image file (.png/.jpg/.svg/...)."),
         prompt: z
@@ -47,7 +48,9 @@ OUTPUT: \`text\` holds the reading. Default model gemini-3.5-flash (fast, strong
         model: z
           .string()
           .optional()
-          .describe('Vision model. Default "gemini-3.5-flash". Not a residency knob.'),
+          .describe(
+            `Vision model. Default "${routeFor("read_image").model}". Not a residency knob.`,
+          ),
       },
       outputSchema: READ_IMAGE_OUTPUT.shape,
       annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false },
@@ -71,7 +74,7 @@ OUTPUT: \`text\` holds the reading. Default model gemini-3.5-flash (fast, strong
           imageBase64: base64,
           mimeType,
           prompt: prompt ?? DEFAULT_READ_PROMPT,
-          model,
+          model: model ?? routeFor("read_image").model,
           tool: "read_image",
         });
         const result = { ...visionResult, latencyMs: Math.round(performance.now() - startMs) };

@@ -7,6 +7,7 @@ import { mcpHeartbeat } from "../session-runner.ts";
 import { IU_USAGE_SCHEMA, visionRead } from "../../lib/iu-openai.ts";
 import { loadImageAsBase64 } from "../../lib/image.ts";
 import { parseExcalidraw, formatStructureForPrompt } from "../../lib/excalidraw.ts";
+import { routeFor } from "../../lib/routing.ts";
 
 const COMPONENT_SCHEMA = z.object({
   type: z.string(),
@@ -76,7 +77,10 @@ OUTPUT: \`synthesis\` is the merged prose; \`structure\` is the deterministic JS
           .describe(
             "Absolute base path or a .svg/.excalidraw file. The pair is resolved automatically.",
           ),
-        model: z.string().optional().describe('Vision model. Default "gemini-3.5-flash".'),
+        model: z
+          .string()
+          .optional()
+          .describe(`Vision model. Default "${routeFor("read_drawing").model}".`),
       },
       outputSchema: READ_DRAWING_OUTPUT.shape,
       annotations: { readOnlyHint: true, idempotentHint: true, destructiveHint: false },
@@ -106,7 +110,7 @@ OUTPUT: \`synthesis\` is the merged prose; \`structure\` is the deterministic JS
           : { title: null, components: [], flows: [], groups: [], frames: [], annotations: [] };
 
         let synthesis: string;
-        let usedModel = model ?? "gemini-3.5-flash";
+        let usedModel = model ?? routeFor("read_drawing").model;
         let usage;
 
         if (svgPath) {
@@ -120,7 +124,7 @@ OUTPUT: \`synthesis\` is the merged prose; \`structure\` is the deterministic JS
             imageBase64: base64,
             mimeType,
             prompt,
-            model,
+            model: usedModel,
             tool: "read_drawing",
           });
           synthesis = result.text;

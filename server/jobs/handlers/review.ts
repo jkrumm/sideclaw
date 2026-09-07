@@ -1,7 +1,8 @@
 import { existsSync } from "fs";
 import { join } from "path";
 import { z } from "zod";
-import { runSession, WORKER_MODEL, zodValidator } from "../../mcp/session-runner.ts";
+import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { routeFor } from "../../lib/routing.ts";
 import { textComplete } from "../../lib/iu-openai.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
@@ -400,7 +401,7 @@ async function routeExtraAngles(
     cwd,
     prompt,
     tool: "review:router",
-    model: WORKER_MODEL,
+    route: routeFor("review"),
     jsonSchema: ROUTER_JSON_SCHEMA,
     maxTurns: 8,
     timeoutMs: 3 * 60 * 1000,
@@ -453,7 +454,7 @@ async function routeExtraAngles(
 //
 // Truncated at 200K chars so a pathological huge diff can't blow the request.
 
-const ADVERSARY_MODEL = "gpt-5.6-terra";
+const ADVERSARY_MODEL = routeFor("adversary").model;
 const ADVERSARY_EFFORT = "high" as const;
 const ADVERSARY_MAX_DIFF_CHARS = 200_000;
 
@@ -717,7 +718,7 @@ export async function runReview(
         cwd,
         prompt,
         tool: "review:angle",
-        model: WORKER_MODEL,
+        route: routeFor("review"),
         jsonSchema: ANGLE_JSON_SCHEMA,
         maxTurns: 60,
         timeoutMs: 15 * 60 * 1000,
@@ -813,7 +814,7 @@ export async function runReview(
       cwd,
       prompt: synthPrompt,
       tool: "review:synthesis",
-      model: WORKER_MODEL,
+      route: routeFor("review"),
       jsonSchema: REVIEW_JSON_SCHEMA,
       maxTurns,
       timeoutMs: 10 * 60 * 1000,

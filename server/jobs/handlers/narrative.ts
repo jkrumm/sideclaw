@@ -4,7 +4,8 @@ import { homedir } from "os";
 import { basename, join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { WORKER_MODEL, runSession, zodValidator, type Backend } from "../../mcp/session-runner.ts";
+import { runSession, zodValidator, type Backend } from "../../mcp/session-runner.ts";
+import { routeFor, withModel } from "../../lib/routing.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
@@ -65,7 +66,7 @@ export const NARRATIVE_INPUT = z.object({
     .string()
     .optional()
     .describe(
-      `Override worker model. Default: "${WORKER_MODEL}" — the reasoning tier, since this is ` +
+      `Override worker model. Default: "${routeFor("narrative").model}" — the reasoning tier, since this is ` +
         "editorial judgment over a prompt, not mechanical classification. Any model id routes " +
         "through the same worker backend as every other sideclaw job.",
     ),
@@ -597,7 +598,8 @@ export async function runNarrative(
 ): Promise<NarrativeOutput> {
   const params = parseParams(NARRATIVE_INPUT, rawParams);
   const { cwd, project, previousPage, since } = params;
-  const resolvedModel = params.model ?? WORKER_MODEL;
+  const route = withModel(routeFor("narrative"), params.model);
+  const resolvedModel = route.model;
   const bootstrapSince = bootstrapSinceIso();
   const sinceUsed = since ?? bootstrapSince;
 
@@ -641,7 +643,7 @@ export async function runNarrative(
       prompt: p,
       tool: "narrative",
       jsonSchema: NARRATIVE_WORKER_JSON_SCHEMA,
-      model: resolvedModel,
+      route,
       maxTurns: 3,
       timeoutMs: 180 * 1000,
       readOnly: true,
