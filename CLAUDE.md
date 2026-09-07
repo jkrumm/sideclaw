@@ -6,7 +6,10 @@ React frontend (Vite) + Bun/Elysia backend, running natively on the host.
 Served on `http://sideclaw.local` (localias proxy → port 7705).
 
 Bun loads `.env` automatically from the `sideclaw/` directory — all env vars
-(`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`) live there.
+(`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `SIDECLAW_*`, `RESEARCH_GATEWAY_*`)
+live there. That auto-load is cwd-based, so the **MCP process** (spawned with the calling
+session's cwd) imports `server/lib/load-env.ts` first thing in `mcp.ts` to read the same file —
+existing environment always wins over the file. `README.md` lists every key.
 
 ### GitHub API caching
 
@@ -44,7 +47,7 @@ which avoids GitHub rate-limit pressure.
 
 ```bash
 make build           # Build frontend to dist/ (no server start)
-make reload          # After code changes: build + kickstart LaunchAgent
+make reload          # After code changes: build + SIGTERM-drain (≤20 s) + restart. Refuses while jobs run — FORCE=1 overrides
 make install-agent   # One-time: build + install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
@@ -102,14 +105,14 @@ Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`
 The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
-2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`). Not `/tmp` — macOS's periodic cleanup sweeps files there untouched for 3+ days, and a long-running agent then writes into an unlinked inode. See `server/jobs/store.ts`.
+2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`). Not `/tmp` — macOS's periodic cleanup sweeps files there untouched for 3+ days, and a long-running agent then writes into an unlinked inode. See `server/jobs/store.ts`. The server binds **`127.0.0.1:7705` only** — every consumer (herdr pane, Hermes, the MCP child, `fetch_usage.py`, devhost-health) is local and the API carries no auth of its own.
 3. The caller polls **`job_wait({ jobId })`** — a long-poll (~50s, heartbeated) that returns the result the moment the job finishes, or `stillRunning: true` to call again. `job_status` is a one-shot peek.
 
 While a job runs, `job_status`/`job_wait` also expose live worker progress derived from the worker's stream-json output: `turns`, `lastAction` (e.g. `"Edit store.ts"`), and **`idleMs`** — ms since the last worker event. `idleMs` is the wedge signal: it stays low while events flow and rises during a single long operation (e.g. a slow test run), so a *large and still-growing* `idleMs` means the session may be stuck — peek at `git status` rather than waiting indefinitely. The runner persists each snapshot via a `ProgressSink` threaded `store → executor → handler → runSession.onActivity`; `review` aggregates one shared liveness bump across its parallel angle sessions.
 
-Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart (in-flight jobs reconcile to `interrupted` on boot — `recover()`). A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't trip the IU unified endpoint's rate limits.
+Why the HTTP server hosts jobs (not the MCP process): the MCP process dies on `/mcp` disconnect, but the HTTP server is launchd-managed. Jobs survive MCP reconnects; disk persistence survives an HTTP restart: on boot `recover()` re-queues an interrupted `check`/`overview`/`narrative`/`review` **once** (attempts 1 → 2 — all read-only and idempotent) and marks everything else `interrupted` (`dispatch` is never auto re-run: an `implement` episode may already have pushed). `make reload` refuses while jobs are running unless `FORCE=1`, sends SIGTERM rather than `kickstart -k`, and the server drains running jobs for up to 20 s before exiting — a worker session has no checkpoint, so that only saves a job seconds from done; the re-queue covers the rest. A **global concurrency cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as `pending` so parallel agents can't trip the IU unified endpoint's rate limits.
 
-Job lifecycle events log to `~/Library/Logs/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
+Job lifecycle events log to `~/Library/Logs/sideclaw.jsonl` (`job.create` / `job.start` / `job.done` / `job.fail` / `job.recover` / `job.requeue`). Inspect the queue: `curl -s localhost:7705/api/jobs | jq`. **`GET /api/jobs/health`** → `{ ok, running, pending, failedLastHour, interruptedLastHour, oldestPendingAgeMs, lastFailure }`, `ok: false` when ≥3 jobs failed in the last hour or the oldest pending job has waited >15 min — dotfiles' devhost-health reads it. A failed worker's stderr is logged at **warn** (`session.stderr`) so a post-mortem exists.
 
 ### agents
 
@@ -150,8 +153,21 @@ synchronous HTTP, not a job: no queue, no worker session, answers in one request
   terminal width — a phone-width `watch` pane. Title/standing caps shrink with it, the project
   line drops `[N agents]` below cols 90, and the header splits into two lines below cols 100.
   Omitting `cols` keeps the legacy fixed 110-char clamp untouched.
-- Binds on `0.0.0.0` like the rest of the LaunchAgent HTTP server, so **port 7705 must stay
-  ungranted in the tailnet ACL** — this endpoint carries no auth of its own.
+- The server binds **`127.0.0.1` only** (`server/index.ts`), so this endpoint is reachable from
+  this machine alone — it carries no auth of its own, and the tailnet door is Caddy's
+  `sideclaw.mini.jkrumm.com` block, never a direct grant on 7705.
+- **`humanQueue`** (top-level in the snapshot): every pending `ask-human.sh` request
+  (`~/.local/state/human-queue/*.req` with no `.res`, `readHumanQueue` in `agents.ts`), as
+  `{ id, askedAt, question, cmd }`, newest first. `renderText` shows it as a `needs you (human
+  queue: N)` block right under the header. Deterministic data — it is **never** part of the
+  `overview` LLM prompt (`buildAgentFacts` reads only `projects`).
+- **Snapshot cache, 20 s** (`cachedBuildSnapshot`, `server/lib/overview-payload.ts`): the herdr
+  pane, Hermes and the Argo push all poll within seconds of each other and share one build.
+- **Argo push** (`server/lib/argo-push.ts`): after every completed `overview` job and every 10
+  min, `POST ${ARGO_URL:-https://argo.jkrumm.com/api}/agents/overview` with the same JSON
+  `GET /api/overview` returns (plus `machine: "mini"`, `generatedAt`), bearer from
+  `secrets-run read op://vps/argo/API_SECRET` (cached in memory; a failed resolve is not
+  cached). Never fatal — one `app.argo_push` log line with `status`.
 - Pure units (`encodeProjectDir`, `parseTranscriptTail`, `deriveState`, `mergeAgents`,
   `renderText`) are covered by `tests/agents.test.ts` — no subprocess, no mocks, per repo
   convention.
@@ -176,10 +192,10 @@ into the prompt by the handler.
   `watch` (actively working, nothing to do — **the default when the model is unsure**). Each
   entry also carries `standing` (≤120 chars, present tense, what the agent is actually doing),
   `blocker` (≤80 chars or null) and `confidence` (`high`/`medium`/`low`).
-- **Model default is `CHECK_MODEL`** (`claude-haiku-4-5`, `session-runner.ts`) — this is
-  classification over a prompt, not code judgment, the same reasoning that put `check` on the
-  cheap tier. Override via the job's `model` input param; any id (Claude or not) still routes
-  through `SIDECLAW_WORKER_BACKEND` like every other worker.
+- **Model/backend come from `routeFor("overview")`** (`server/lib/routing.ts`: glm-5.3-flash on
+  IU, Haiku-on-Max as the reverse lane) — this is classification over a prompt, not code
+  judgment, the same reasoning that put `check` on the cheap tier. Override via the job's
+  `model` input param (`withModel`); a gateway id can never land on Max.
 - **One batched `runSession` call for the whole fleet**, not one per agent — cheaper and lets
   the model reason about relative priority across agents. `readOnly: true` plus
   `extraDisallowedTools: ["Bash", "Read", "Grep", "Glob"]` make it prompt-only: the worker
@@ -270,9 +286,9 @@ never inline in an interactive session.
   removes any `[[wikilink]]` the model invents (unwrapped to its display text — a link to a page
   that doesn't exist is a vault lint ERROR) and strips HTML comments; markdown itself is never
   escaped.
-- **Malformed JSON gets exactly one retry**, same discipline as `review`'s synthesis salvage: a
-  fresh call with a hardened JSON-only directive appended, then the job throws — never a
-  degraded-but-confident-looking verdict.
+- **Malformed JSON gets exactly one retry**, same discipline as `review`'s synthesis salvage and
+  `check`'s `noOutput` retry: a fresh call with a hardened JSON-only directive appended, then
+  the job throws — never a degraded-but-confident-looking verdict.
 - **Rendering is deterministic** (`renderNarrativePage`): frontmatter carries `type:
   project-narrative`, `description` (the first sentence of `whatItIs`, ≤160 chars), `tags:
   [project, engineering, narrative]`, `timestamp` (`YYYY-MM-DD`), `repo` (cwd basename),
@@ -280,11 +296,10 @@ never inline in an interactive session.
   frontmatter values are double-quoted (`yamlString`) since generated prose routinely contains a
   colon-space, which breaks an unquoted YAML flow scalar. The `## Open questions` section is
   omitted entirely when the model returned none — not an empty heading.
-- **Model default is `WORKER_MODEL`** (`claude-sonnet-5[1m]`, reasoning tier) — this is editorial
-  judgment over a prompt, not classification, the opposite reasoning from `overview`'s
-  `CHECK_MODEL` default. Same Max/IU backend selection and quota fallback as every other worker
-  (see *Worker model — backend selection* below); a daily cron pass across several projects
-  spends real Max quota or IU tokens, so callers should not invoke it speculatively.
+- **Model/backend come from `routeFor("narrative")`** (`claude-sonnet-5[1m]` on IU, same model
+  on Max as the reverse lane) — this is editorial judgment over a prompt, not classification,
+  the opposite reasoning from `overview`'s cheap tier. A daily cron pass across several projects
+  spends real tokens, so callers should not invoke it speculatively.
 - Pure units (`clampSections`, `stripInventedLinks`, `extractSessionProse`, `buildNarrativePrompt`,
   `renderNarrativePage`) are covered by `tests/narrative.test.ts` — no subprocess, no mocks,
   mutation-verified on the `howItGotHere` recency cap, the wikilink strip, and the tool-result/
@@ -292,23 +307,36 @@ never inline in an interactive session.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
-### Worker model — backend selection: IU (default) / Max
+### Worker routing — `server/lib/routing.ts` is the only place a model or backend is decided
 
-Worker sessions run on **Claude via the IU unified endpoint's native Anthropic transport** by default (the same recipe dotfiles' `ca`/`claude_iu` use) — metered IU per-token billing, off Max. `session-runner.ts` selects the backend by `SIDECLAW_WORKER_BACKEND`, for every model id: `"iu"` (default) resolves the IU key/base via `getIuConfig()` and injects `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` directly. Each IU-native session writes a `session_env` line to `~/.claude/logs/<date>.jsonl` (mirroring the dotfiles SessionStart hook) so usage-tracker classifies worker spend as IU, not Max.
+Every worker session (`runSession`) and the adversary text call take `{ model, backend, fallback }` from one per-tool table; nothing else hardcodes an id (`WORKER_MODEL`/`CHECK_MODEL` are gone). Handlers pass `route: routeFor("<tool>")`, the MCP tool descriptions print the same route under `MODEL:`, and **`GET /api/routing`** shows the effective table plus every applied or refused override.
 
-**`SIDECLAW_WORKER_BACKEND`** (`.env`, default `iu`) is a per-installation escape hatch onto the Max subscription: set it to `max` and plain `claude-*` worker sessions delete `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` instead of injecting the IU ones, so the CLI falls through to the inherited OAuth profile — Max subscription rate-limit budget, not metered API tokens. A non-Claude model id is overridden back to `"iu"` regardless of the flag, since Max only ever serves Anthropic's own models. Read once at module load from `sideclaw/.env`, so flipping it requires **`make reload`** (not just a code edit) to take effect. On the `max` backend, `session_env` is still written but with an explicit `base_url: null` (not skipped) — usage-tracker's classifier (`models.ts`) reads `base_url` present → `iu`, `null`/missing → `max`, so this is how a Max-backend run gets attributed `billing="max"`.
+| Tool | Primary | Fallback |
+|-|-|-|
+| `check`, `overview` | `glm-5.3-flash` on **iu** | `claude-haiku-4-5` on max (IU transport failure before first output, or any timeout — `retryAfterOutput`) |
+| `narrative` | `claude-sonnet-5[1m]` on **iu** | same model on max |
+| `review` (router, angles, synthesis), `dispatch`, `otel` | `claude-sonnet-5[1m]` on **max** | same model on iu (quota ceilings, or a quota-flavoured failure) |
+| `review` adversary | `gpt-5.6-terra` on iu (direct IU OpenAI text call) | none |
+| `excalidraw` | `claude-sonnet-5[1m]` on iu | same model on max |
+| `read_image`, `read_drawing` | `gemini-3.5-flash` on iu (IU OpenAI transport) | none |
 
-#### Dynamic Max→IU quota fallback
+Backends: **`iu`** injects `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` from `getIuConfig()` (the IU unified endpoint's native Anthropic transport, metered per token, serves Claude *and* gateway ids — a gateway id additionally gets every `ANTHROPIC_DEFAULT_*_MODEL` pinned to itself, `CLAUDE_CODE_MAX_CONTEXT_TOKENS` from `GATEWAY_CONTEXT_TOKENS`, `API_TIMEOUT_MS` raised, mirroring dotfiles' `ca`); **`max`** deletes those vars so the CLI falls through to the inherited OAuth profile — Claude ids only, a gateway id is refused back to `iu` at table-build time. Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`, `SIDECLAW_BACKEND_<TOOL>=iu|max` (`<TOOL>` = route key upper-cased), read once at module load → `make reload`; `SIDECLAW_WORKER_FALLBACK=none` pins every tool to its primary. A job's `model` param (`overview`, `narrative`, `dispatch`) is applied with `withModel` — a Claude override also becomes the fallback model, a gateway override forces `iu`.
 
-On `SIDECLAW_WORKER_BACKEND=max`, every claude-* session's backend is now decided per launch rather than statically: `resolveBackend(model)` (`session-runner.ts`) reads live Max quota and calls the pure `chooseBackend({ configured, model, quota, ceilingFiveHour, ceilingSevenDay, fallback })`, in order — non-Claude id → `iu` (unconditional, no quota read); `SIDECLAW_WORKER_FALLBACK=none` → stay on `configured`; quota `source: "unknown"` → stay on `configured` (never block a session on missing data); five-hour utilization `>= SIDECLAW_MAX_QUOTA_CEILING` (default `90`) or seven-day `>= SIDECLAW_MAX_WEEKLY_CEILING` (default `95`) → `iu`; otherwise stay on `configured`. The model id **never changes** across the fallback — only the auth env does — so worker quality is constant and only billing moves (usage-tracker already classifies by `base_url`, unaffected by this). `SIDECLAW_WORKER_FALLBACK` (`iu` default | `none`) is the off switch, same "read once, needs `make reload`" rule as `SIDECLAW_WORKER_BACKEND`.
+Every session writes a `session_env` line to `~/.claude/logs/<date>.jsonl` with `base_url` (real on `iu`, explicit `null` on `max`), `model` and `backend`, plus an attribution record to `~/.local/share/usage-tracker/sideclaw-sessions.jsonl` carrying the same — usage-tracker classifies by `base_url` present → `iu`, `null`/missing → `max`, and bills the run to the model actually used.
 
-**Quota sources** (`server/lib/quota.ts`), cheapest first: the statusline's own cache (`/tmp/claude_sl/usage_api.json`, written by dotfiles' `fetch_usage.py` every ~60s) if fresh (`SIDECLAW_QUOTA_FILE_MAX_AGE_S`, default `600`s — goes stale with no interactive Claude Code session around to render the statusline); else the live `api.anthropic.com/api/oauth/usage`, bearer = the same OAuth token Claude Code keeps in the macOS Keychain (`Claude Code-credentials`), cached in-memory 60s (the endpoint 429s per-token within a few requests/min — a 429 or any other failure returns the last good reading, never blanks it). A locked keychain (headless session, no GUI) makes the API path return `source: "unknown"`, which per rule 3 above just keeps the configured backend — a dynamic fallback that silently can't read quota fails toward "do nothing new," not toward blocking work.
+#### Fallback, both directions — once per session, never twice
 
-**Reactive retry, on top of the proactive check:** if a `max`-backend attempt produces no worker output yet (same `turnsRef.current === 0` guard the transient-transport retry uses) and fails with text `isQuotaError` recognizes (`hit your usage limit`, `rate limit`, a bare `429`, `overloaded`, `quota`), `runSession` forces exactly one retry onto `iu` (logs `backend.fallback`, reason `rate-limited`) — this catches quota exhaustion the proactive check missed (stale/absent quota reading) without waiting for the next session. It never retries a second time: a quota-flavored failure on the `iu` retry itself is not retried again. Every session logs `backend.select` (or `backend.fallback` for the forced retry) with `tool`/`model`/`backend`/`reason`, plus the two percentages when `reason: "quota"`; `SessionResult.backend` and `overview`'s job output both carry the backend actually used.
+`resolveBackend(route)` runs per launch: a non-Claude id → `iu` unconditionally; an `iu` route → `iu` with no quota read; a `max` route with an `iu` fallback reads live Max quota and calls the pure `chooseBackend({ configured: "max", model, quota, ceilingFiveHour, ceilingSevenDay, fallback })` — `SIDECLAW_WORKER_FALLBACK=none` → stay; `quota.source: "unknown"` → stay (never block on missing data); five-hour ≥ `SIDECLAW_MAX_QUOTA_CEILING` (90) or seven-day ≥ `SIDECLAW_MAX_WEEKLY_CEILING` (95) → `iu`. The model id never changes across this hop — only billing moves.
 
-Tests: `tests/backend-select.test.ts` (chooseBackend's full rule matrix incl. both ceiling boundaries, `parseQuotaFile`/`parseQuotaApi`, `isQuotaError`); `tests/session-retry.test.ts` covers `resolveBackend`'s IO-free non-Claude short circuit.
+**Quota sources** (`server/lib/quota.ts`), cheapest first: the statusline's own cache (`/tmp/claude_sl/usage_api.json`, written by dotfiles' `fetch_usage.py` **whenever an interactive Claude Code session renders its statusline** — statusline-driven, not a LaunchAgent, so it goes stale the moment no interactive session is open; trusted for `SIDECLAW_QUOTA_FILE_MAX_AGE_S`, default 600 s); else the live `api.anthropic.com/api/oauth/usage`, bearer = the OAuth token Claude Code keeps in the macOS Keychain (`Claude Code-credentials`), cached in-memory 60 s (the endpoint 429s per-token — a failure returns the last good reading, never blanks it). A locked keychain makes the API path return `source: "unknown"`, which keeps the configured backend.
 
-**Caveat:** `check`/`review`/`dispatch` run as jobs inside the launchd HTTP server, which loads `sideclaw/.env` via Bun — `SIDECLAW_WORKER_BACKEND` (like every other `SIDECLAW_*` var) applies reliably there. `otel` calls `runSession` directly in the MCP process (`server/mcp/tools/otel.ts`), which Bun starts with the *calling session's* cwd and may not pick up `sideclaw/.env` — for `otel`, the var would need to be exported in the environment instead. Pre-existing limitation, not specific to this flag.
+**Reactive retries in `runSession`**, both gated on the route's declared `fallback` and on "no worker output yet" (`turnsRef.current === 0`), both latched so the fallback attempt itself is never switched again:
+- **`max` → `iu`**: a failure whose text `isQuotaError` recognizes (`hit your usage limit`, `rate limit`, a bare `429`, `overloaded`, `quota`) forces the next attempt onto `iu`, same model (`backend.fallback`, reason `rate-limited`). Takes precedence over the transient-transport retry.
+- **`iu` → `max`**: a transport failure (`isRetryableSessionError`: 429/502/503/504, connection errors) is first retried once on `iu` — a single 503 is the common case and must not spend Max quota — and if that fails the same way the next attempt runs on `max`, on `fallback.model` when the route fixes one (`check`/`overview` → Haiku, since glm cannot run on Max) or the same model (`backend.fallback`, reason `iu-unavailable`). Missing IU credentials (`iuConfigError`) and a **timeout with zero worker events** skip the same-backend retry and go straight to it; a session with `retryAfterOutput: true` (`check`, `overview` — no side effects to half-finish) treats **any** timeout that way (measured 2026-09-07: glm-5.3-flash gave overview's 10 KB prompt no event in 480 s, and another run stalled after 2 turns until the cap — so overview's cap is 2 min and the whole job stays ≈3 min with the Haiku lane). This is what keeps "IU down, Max fine" from being a dead lane.
+
+`SessionResult.backend` and `.model` carry what actually ran; `overview`/`narrative` job output carries `backend` too. Tests: `tests/routing.test.ts` (table, overrides, `withModel`), `tests/backend-select.test.ts` (`chooseBackend`'s full matrix, quota parsers, `isQuotaError`), `tests/session-retry.test.ts` (`resolveBackend`'s IO-free short circuits, retry classification).
+
+The MCP process reads `sideclaw/.env` itself (`server/lib/load-env.ts`, first import in `mcp.ts`), so `otel` — which calls `runSession` in-process rather than as a job — sees the same `SIDECLAW_*`/`RESEARCH_GATEWAY_*` values the HTTP server does.
 
 **`otel` also injects the real ClickStack/HyperDX MCP** (`--mcp-config`'s `mcpServers.hyperdx`, `type: "http"`, bearer = the HyperDX user access key) into its own worker session instead of running query.py-only — `runSession`'s `mcpServers`/`extraDisallowedTools` fields (`session-runner.ts`) exist for this. Key resolution fails soft, per environment: local reads `~/.config/hyperdx/local.env`; prod tries `HYPERDX_PROD_ACCESS_KEY` then `secrets-run read op://vps/clickstack/AGENT_ACCESS_KEY` (never a bare `op` — hangs headless). No key → the worker still runs, just without the MCP. `readOnly: true` plus the mutating `clickstack_save_*`/`delete_*`/`patch_dashboard` tool names in `extraDisallowedTools` keep the worker query-only. The output's `hyperdx: "connected" | "unavailable (<reason>)"` field is set by the tool handler from its own resolution result, never echoed from the worker's JSON — provenance the caller can trust regardless of what the model noticed about its own tool set.
 
@@ -529,7 +557,7 @@ tail -f ~/Library/Logs/sideclaw.jsonl | jq .
 tail -f ~/Library/Logs/sideclaw.jsonl | jq 'select(.source == "mcp")'
 ```
 
-Inner sessions spawned by MCP tools use `claude -p` routed via `session-runner.ts` (claude-sonnet-5 / claude-haiku-4-5): IU per-token billing by default, or the Max subscription when `SIDECLAW_WORKER_BACKEND=max`. See `.claude/rules/mcp-tools.md` for authoring conventions.
+Inner sessions spawned by MCP tools use `claude -p` via `session-runner.ts`, model and backend per tool from `server/lib/routing.ts` (`GET /api/routing`). See `.claude/rules/mcp-tools.md` for authoring conventions.
 
 ## Git Workflow
 

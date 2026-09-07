@@ -51,6 +51,12 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `quota.read`               | mcp     | Max subscription quota read, file-cache or live API (carries `quotaSource: "file"\|"api"\|"unknown"`, `fiveHourPct`, `sevenDayPct` — never the token) |
 | `backend.select`           | mcp     | Worker auth backend resolved for a session launch (carries `tool`, `model`, `backend`, `reason`; `fiveHourPct`/`sevenDayPct` when `reason: "quota"`)  |
 | `backend.fallback`         | mcp     | Reactive once-only retry from `max` onto `iu` after a quota-flavored failure (carries `tool`, `model`, `backend: "iu"`, `reason: "rate-limited"`)     |
+| `backend.fallback` (`iu-unavailable`) | mcp/app | Reactive once-only retry from `iu` onto `max` after an IU transport failure or missing IU credentials (carries `tool`, `model` — the fallback model, e.g. Haiku for check — `backend: "max"`)  |
+| `session.stderr`           | mcp/app | Worker stderr; **warn** when the session failed (timeout, non-zero exit, `is_error`), debug otherwise (carries `tool`, `model`, `backend`, `exitCode`, `stderr` ≤4 KB) |
+| `check.retry`              | app     | `check` output was prose, not schema JSON — one JSON-only retry (carries `project`, `error`)                                                              |
+| `job.requeue`              | app     | Boot recovery re-queued an interrupted check/overview/narrative/review once (carries `jobId`, `tool`, `attempts`)                                        |
+| `app.argo_push`            | app     | Overview pushed to Argo (carries `status`: `ok` \| `no-secret` \| `http-error` \| `network-error` \| `build-error`, `trigger`: `job` \| `timer`, `httpStatus`) |
+| `app.shutdown`             | app     | SIGTERM received / grace period result (carries `running`, `workers`, `killedWorkers`)                                                                   |
 
 ## Query patterns
 
