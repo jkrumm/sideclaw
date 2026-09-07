@@ -580,6 +580,196 @@ const MAX_TITLE_CHARS = 48;
 // off by it (truncate elides at maxChars, clampLine would otherwise cut mid-ellipsis).
 const MAX_STANDING_CHARS = MAX_LINE_CHARS - 8;
 
+// ── ANSI colour (opt-in, `?color=1`/`?ansi=1` on the .txt routes) ──────────────────────────────
+//
+// SGR only, no 256/truecolor — this renders in a herdr pane via `watch --color`, and plain
+// output must stay byte-identical when the flag is absent. Every coloured span resets before
+// the newline, so a truncated line or a terminal that dies mid-stream never leaks colour into
+// whatever follows.
+
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const DIM = "\x1b[2m";
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+const YELLOW = "\x1b[33m";
+const CYAN = "\x1b[36m";
+const MAGENTA = "\x1b[35m";
+const BOLD_RED = `${BOLD}${RED}`;
+const DIM_GREEN = `${DIM}${GREEN}`;
+
+/** Strips SGR escape sequences — used by tests to assert `stripAnsi(coloured) === plain`, and
+ *  internally to measure a coloured line's VISIBLE width for the 110-char clamp (never the
+ *  escape bytes). A manual scan rather than a `/\x1b.../ ` regex literal — oxlint's
+ *  `no-control-regex` flags the literal ESC byte in a regex pattern regardless of intent. */
+export function stripAnsi(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === "\x1b") {
+      const end = text.indexOf("m", i);
+      if (end === -1) break;
+      i = end + 1;
+      continue;
+    }
+    out += text[i];
+    i += 1;
+  }
+  return out;
+}
+
+/** A per-agent line/bar-bucket is coloured by its `overview` recommendation when enrichment is
+ *  present, else by its deterministic `state` — EXCEPT `needs_you` always wins regardless of
+ *  what the model recommended: a herdr-blocked/waiting pane is never allowed to render as
+ *  anything but urgent, even if a stale `overview` job called it "stale" before it needed a
+ *  human. The icon is untouched by this — only colour. */
+function effectiveCategory(
+  state: AgentState,
+  enrichment: AgentEnrichment | undefined,
+): Recommendation | AgentState {
+  if (state === "needs_you") return "needs_you";
+  return enrichment ? enrichment.recommendation : state;
+}
+
+/** Both enums share the string "stale", so one switch covers both without a discriminant. */
+function categoryColor(category: Recommendation | AgentState): string {
+  switch (category) {
+    case "answer":
+    case "needs_you":
+      return BOLD_RED;
+    case "ship":
+    case "merge":
+      return YELLOW;
+    case "review":
+      return MAGENTA;
+    case "working":
+    case "watch":
+      return GREEN;
+    case "continue":
+      return CYAN;
+    case "idle":
+    case "stale":
+      return DIM;
+    case "done":
+    case "close":
+      return DIM_GREEN;
+    default:
+      return "";
+  }
+}
+
+// Doubled "!!" for the answer/needs_you bucket in the SUMMARY BAR only — a single "!" is easy
+// to miss skimming a herdr pane, and the bar is the one place that glyph stands alone (the
+// per-line icon stays RECOMMENDATION_ICON/STATE_ICON, unchanged from plain mode).
+const BAR_ICON: Record<Recommendation | AgentState, string> = {
+  answer: "!!",
+  needs_you: "!!",
+  continue: "→",
+  ship: "⇧",
+  review: "⚑",
+  merge: "⇄",
+  close: "✓",
+  done: "✓",
+  stale: "·",
+  watch: "●",
+  working: "●",
+  idle: "○",
+  unknown: "?",
+};
+
+// The bar counts by ONE enum at a time, never both — mixing recommendation buckets (e.g.
+// "watch") with state buckets (e.g. "working") let two different categories land on the same
+// glyph ("●" for both), rendering as a duplicate. Each list's own icons are internally unique
+// (checked by tests/agents.test.ts's "no glyph repeats" test), so picking one list per call is
+// what guarantees that, not a de-dup step after the fact.
+const RECOMMENDATION_BAR_ORDER: Recommendation[] = [
+  "answer",
+  "ship",
+  "merge",
+  "review",
+  "continue",
+  "watch",
+  "close",
+  "stale",
+];
+const STATE_BAR_ORDER: AgentState[] = ["needs_you", "working", "idle", "stale", "done", "unknown"];
+
+/** Clamps a (possibly ANSI-coloured) line to `maxChars` VISIBLE characters, passing escape
+ *  bytes through uncounted, and always closing with a reset so a mid-escape cut can never
+ *  leak colour into the next line. No-ops (returns `line` unchanged) when already within
+ *  budget, so an uncoloured caller pays nothing extra. */
+function clampVisible(line: string, maxChars: number): string {
+  if (stripAnsi(line).length <= maxChars) return line;
+  let visible = 0;
+  let out = "";
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === "\x1b") {
+      const end = line.indexOf("m", i);
+      if (end === -1) break;
+      out += line.slice(i, end + 1);
+      i = end + 1;
+      continue;
+    }
+    if (visible >= maxChars) break;
+    out += line[i];
+    visible += 1;
+    i += 1;
+  }
+  return `${out}${RESET}`;
+}
+
+/** The coloured mode's compact summary bar. When a completed `overview` job exists, counts
+ *  by RECOMMENDATION only (an agent with no recommendation — no cached verdict yet, or nulled
+ *  by the staleness rule — folds into a trailing plain `? n`, never a state icon standing in
+ *  for it); with no overview at all (the plain `/api/agents.txt` colour path), counts by STATE
+ *  only. The two enums are never mixed in one bar — see the two order lists above. Non-zero
+ *  buckets only, most-urgent-first. Null when there is nothing to summarize. Plain (uncoloured)
+ *  mode never calls this. */
+function buildRecommendationBar(
+  projects: Project[],
+  enrichment: Map<string, AgentEnrichment> | undefined,
+  overviewExists: boolean,
+): string | null {
+  const parts: string[] = [];
+
+  if (overviewExists) {
+    const counts = new Map<Recommendation, number>();
+    let unrecommended = 0;
+    for (const project of projects) {
+      for (const agent of project.agents) {
+        const rec = enrichment?.get(agent.id)?.recommendation;
+        if (rec) counts.set(rec, (counts.get(rec) ?? 0) + 1);
+        else unrecommended += 1;
+      }
+    }
+    for (const rec of RECOMMENDATION_BAR_ORDER) {
+      const n = counts.get(rec);
+      if (!n) continue;
+      const color = categoryColor(rec);
+      const segment = `${BAR_ICON[rec]} ${n}`;
+      parts.push(color ? `${color}${segment}${RESET}` : segment);
+    }
+    if (unrecommended > 0) parts.push(`? ${unrecommended}`);
+  } else {
+    const counts = new Map<AgentState, number>();
+    for (const project of projects) {
+      for (const agent of project.agents) {
+        counts.set(agent.state, (counts.get(agent.state) ?? 0) + 1);
+      }
+    }
+    for (const state of STATE_BAR_ORDER) {
+      const n = counts.get(state);
+      if (!n) continue;
+      const color = categoryColor(state);
+      const segment = `${BAR_ICON[state]} ${n}`;
+      parts.push(color ? `${color}${segment}${RESET}` : segment);
+    }
+  }
+
+  return parts.length > 0 ? parts.join("   ") : null;
+}
+
 /** Exported for the `overview` job's prompt builder, which needs identical "N ago" phrasing
  *  for the facts it hands the LLM — one source of truth for the format, not a second copy. */
 export function relativeAge(ms: number | null, now: number): string {
@@ -619,15 +809,23 @@ export interface RenderTextOptions {
    *  Omit entirely (undefined) to render exactly like the plain `/api/agents.txt` — this is
    *  what keeps the two callers sharing one renderer without a duplicate copy. */
   overview?: { ageMs: number } | null;
+  /** Opt-in ANSI colour (`?color=1`/`?ansi=1` on the .txt routes, for `watch --color` in the
+   *  herdr overview pane). Omitted or `false` renders byte-identical plain text — this is what
+   *  keeps every pre-existing test and caller unaffected. */
+  color?: boolean;
 }
 
 /** Renders the same snapshot GET /api/agents returns as compact plain text for `watch`.
  *  `GET /api/overview.txt` calls this with `opts.enrichment`/`opts.overview` to swap the
  *  deterministic state icon for a recommendation icon and add a standing line — see
  *  CLAUDE.md's `### overview` section. Called with no `opts` (the plain `/api/agents.txt`
- *  path), behavior is byte-identical to before enrichment existed. */
+ *  path), behavior is byte-identical to before enrichment existed. `opts.color` (see
+ *  `RenderTextOptions`) additionally colours every span with SGR codes and prepends a
+ *  recommendation-count summary bar — `stripAnsi()` of that output (minus the bar line)
+ *  is byte-identical to the uncoloured render. */
 export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): string {
   const { summary, generatedAt, projects } = snapshot;
+  const color = opts?.color === true;
   const lines: string[] = [];
 
   const generatedAtIso = new Date(generatedAt).toISOString();
@@ -645,11 +843,26 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
   // influenced text (an agent's title/waitingFor), and the base header (100 chars) plus the
   // overview suffix (~15-18 chars) already exceeds 110, so clamping it would silently drop
   // the "overview <age>"/"overview none" suffix the caller asked for on every call.
-  lines.push(header);
+  lines.push(color ? `${DIM}${header}${RESET}` : header);
+
+  if (color) {
+    const bar = buildRecommendationBar(projects, opts?.enrichment, opts?.overview != null);
+    if (bar) lines.push(bar);
+  }
 
   for (const project of projects) {
     const branch = project.git ? project.git.branch + (project.git.dirty ? "*" : "") : "?";
-    lines.push(clampLine(`▸ ${project.name}  ${branch}  [${project.agents.length} agents]`));
+    if (color) {
+      const branchName = project.git ? project.git.branch : "?";
+      const dirty = project.git?.dirty ?? false;
+      const coloredBranch = `${CYAN}${branchName}${RESET}${dirty ? `${RED}*${RESET}` : ""}`;
+      const projectLine =
+        `${BOLD}▸ ${project.name}  ${RESET}${coloredBranch}` +
+        `${BOLD}  [${project.agents.length} agents]${RESET}`;
+      lines.push(clampVisible(projectLine, MAX_LINE_CHARS));
+    } else {
+      lines.push(clampLine(`▸ ${project.name}  ${branch}  [${project.agents.length} agents]`));
+    }
 
     for (const agent of project.agents) {
       const enrichment = opts?.enrichment?.get(agent.id);
@@ -659,11 +872,25 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
       const statePadded = agent.state.padEnd(9);
       const title = truncate(agent.title ?? "(untitled)", MAX_TITLE_CHARS);
       const age = relativeAge(agent.lastActivityAt, generatedAt);
-      let line = `  ${icon} ${statePadded} ${title}  · ${age}`;
-      if (agent.waitingFor) line += `  · ${agent.waitingFor}`;
-      lines.push(clampLine(line));
-      if (enrichment?.standing) {
-        lines.push(clampLine(`      — ${truncate(enrichment.standing, MAX_STANDING_CHARS)}`));
+      const base = `  ${icon} ${statePadded} ${title}  · ${age}`;
+
+      if (color) {
+        const category = effectiveCategory(agent.state, enrichment);
+        const spanColor = categoryColor(category);
+        let line = spanColor ? `${spanColor}${base}${RESET}` : base;
+        if (agent.waitingFor) line += `${RED}  · ${agent.waitingFor}${RESET}`;
+        lines.push(clampVisible(line, MAX_LINE_CHARS));
+        if (enrichment?.standing) {
+          const standingText = `      — ${truncate(enrichment.standing, MAX_STANDING_CHARS)}`;
+          lines.push(clampVisible(`${DIM}${standingText}${RESET}`, MAX_LINE_CHARS));
+        }
+      } else {
+        let line = base;
+        if (agent.waitingFor) line += `  · ${agent.waitingFor}`;
+        lines.push(clampLine(line));
+        if (enrichment?.standing) {
+          lines.push(clampLine(`      — ${truncate(enrichment.standing, MAX_STANDING_CHARS)}`));
+        }
       }
     }
   }

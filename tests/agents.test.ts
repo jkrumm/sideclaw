@@ -18,6 +18,7 @@ import {
   parseTranscriptTail,
   readTranscriptTailFile,
   renderText,
+  stripAnsi,
   type AgentsSnapshot,
   type ClaudeAgentRaw,
   type DispatchJobRaw,
@@ -682,5 +683,117 @@ describe("renderText", () => {
 
   test("output ends with a trailing newline (so it doesn't glue onto the next shell prompt)", () => {
     expect(renderText(snapshot()).endsWith("\n")).toBe(true);
+  });
+});
+
+// ── renderText — colour (opts.color) ────────────────────────────────────────────────────────
+
+describe("renderText with color", () => {
+  function coloredSnapshot(overrides: Partial<AgentsSnapshot> = {}): AgentsSnapshot {
+    return {
+      generatedAt: NOW,
+      staleAfterHours: 24,
+      summary: { needsYou: 1, working: 0, idle: 0, stale: 0, done: 0, dispatch: 0 },
+      projects: [
+        {
+          name: "some-project",
+          cwd: "/x/some-project",
+          git: { branch: "master", dirty: true, ahead: 0, behind: 0, lastCommit: null },
+          agents: [
+            {
+              id: "s1",
+              source: "herdr",
+              sessionId: "s1",
+              paneId: "wR:p4",
+              workspaceId: "wR",
+              title: "blocked on a question",
+              state: "needs_you",
+              herdrStatus: "blocked",
+              claudeStatus: null,
+              waitingFor: "dialog open",
+              tier: null,
+              lastPrompt: null,
+              lastReply: null,
+              lastActivityAt: NOW - 5 * 60_000,
+              startedAt: null,
+            },
+          ],
+        },
+      ],
+      warnings: [],
+      ...overrides,
+    };
+  }
+
+  test("plain output is identical with color:false and with no opts at all", () => {
+    const data = coloredSnapshot();
+    expect(renderText(data, { color: false })).toBe(renderText(data));
+  });
+
+  test("a needs_you (answer-equivalent) agent line carries the bold-red SGR", () => {
+    const text = renderText(coloredSnapshot(), { color: true });
+    const line = text.split("\n").find((l) => l.includes("blocked on a question"));
+    expect(line).toBeDefined();
+    expect(line).toContain("\x1b[1m\x1b[31m");
+  });
+
+  // MUTATION-VERIFIED: dropping the trailing `${RESET}` from a coloured span's line builder
+  // (e.g. rendering `${spanColor}${base}` with no reset) turns this red — every line containing
+  // an escape byte would no longer end with the reset sequence.
+  test("every coloured line resets before the newline", () => {
+    const text = renderText(coloredSnapshot(), { color: true });
+    for (const line of text.split("\n")) {
+      if (line.includes("\x1b[")) {
+        expect(line.endsWith("\x1b[0m")).toBe(true);
+      }
+    }
+  });
+
+  test("stripAnsi(coloured) matches the plain render, once the extra summary-bar line is dropped", () => {
+    const data = coloredSnapshot();
+    const plain = renderText(data);
+    const colored = renderText(data, { color: true });
+    // Colored mode inserts one extra bar line right after the header (index 1).
+    const coloredLines = stripAnsi(colored).split("\n");
+    coloredLines.splice(1, 1);
+    expect(coloredLines.join("\n")).toBe(plain);
+  });
+
+  test("the visible-width clamp still holds when a 200-char waitingFor pushes the line over 110", () => {
+    const longWaitingFor = "w".repeat(200);
+    const data = coloredSnapshot({
+      projects: [
+        {
+          name: "some-project",
+          cwd: "/x/some-project",
+          git: { branch: "master", dirty: false, ahead: 0, behind: 0, lastCommit: null },
+          agents: [
+            {
+              id: "s1",
+              source: "herdr",
+              sessionId: "s1",
+              paneId: "wR:p4",
+              workspaceId: "wR",
+              title: "some task",
+              state: "needs_you",
+              herdrStatus: "blocked",
+              claudeStatus: null,
+              waitingFor: longWaitingFor,
+              tier: null,
+              lastPrompt: null,
+              lastReply: null,
+              lastActivityAt: NOW - 5 * 60_000,
+              startedAt: null,
+            },
+          ],
+        },
+      ],
+    });
+    const text = renderText(data, { color: true });
+    for (const line of text.split("\n")) {
+      // Every visible-clamped line still ends in a reset once truncated.
+      expect(stripAnsi(line).length).toBeLessThanOrEqual(110);
+      if (line.includes("\x1b[")) expect(line.endsWith("\x1b[0m")).toBe(true);
+    }
   });
 });

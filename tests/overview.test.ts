@@ -17,7 +17,13 @@ import {
   type OverviewOutput,
   type OverviewWorkerAgent,
 } from "../server/jobs/handlers/overview.ts";
-import { renderText, type Agent, type AgentsSnapshot, type Project } from "../server/lib/agents.ts";
+import {
+  renderText,
+  stripAnsi,
+  type Agent,
+  type AgentsSnapshot,
+  type Project,
+} from "../server/lib/agents.ts";
 
 const NOW = Date.parse("2026-09-06T12:00:00.000Z");
 const HOUR_MS = 60 * 60 * 1000;
@@ -426,5 +432,117 @@ describe("renderText with overview enrichment", () => {
   test("calling with no opts at all renders exactly like the plain /api/agents.txt path (no 'overview' suffix)", () => {
     const text = renderText(snapshot());
     expect(text.split("\n")[0]).not.toContain("overview");
+  });
+});
+
+// ── renderText — enrichment + colour together ────────────────────────────────
+
+describe("renderText with overview enrichment and color", () => {
+  test("stripAnsi(coloured) matches the uncoloured enriched render, minus the extra bar line", () => {
+    const data = snapshot({
+      projects: [
+        project({
+          agents: [
+            agent({ id: "a1", state: "needs_you", herdrStatus: "blocked", waitingFor: null }),
+          ],
+        }),
+      ],
+    });
+    const enrichment = new Map([
+      ["a1", { recommendation: "answer" as const, standing: "waiting on a decision" }],
+    ]);
+    const plain = renderText(data, { enrichment, overview: { ageMs: 5000 } });
+    const colored = renderText(data, { enrichment, overview: { ageMs: 5000 }, color: true });
+    const coloredLines = stripAnsi(colored).split("\n");
+    coloredLines.splice(1, 1); // drop the colour-only summary bar line
+    expect(coloredLines.join("\n")).toBe(plain);
+  });
+
+  test("an 'answer' recommendation carries the bold-red SGR and a dim standing line", () => {
+    const data = snapshot({ projects: [project({ agents: [agent({ id: "a1" })] })] });
+    const enrichment = new Map([
+      ["a1", { recommendation: "answer" as const, standing: "needs a decision" }],
+    ]);
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, color: true });
+    const lines = text.split("\n");
+    const agentLine = lines.find((l) => l.includes("some task"));
+    const standingLine = lines.find((l) => l.includes("needs a decision"));
+    expect(agentLine).toContain("\x1b[1m\x1b[31m");
+    expect(standingLine).toContain("\x1b[2m");
+  });
+
+  // MUTATION-VERIFIED: dropping `${RESET}` from the standing line's template turns this red —
+  // the standing line would no longer end with the reset sequence before the newline.
+  test("every coloured line, including the standing line, resets before the newline", () => {
+    const data = snapshot({ projects: [project({ agents: [agent({ id: "a1" })] })] });
+    const enrichment = new Map([
+      ["a1", { recommendation: "ship" as const, standing: "ready to push" }],
+    ]);
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, color: true });
+    for (const line of text.split("\n")) {
+      if (line.includes("\x1b[")) expect(line.endsWith("\x1b[0m")).toBe(true);
+    }
+  });
+
+  test("the visible-width clamp holds on a 200-char standing", () => {
+    const longStanding = "s".repeat(200);
+    const data = snapshot({ projects: [project({ agents: [agent({ id: "a1" })] })] });
+    const enrichment = new Map([
+      ["a1", { recommendation: "watch" as const, standing: longStanding }],
+    ]);
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, color: true });
+    // Header line is deliberately exempt from the clamp (see renderText's own comment) — same
+    // slice used by the uncoloured "standing line is capped at 110 chars" test above.
+    for (const line of text.split("\n").slice(1)) {
+      expect(stripAnsi(line).length).toBeLessThanOrEqual(110);
+    }
+  });
+
+  // MUTATION-VERIFIED: reverting the per-line colour to
+  // `enrichment ? enrichment.recommendation : agent.state` (dropping the needs_you override)
+  // turns this red — the line would carry the dim SGR for "stale" instead of bold-red.
+  test("a needs_you pane stays bold-red even when the overview recommended 'stale'", () => {
+    const data = snapshot({
+      projects: [
+        project({
+          agents: [agent({ id: "a1", state: "needs_you", herdrStatus: "blocked" })],
+        }),
+      ],
+    });
+    const enrichment = new Map([
+      ["a1", { recommendation: "stale" as const, standing: "looks abandoned" }],
+    ]);
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, color: true });
+    const agentLine = text.split("\n").find((l) => l.includes("some task"));
+    expect(agentLine).toContain("\x1b[1m\x1b[31m");
+    expect(agentLine).not.toContain("\x1b[2m"); // the plain "stale" dim SGR must not appear
+  });
+
+  // MUTATION-VERIFIED: reverting `buildRecommendationBar` to count by
+  // `enrichment?.get(id)?.recommendation ?? agent.state` (mixing the two enums in one map)
+  // turns this red — a1's "watch" recommendation and a2's raw "working" state both render "●",
+  // so the bar carries two separate "●" segments instead of folding a2 into "? n".
+  test("the recommendation-mode summary bar never repeats a glyph", () => {
+    const data = snapshot({
+      projects: [
+        project({
+          agents: [
+            agent({ id: "a1", state: "working" }),
+            agent({ id: "a2", state: "working" }), // no recommendation entry — folds into "? n"
+            agent({ id: "a3", state: "done" }),
+          ],
+        }),
+      ],
+    });
+    const enrichment = new Map([
+      ["a1", { recommendation: "watch" as const, standing: null }],
+      ["a3", { recommendation: "close" as const, standing: null }],
+    ]);
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, color: true });
+    const barLine = text.split("\n")[1] as string;
+    const glyphs = stripAnsi(barLine)
+      .split("   ")
+      .map((segment) => segment.split(" ")[0]);
+    expect(new Set(glyphs).size).toBe(glyphs.length);
   });
 });

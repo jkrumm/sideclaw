@@ -65,8 +65,9 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
     );
     return { ok: true, data };
   })
-  .get("/agents.txt", async ({ set }) => {
+  .get("/agents.txt", async ({ query, set }) => {
     const startMs = performance.now();
+    const color = query.color === "1" || query.ansi === "1";
     logger.info(
       { event: "agents.request", tool: "agents", format: "text" },
       "agents snapshot requested",
@@ -84,7 +85,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       },
       "agents snapshot built",
     );
-    return renderText(data);
+    return renderText(data, { color });
   })
   .get("/overview", async () => {
     const startMs = performance.now();
@@ -107,8 +108,9 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
     );
     return { ok: true, data };
   })
-  .get("/overview.txt", async ({ set }) => {
+  .get("/overview.txt", async ({ query, set }) => {
     const startMs = performance.now();
+    const color = query.color === "1" || query.ansi === "1";
     logger.info(
       { event: "overview.request", tool: "overview", format: "text" },
       "overview snapshot requested",
@@ -137,5 +139,5 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       },
       "overview snapshot built",
     );
-    return renderText(snapshot, { enrichment, overview: merged.overview });
+    return renderText(snapshot, { enrichment, overview: merged.overview, color });
   });

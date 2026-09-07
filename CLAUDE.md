@@ -143,6 +143,9 @@ synchronous HTTP, not a job: no queue, no worker session, answers in one request
 - **No MCP tool for this** — HTTP-only for now. A read-only MCP tool would cost every session a
   deferred tool name for something no session needs to call itself; the intended callers are
   external services polling over HTTP.
+- **`?color=1` (also `?ansi=1`) on `/api/agents.txt` and `/api/overview.txt`** opts into an
+  ANSI-coloured render (SGR only) — the herdr `overview` pane runs `watch --color` against it.
+  Plain output with no query is byte-identical to before the flag existed.
 - Binds on `0.0.0.0` like the rest of the LaunchAgent HTTP server, so **port 7705 must stay
   ungranted in the tailnet ACL** — this endpoint carries no auth of its own.
 - Pure units (`encodeProjectDir`, `parseTranscriptTail`, `deriveState`, `mergeAgents`,
