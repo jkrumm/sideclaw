@@ -9,6 +9,7 @@ import { registerReadDrawingTool } from "./mcp/tools/read-drawing.ts";
 import { registerExcalidrawDiagramTool } from "./mcp/tools/excalidraw-diagram.ts";
 import { registerDispatchTool } from "./mcp/tools/dispatch.ts";
 import { registerOverviewTool } from "./mcp/tools/overview.ts";
+import { registerNarrativeTool } from "./mcp/tools/narrative.ts";
 import { logger } from "./mcp/logger.ts";
 
 const server = new McpServer({
@@ -25,6 +26,7 @@ registerReadDrawingTool(server);
 registerExcalidrawDiagramTool(server);
 registerDispatchTool(server);
 registerOverviewTool(server);
+registerNarrativeTool(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

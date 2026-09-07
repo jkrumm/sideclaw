@@ -91,7 +91,7 @@ log show --last 2m --info | grep -A3 sideclaw-server.plist | grep effectiveItemD
 
 ## MCP Server
 
-sideclaw exposes workflow tools (`check`, `review`, `dispatch`, `overview`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport. `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP surface — see `### agents`.
+sideclaw exposes workflow tools (`check`, `review`, `dispatch`, `overview`, `narrative`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport. `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP surface — see `### agents`.
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`; the actual execution logic + schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`.
 
@@ -99,7 +99,7 @@ Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`
 
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`check`/`review`/`dispatch`/`overview`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
+The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`). Not `/tmp` — macOS's periodic cleanup sweeps files there untouched for 3+ days, and a long-running agent then writes into an unlinked inode. See `server/jobs/store.ts`.
@@ -221,6 +221,74 @@ into the prompt by the handler.
   `mergeOverviewIntoSnapshot`, plus `renderText`'s enrichment path) are covered by
   `tests/overview.test.ts` — no subprocess, no mocks, mutation-verified on the unknown-id-drop
   and the standing-line-truncation bound.
+
+### narrative
+
+The `narrative` job (`server/jobs/handlers/narrative.ts`, prompt in `server/skills/narrative.md`)
+writes or revises ONE project's narrative page for the Obsidian vault: what the project is,
+where it stands, how it got here — business terms, never a changelog. Built for Hermes to run on
+a daily cron across tracked projects (or on an explicit "update this project's narrative"),
+never inline in an interactive session.
+
+- **Contract is fixed — Hermes builds against it.** Input `{ cwd, project, previousPage, since,
+  model? }`; output `{ project, changed, reason, summary, page, sections, inputs, model,
+  backend? }`. `previousPage` is the full existing markdown (or `null` on a first run);
+  `since` is an ISO cutoff (`null` bootstraps from history). `page` and `summary` are `null`
+  when `changed` is `false` — that is success, not a degraded result.
+- **Less is more, by design.** If nothing substantive happened (only formatting/deps/docs-only/
+  chores), the job returns `changed: false` with no page — enforced at two levels: the
+  deterministic gate below (zero commits and zero sessions never even calls the model) and the
+  skill prompt's explicit instruction that "nothing changed" is a correct, default-ish answer,
+  not a failure to justify.
+- **Deterministic gathering happens in the handler, before the model runs** — same argument as
+  `overview`/`dispatch`: discovery is the dominant turn-sink, so the worker gets pre-assembled
+  facts, never repo tools. Three sources, each capped:
+  - **Commits** — `git log --no-merges`, format `%h %cI %s%n%b`, oldest dropped once the total
+    exceeds **30 KB**. Bootstrap (`since: null`) intersects a **120-commit** limit with a
+    **180-day** `--since` — git applies both as AND, which is exactly "whichever is smaller".
+  - **Session prose** — `~/.claude/projects/<encodeProjectDir(cwd)>/*.jsonl` newer than `since`
+    (bootstrap: newest 12 files, no date filter), each read via a **1 MB tail slice** (never the
+    full, up to 16 MB, transcript — same discipline as `agents.ts`'s `readTranscriptTailFile`,
+    just a fixed slice rather than a progressive one since this only needs prose, not a
+    timestamp). Per session: the **last 3** assistant text blocks ≥200 chars (closing summaries)
+    plus the session's `ai-title`; files under 4 KB are skipped outright, and a file yielding
+    neither a title nor a long block consumes no budget. Newest sessions first, capped at
+    **40 KB** total.
+  - **`voice.md`** (`/Users/jkrumm/SourceRoot/brain/voice.md`, capped 12 KB) — the vault's prose
+    rules, included **verbatim, outside the untrusted-data fence** (it's user-authored, trusted,
+    and functions as part of the rules, not data to reason about).
+- **Nonce-fenced like `overview`** (`buildNarrativePrompt`): commits, session excerpts and the
+  previous page are all untrusted text that ultimately originated inside a coding session (a
+  commit message, a transcript excerpt, a prior model-written page), so they're wrapped in one
+  `<<<NARRATIVE_<nonce>_BEGIN/END>>>` block and the constraints are re-asserted AFTER the data,
+  same as `overview`'s `newFenceNonce`/`buildPrompt` (duplicated locally rather than imported —
+  the handlers are otherwise uncoupled).
+- **Caps are enforced in code, not trusted from the model**: `clampSections` truncates
+  `whatItIs` (≤450 chars), `whereItStands` (≤5×160), `openQuestions` (≤3×140), and
+  `howItGotHere` (≤8×180 — kept entries are the **most recent** 8, since the list is
+  oldest→newest and the current arc matters more than the earliest history). `stripInventedLinks`
+  removes any `[[wikilink]]` the model invents (unwrapped to its display text — a link to a page
+  that doesn't exist is a vault lint ERROR) and strips HTML comments; markdown itself is never
+  escaped.
+- **Malformed JSON gets exactly one retry**, same discipline as `review`'s synthesis salvage: a
+  fresh call with a hardened JSON-only directive appended, then the job throws — never a
+  degraded-but-confident-looking verdict.
+- **Rendering is deterministic** (`renderNarrativePage`): frontmatter carries `type:
+  project-narrative`, `description` (the first sentence of `whatItIs`, ≤160 chars), `tags:
+  [project, engineering, narrative]`, `timestamp` (`YYYY-MM-DD`), `repo` (cwd basename),
+  `revised_from` (`since` or `"bootstrap"`), `generated_by: sideclaw/narrative`. String
+  frontmatter values are double-quoted (`yamlString`) since generated prose routinely contains a
+  colon-space, which breaks an unquoted YAML flow scalar. The `## Open questions` section is
+  omitted entirely when the model returned none — not an empty heading.
+- **Model default is `WORKER_MODEL`** (`claude-sonnet-5[1m]`, reasoning tier) — this is editorial
+  judgment over a prompt, not classification, the opposite reasoning from `overview`'s
+  `CHECK_MODEL` default. Same Max/IU backend selection and quota fallback as every other worker
+  (see *Worker model — backend selection* below); a daily cron pass across several projects
+  spends real Max quota or IU tokens, so callers should not invoke it speculatively.
+- Pure units (`clampSections`, `stripInventedLinks`, `extractSessionProse`, `buildNarrativePrompt`,
+  `renderNarrativePage`) are covered by `tests/narrative.test.ts` — no subprocess, no mocks,
+  mutation-verified on the `howItGotHere` recency cap, the wikilink strip, and the tool-result/
+  user-line exclusion in prose extraction, same convention as `overview`/`dispatch`.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 
