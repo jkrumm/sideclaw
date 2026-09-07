@@ -1,140 +1,47 @@
 import { Elysia } from "elysia";
+import { buildSnapshot, renderText, type AgentEnrichment } from "../lib/agents.ts";
+import { latestJobResult } from "../jobs/store.ts";
 import {
-  collectDispatchJobs,
-  mergeAgents,
-  readClaudeAgents,
-  readHerdrAgents,
-  readHerdrWorkspaces,
-  readSessionTail,
-  renderText,
-  staleAfterHours,
-  type AgentsSnapshot,
-  type AgentsSummary,
-  type ProjectGit,
-  type TranscriptTail,
-} from "../lib/agents.ts";
-import { getGitStatus } from "../lib/git.ts";
-import { listJobRecords } from "../jobs/store.ts";
+  mergeOverviewIntoSnapshot,
+  OVERVIEW_OUTPUT,
+  type OverviewOutput,
+} from "../jobs/handlers/overview.ts";
 import { appLogger as logger } from "../logger.ts";
 
 // Deterministic, read-only, no-LLM agent overview: one JSON snapshot of every Claude Code
 // agent on this Mac mini, grouped by project. Single producer behind Hermes, an Argo
 // dashboard, a brain page and a herdr pane. See CLAUDE.md's `### agents` section.
+//
+// `buildSnapshot` itself now lives in lib/agents.ts — the `overview` job calls it
+// in-process too, rather than looping back over HTTP to this route.
 
-async function buildSnapshot(): Promise<AgentsSnapshot> {
-  const now = Date.now();
-  const staleHours = staleAfterHours();
-  const staleAfterMs = staleHours * 60 * 60 * 1000;
-
-  const [herdrAgentsResult, herdrWorkspacesResult, claudeAgentsResult] = await Promise.all([
-    readHerdrAgents(),
-    readHerdrWorkspaces(),
-    readClaudeAgents(),
-  ]);
-
-  const warnings = [
-    herdrAgentsResult.warning,
-    herdrWorkspacesResult.warning,
-    claudeAgentsResult.warning,
-  ].filter((w): w is string => w != null);
-
-  // Unique (cwd, sessionId) pairs across both sources — a herdr pane and its claude registry
-  // counterpart share the same sessionId and only need one transcript read.
-  const sessionsByCwd = new Map<string, string>();
-  for (const a of herdrAgentsResult.items) {
-    const sessionId = a.agent_session?.value;
-    if (sessionId) sessionsByCwd.set(sessionId, a.cwd);
+/** Reads the latest completed `overview` job result, re-validated against its own output
+ *  schema (the row is untyped JSON from sqlite) — a schema drift between an old cached job
+ *  and the current OVERVIEW_OUTPUT shape degrades to "no cached overview" rather than a
+ *  500. */
+function readCachedOverview(): OverviewOutput | null {
+  const cached = latestJobResult("overview");
+  if (!cached) return null;
+  const parsed = OVERVIEW_OUTPUT.safeParse(cached.result);
+  if (!parsed.success) {
+    logger.warn(
+      { event: "overview.cache_parse_failed", tool: "overview", error: parsed.error.message },
+      "cached overview job result failed schema validation — treating as absent",
+    );
+    return null;
   }
-  for (const c of claudeAgentsResult.items) {
-    sessionsByCwd.set(c.sessionId, c.cwd);
-  }
+  return parsed.data;
+}
 
-  const tailEntries = await Promise.all(
-    [...sessionsByCwd.entries()].map(
-      async ([sessionId, cwd]): Promise<[string, TranscriptTail]> => [
-        sessionId,
-        await readSessionTail(cwd, sessionId),
-      ],
-    ),
-  );
-  const transcripts = new Map(tailEntries);
-
-  const dispatchJobs = collectDispatchJobs(listJobRecords(), now);
-
-  const projects = mergeAgents({
-    herdrAgents: herdrAgentsResult.items,
-    herdrWorkspaces: herdrWorkspacesResult.items,
-    claudeAgents: claudeAgentsResult.items,
-    dispatchJobs,
-    transcripts,
-    now,
-    staleAfterMs,
-  });
-
-  const projectsWithGit = await Promise.all(
-    projects.map(async (project) => {
-      let git: ProjectGit | null = null;
-      try {
-        const status = await getGitStatus(project.cwd);
-        if (status) {
-          const commit = status.branchCommits[0] ?? status.masterCommits[0] ?? null;
-          git = {
-            branch: status.branch,
-            dirty: status.changedFiles.length > 0,
-            ahead: status.ahead,
-            behind: status.behind,
-            lastCommit: commit
-              ? { sha: commit.sha, subject: commit.subject, at: commit.committedAt }
-              : null,
-          };
-        }
-      } catch (err) {
-        warnings.push(`git status failed for ${project.name}: ${String(err)}`);
-      }
-      return { name: project.name, cwd: project.cwd, git, agents: project.agents };
-    }),
-  );
-
-  const summary: AgentsSummary = {
-    needsYou: 0,
-    working: 0,
-    idle: 0,
-    stale: 0,
-    done: 0,
-    dispatch: 0,
-  };
-  for (const project of projectsWithGit) {
-    for (const agent of project.agents) {
-      if (agent.source === "dispatch") summary.dispatch += 1;
-      switch (agent.state) {
-        case "needs_you":
-          summary.needsYou += 1;
-          break;
-        case "working":
-          summary.working += 1;
-          break;
-        case "idle":
-          summary.idle += 1;
-          break;
-        case "stale":
-          summary.stale += 1;
-          break;
-        case "done":
-          summary.done += 1;
-          break;
-        default:
-          break;
-      }
-    }
-  }
-
-  return {
-    generatedAt: now,
-    staleAfterHours: staleHours,
-    summary,
-    projects: projectsWithGit,
-    warnings,
-  };
+/** Fresh deterministic snapshot + the latest completed overview job, merged by agent id. Both
+ *  GET /api/overview and GET /api/overview.txt share this — the JSON route returns the merged
+ *  projects/agents directly, the text route additionally projects it into `renderText`'s
+ *  enrichment map. */
+async function buildOverviewResponse() {
+  const snapshot = await buildSnapshot();
+  const cached = readCachedOverview();
+  const merged = mergeOverviewIntoSnapshot(snapshot, cached);
+  return { snapshot, merged };
 }
 
 export const agentsRoutes = new Elysia({ prefix: "/api" })
@@ -178,4 +85,57 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       "agents snapshot built",
     );
     return renderText(data);
+  })
+  .get("/overview", async () => {
+    const startMs = performance.now();
+    logger.info(
+      { event: "overview.request", tool: "overview", format: "json" },
+      "overview snapshot requested",
+    );
+    const { snapshot, merged } = await buildOverviewResponse();
+    const data = { ...snapshot, projects: merged.projects, overview: merged.overview };
+    logger.info(
+      {
+        event: "overview.response",
+        tool: "overview",
+        format: "json",
+        projects: data.projects.length,
+        cached: merged.overview != null,
+        durationMs: Math.round(performance.now() - startMs),
+      },
+      "overview snapshot built",
+    );
+    return { ok: true, data };
+  })
+  .get("/overview.txt", async ({ set }) => {
+    const startMs = performance.now();
+    logger.info(
+      { event: "overview.request", tool: "overview", format: "text" },
+      "overview snapshot requested",
+    );
+    const { snapshot, merged } = await buildOverviewResponse();
+    const enrichment = new Map<string, AgentEnrichment>();
+    for (const project of merged.projects) {
+      for (const agent of project.agents) {
+        if (agent.recommendation) {
+          enrichment.set(agent.id, {
+            recommendation: agent.recommendation,
+            standing: agent.standing,
+          });
+        }
+      }
+    }
+    set.headers["content-type"] = "text/plain; charset=utf-8";
+    logger.info(
+      {
+        event: "overview.response",
+        tool: "overview",
+        format: "text",
+        projects: merged.projects.length,
+        cached: merged.overview != null,
+        durationMs: Math.round(performance.now() - startMs),
+      },
+      "overview snapshot built",
+    );
+    return renderText(snapshot, { enrichment, overview: merged.overview });
   });

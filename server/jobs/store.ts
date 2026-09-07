@@ -167,6 +167,22 @@ export function listJobRecords(limit = 50): JobRecord[] {
   return rows.map((r) => rowToRecord(r));
 }
 
+/**
+ * The newest `done` job's result for a tool, or null if none exists (or exists but has no
+ * result — shouldn't happen for `done`, defensive). Added for `GET /api/overview`: it needs
+ * the last completed `overview` job's cached recommendations to merge onto a fresh
+ * deterministic snapshot, without re-running the LLM on every request.
+ */
+export function latestJobResult(tool: JobTool): { result: unknown; finishedAt: number } | null {
+  const row = db
+    .query<JobRow, [string]>(
+      "SELECT * FROM jobs WHERE tool = ? AND status = 'done' ORDER BY finished_at DESC LIMIT 1",
+    )
+    .get(tool);
+  if (!row || row.result === null) return null;
+  return { result: JSON.parse(row.result), finishedAt: row.finished_at ?? row.created_at };
+}
+
 /** Snapshot of queue depth — for monitoring/logging. */
 export function queueStats(): { running: number; pending: number; max: number } {
   const pending =

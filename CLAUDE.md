@@ -91,7 +91,7 @@ log show --last 2m --info | grep -A3 sideclaw-server.plist | grep effectiveItemD
 
 ## MCP Server
 
-sideclaw exposes workflow tools (`check`, `review`, `dispatch`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport. `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP surface — see `### agents`.
+sideclaw exposes workflow tools (`check`, `review`, `dispatch`, `overview`) plus the job-polling tools (`job_status`, `job_wait`) as an MCP server — a **separate process** from the LaunchAgent, spawned on-demand by Claude Code via stdio transport. `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP surface — see `### agents`.
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`; the actual execution logic + schemas live in `server/jobs/handlers/`; skill prompts in `server/skills/`.
 
@@ -99,7 +99,7 @@ Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in `server/mcp/tools/`
 
 ### Async job model (durable, off the MCP transport)
 
-The long tools (`check`/`review`/`dispatch`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
+The long tools (`check`/`review`/`dispatch`/`overview`) do **not** block the MCP call. A 13-minute worker run held open as a single MCP request destabilizes the stdio transport (and the SDK's 60s client timeout). Instead:
 
 1. The MCP tool **submits a job** to the always-on HTTP server (`POST /api/jobs`) and returns `{ jobId, status }` immediately.
 2. The HTTP server (LaunchAgent, durable) runs the job in the background and persists state to **bun:sqlite** (`~/.local/share/sideclaw/jobs.db`). Not `/tmp` — macOS's periodic cleanup sweeps files there untouched for 3+ days, and a long-running agent then writes into an unlinked inode. See `server/jobs/store.ts`.
@@ -148,6 +148,72 @@ synchronous HTTP, not a job: no queue, no worker session, answers in one request
 - Pure units (`encodeProjectDir`, `parseTranscriptTail`, `deriveState`, `mergeAgents`,
   `renderText`) are covered by `tests/agents.test.ts` — no subprocess, no mocks, per repo
   convention.
+- `buildSnapshot` (the single producer above) lives in `server/lib/agents.ts` itself — the
+  `overview` job below calls it in-process, not over HTTP, to avoid looping back into its own
+  server.
+
+### overview
+
+The `overview` job (`server/jobs/handlers/overview.ts`, MCP tool + `GET /api/overview` /
+`GET /api/overview.txt` in `server/routes/agents.ts`) enriches the deterministic `agents`
+snapshot above with **one LLM recommendation per agent** — a batched, single-call, prompt-only
+triage pass, unlike `check`/`review`/`dispatch` it never touches a repo or a file: every fact
+the worker needs (project git status, agent state, transcript excerpts) is already assembled
+into the prompt by the handler.
+
+- **The recommendation enum**, one value per agent, from evidence only: `answer` (blocked on a
+  question/dialog/permission — reply to it), `continue` (idle mid-task, clear next step, safe
+  to send "continue"), `ship` (done but uncommitted/unpushed/ahead of origin — commit/push),
+  `review` (pushed, needs a code review or human QA), `merge` (a PR/branch is ready to merge),
+  `close` (finished, nothing pending), `stale` (abandoned/superseded, no clear next step),
+  `watch` (actively working, nothing to do — **the default when the model is unsure**). Each
+  entry also carries `standing` (≤120 chars, present tense, what the agent is actually doing),
+  `blocker` (≤80 chars or null) and `confidence` (`high`/`medium`/`low`).
+- **Model default is `CHECK_MODEL`** (`claude-haiku-4-5`, `session-runner.ts`) — this is
+  classification over a prompt, not code judgment, the same reasoning that put `check` on the
+  cheap tier. Override via the job's `model` input param; any id (Claude or not) still routes
+  through `SIDECLAW_WORKER_BACKEND` like every other worker.
+- **One batched `runSession` call for the whole fleet**, not one per agent — cheaper and lets
+  the model reason about relative priority across agents. `readOnly: true` plus
+  `extraDisallowedTools: ["Bash", "Read", "Grep", "Glob"]` make it prompt-only: the worker
+  cannot read a file or shell out, only reason over what the handler already gave it.
+  `maxTurns: 3`, 120s timeout — there is no discovery to do.
+- **Nonce-fenced facts, same pattern as dispatch's brief hardening** (`buildPrompt` in
+  `overview.ts`): the facts block quotes transcript excerpts (a user's prompts, an assistant's
+  own replies), which is model-generated text the worker's own session did not produce this
+  run, so it is fenced with a per-run random delimiter (`newFenceNonce`) and the constraints
+  are re-asserted AFTER the data block, not just before it.
+- **Reconciliation is two separate passes.** At job-completion time, `reconcileOverview` merges
+  the worker's per-agent verdicts onto the snapshot's own agent ids: an id the worker invented
+  is dropped (logged `overview.unknown_agent_id`); an id present in the snapshot but omitted by
+  the worker is synthesized to `recommendation: "watch"`, `standing: null`,
+  `confidence: "low"`, `synthesized: true` rather than silently missing. Separately, at request
+  time, `mergeOverviewIntoSnapshot` merges the *latest cached* job result onto a *fresh*
+  snapshot for `GET /api/overview` — see below.
+- **`GET /api/overview` / `GET /api/overview.txt` never run the LLM inline.** They take a fresh
+  deterministic snapshot and merge the newest **completed** `overview` job's result onto it by
+  agent id (`latestJobResult("overview")` in `server/jobs/store.ts`, re-validated against
+  `OVERVIEW_OUTPUT` — a schema-drifted old cached job degrades to "no cached overview", never a
+  500). An agent that has been active more recently than the cached job ran
+  (`cached.generatedAt < agent.lastActivityAt`) gets its recommendation fields nulled and
+  `recommendationStale: true` instead of presenting a stale verdict as current — call the
+  `overview` job again to refresh it. JSON response: `{ ok, data: { ...snapshot,
+  overview: { generatedAt, model, ageMs } | null } }`, with `recommendation`/`standing`/
+  `blocker`/`confidence`/`recommendationStale` merged directly onto each agent object.
+- **`renderText` (agents.ts) takes an optional `enrichment` map + `overview` meta** rather than
+  a duplicated renderer: called with no `opts` (the plain `/api/agents.txt` path) it is
+  byte-identical to before enrichment existed. With enrichment, the state icon is replaced by
+  the recommendation icon (`answer`→`?!`, `continue`→`→`, `ship`→`⇧`, `review`→`⚑`, `merge`→`⇄`,
+  `close`→`✓`, `stale`→`·`, `watch`→`●`), a non-null `standing` gets an indented second line
+  (≤110 chars, truncated), and the header gains `· overview <age>` / `· overview none`. The
+  header line itself is deliberately **not** run through the shared 110-char `clampLine` (that
+  cap exists to bound externally-influenced agent text, not the handler's own bounded summary
+  line) — clamping it would silently drop the overview suffix on every call, since the base
+  header (~100 chars) plus the suffix (~15-18 chars) already exceeds 110.
+- Pure units (`buildAgentFacts`, `buildPrompt`, `newFenceNonce`, `reconcileOverview`,
+  `mergeOverviewIntoSnapshot`, plus `renderText`'s enrichment path) are covered by
+  `tests/overview.test.ts` — no subprocess, no mocks, mutation-verified on the unknown-id-drop
+  and the standing-line-truncation bound.
 
 Higher-order tools reuse capabilities at the **code level, not via MCP recursion**: `review` angle workers can validate external library/API claims against the standalone **research-gateway** (a bounded bearer-auth `curl`, gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate (check capability) — no nested jobs, no semaphore deadlock.
 

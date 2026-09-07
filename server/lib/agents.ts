@@ -4,6 +4,8 @@ import { homedir } from "os";
 import { z } from "zod";
 import { appLogger as logger } from "../logger.ts";
 import type { JobRecord, JobStatus } from "../jobs/types.ts";
+import { listJobRecords } from "../jobs/store.ts";
+import { getGitStatus } from "./git.ts";
 
 // One producer, one JSON snapshot, three renderers (Hermes, an Argo dashboard, a brain page,
 // a herdr pane). Read-only, no LLM: this module deterministically merges three CLI/registry
@@ -27,6 +29,38 @@ export type ClaudeAgentStatus = z.infer<typeof CLAUDE_STATUS>;
 
 export const DISPATCH_TIER = z.enum(["investigate", "author", "implement"]);
 export type DispatchTierName = z.infer<typeof DISPATCH_TIER>;
+
+// ── `overview` job's recommendation enum ────────────────────────────────────────────────────
+//
+// Lives here (not in jobs/handlers/overview.ts) so the pure `renderText` renderer — this
+// module's, not the job's — can map it to an icon without an upward import from lib/ into
+// jobs/handlers/. overview.ts imports this instead of redeclaring it.
+
+export const RECOMMENDATION = z.enum([
+  "answer", // blocked on a question/dialog/permission — reply to it
+  "continue", // idle mid-task with a clear next step — safe to send "continue"
+  "ship", // done but uncommitted/unpushed/ahead of origin — commit/push
+  "review", // pushed and needs review or human QA before it counts as done
+  "merge", // a PR/branch is ready to merge
+  "close", // finished, nothing pending — the pane can be closed
+  "stale", // abandoned or superseded, no clear next step
+  "watch", // actively working, nothing to do — also the safe default when unsure
+]);
+export type Recommendation = z.infer<typeof RECOMMENDATION>;
+
+export const CONFIDENCE = z.enum(["high", "medium", "low"]);
+export type Confidence = z.infer<typeof CONFIDENCE>;
+
+export const RECOMMENDATION_ICON: Record<Recommendation, string> = {
+  answer: "?!",
+  continue: "→",
+  ship: "⇧",
+  review: "⚑",
+  merge: "⇄",
+  close: "✓",
+  stale: "·",
+  watch: "●",
+};
 
 export const AGENT_OUTPUT = z.object({
   id: z
@@ -81,7 +115,7 @@ export const AGENT_OUTPUT = z.object({
     .nullable()
     .describe(
       "The last non-empty assistant text block from the transcript tail, trimmed and capped " +
-        "at 400 chars. Null if unavailable.",
+        "at 800 chars. Null if unavailable.",
     ),
   lastActivityAt: z
     .number()
@@ -188,7 +222,10 @@ const EMPTY_TAIL: TranscriptTail = {
   lastActivityAt: null,
 };
 
-const MAX_REPLY_CHARS = 400;
+// Raised 400 → 800 for the `overview` job's prompt, which quotes lastReply as context for
+// the LLM recommendation — the API field cap stays in lockstep (see AGENT_OUTPUT above) so
+// there's one source of truth, not a second cap that could drift from this one.
+const MAX_REPLY_CHARS = 800;
 
 /**
  * Parses the tail of a session's `.jsonl` transcript (already truncated to the last N bytes
@@ -538,8 +575,14 @@ const STATE_ICON: Record<AgentState, string> = {
 
 const MAX_LINE_CHARS = 110;
 const MAX_TITLE_CHARS = 48;
+// MAX_LINE_CHARS minus the "      — " prefix (8 chars) the standing line is rendered with —
+// sized so `truncate`'s own elided "…" survives clampLine's hard cut rather than being sliced
+// off by it (truncate elides at maxChars, clampLine would otherwise cut mid-ellipsis).
+const MAX_STANDING_CHARS = MAX_LINE_CHARS - 8;
 
-function relativeAge(ms: number | null, now: number): string {
+/** Exported for the `overview` job's prompt builder, which needs identical "N ago" phrasing
+ *  for the facts it hands the LLM — one source of truth for the format, not a second copy. */
+export function relativeAge(ms: number | null, now: number): string {
   if (ms == null) return "?";
   const deltaSec = Math.max(0, Math.round((now - ms) / 1000));
   if (deltaSec < 60) return `${deltaSec}s`;
@@ -551,7 +594,9 @@ function relativeAge(ms: number | null, now: number): string {
   return `${deltaDay}d`;
 }
 
-function truncate(text: string, maxChars: number): string {
+/** Exported for the same reason as `relativeAge` — the `overview` prompt builder caps
+ *  lastPrompt/lastReply excerpts and should truncate identically to this renderer. */
+export function truncate(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
 }
 
@@ -559,31 +604,67 @@ function clampLine(line: string): string {
   return line.length > MAX_LINE_CHARS ? line.slice(0, MAX_LINE_CHARS) : line;
 }
 
-/** Renders the same snapshot GET /api/agents returns as compact plain text for `watch`. */
-export function renderText(snapshot: AgentsSnapshot): string {
+/** Per-agent LLM enrichment, keyed by agent id — the `overview` job's result merged onto a
+ *  fresh deterministic snapshot by `GET /api/overview`. Absent (or the agent's id missing
+ *  from the map) means "no recommendation available", which `renderText` falls back on the
+ *  deterministic `state` icon for — never a blank icon. */
+export interface AgentEnrichment {
+  recommendation: Recommendation;
+  standing: string | null;
+}
+
+export interface RenderTextOptions {
+  enrichment?: Map<string, AgentEnrichment>;
+  /** `/api/overview`'s job metadata, or null when no `overview` job has ever completed.
+   *  Omit entirely (undefined) to render exactly like the plain `/api/agents.txt` — this is
+   *  what keeps the two callers sharing one renderer without a duplicate copy. */
+  overview?: { ageMs: number } | null;
+}
+
+/** Renders the same snapshot GET /api/agents returns as compact plain text for `watch`.
+ *  `GET /api/overview.txt` calls this with `opts.enrichment`/`opts.overview` to swap the
+ *  deterministic state icon for a recommendation icon and add a standing line — see
+ *  CLAUDE.md's `### overview` section. Called with no `opts` (the plain `/api/agents.txt`
+ *  path), behavior is byte-identical to before enrichment existed. */
+export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): string {
   const { summary, generatedAt, projects } = snapshot;
   const lines: string[] = [];
 
   const generatedAtIso = new Date(generatedAt).toISOString();
-  lines.push(
-    clampLine(
-      `agents: ${summary.needsYou} needs_you · ${summary.working} working · ${summary.idle} idle · ` +
-        `${summary.stale} stale · ${summary.done} done · ${summary.dispatch} dispatch  (${generatedAtIso})`,
-    ),
-  );
+  let header =
+    `agents: ${summary.needsYou} needs_you · ${summary.working} working · ${summary.idle} idle · ` +
+    `${summary.stale} stale · ${summary.done} done · ${summary.dispatch} dispatch  (${generatedAtIso})`;
+  if (opts && "overview" in opts) {
+    header +=
+      opts.overview != null
+        ? `  · overview ${relativeAge(generatedAt - opts.overview.ageMs, generatedAt)}`
+        : "  · overview none";
+  }
+  // NOT clampLine'd: the header is entirely first-party, bounded content (summary counts, an
+  // ISO timestamp, the short overview suffix) — clampLine's cap exists to bound EXTERNALLY-
+  // influenced text (an agent's title/waitingFor), and the base header (100 chars) plus the
+  // overview suffix (~15-18 chars) already exceeds 110, so clamping it would silently drop
+  // the "overview <age>"/"overview none" suffix the caller asked for on every call.
+  lines.push(header);
 
   for (const project of projects) {
     const branch = project.git ? project.git.branch + (project.git.dirty ? "*" : "") : "?";
     lines.push(clampLine(`▸ ${project.name}  ${branch}  [${project.agents.length} agents]`));
 
     for (const agent of project.agents) {
-      const icon = STATE_ICON[agent.state];
+      const enrichment = opts?.enrichment?.get(agent.id);
+      const icon = enrichment
+        ? RECOMMENDATION_ICON[enrichment.recommendation]
+        : STATE_ICON[agent.state];
       const statePadded = agent.state.padEnd(9);
       const title = truncate(agent.title ?? "(untitled)", MAX_TITLE_CHARS);
       const age = relativeAge(agent.lastActivityAt, generatedAt);
       let line = `  ${icon} ${statePadded} ${title}  · ${age}`;
       if (agent.waitingFor) line += `  · ${agent.waitingFor}`;
       lines.push(clampLine(line));
+      if (enrichment?.standing) {
+        lines.push(clampLine(`      — ${truncate(enrichment.standing, MAX_STANDING_CHARS)}`));
+      }
     }
   }
 
@@ -753,4 +834,131 @@ export function staleAfterHours(): number {
   const raw = process.env.SIDECLAW_AGENT_STALE_HOURS;
   const parsed = raw ? parseInt(raw, 10) : NaN;
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_STALE_HOURS;
+}
+
+// ── The one snapshot builder ─────────────────────────────────────────────────────────────────
+//
+// Single producer behind `GET /api/agents` (routes/agents.ts) AND the `overview` job
+// (jobs/handlers/overview.ts) — the latter calls this in-process rather than looping back
+// over HTTP to itself. Originally lived inline in routes/agents.ts; moved here so both
+// callers import the same function instead of one re-deriving it.
+
+/** Override the stale-agent threshold used to derive each agent's `state` — the `overview`
+ *  job's `staleAfterHours` input param. Omitted (the `GET /api/agents` path): read from
+ *  `SIDECLAW_AGENT_STALE_HOURS` via `staleAfterHours()`, unchanged from before this param
+ *  existed. */
+export async function buildSnapshot(staleHoursOverride?: number): Promise<AgentsSnapshot> {
+  const now = Date.now();
+  const staleHours = staleHoursOverride ?? staleAfterHours();
+  const staleAfterMs = staleHours * 60 * 60 * 1000;
+
+  const [herdrAgentsResult, herdrWorkspacesResult, claudeAgentsResult] = await Promise.all([
+    readHerdrAgents(),
+    readHerdrWorkspaces(),
+    readClaudeAgents(),
+  ]);
+
+  const warnings = [
+    herdrAgentsResult.warning,
+    herdrWorkspacesResult.warning,
+    claudeAgentsResult.warning,
+  ].filter((w): w is string => w != null);
+
+  // Unique (cwd, sessionId) pairs across both sources — a herdr pane and its claude registry
+  // counterpart share the same sessionId and only need one transcript read.
+  const sessionsByCwd = new Map<string, string>();
+  for (const a of herdrAgentsResult.items) {
+    const sessionId = a.agent_session?.value;
+    if (sessionId) sessionsByCwd.set(sessionId, a.cwd);
+  }
+  for (const c of claudeAgentsResult.items) {
+    sessionsByCwd.set(c.sessionId, c.cwd);
+  }
+
+  const tailEntries = await Promise.all(
+    [...sessionsByCwd.entries()].map(
+      async ([sessionId, cwd]): Promise<[string, TranscriptTail]> => [
+        sessionId,
+        await readSessionTail(cwd, sessionId),
+      ],
+    ),
+  );
+  const transcripts = new Map(tailEntries);
+
+  const dispatchJobs = collectDispatchJobs(listJobRecords(), now);
+
+  const projects = mergeAgents({
+    herdrAgents: herdrAgentsResult.items,
+    herdrWorkspaces: herdrWorkspacesResult.items,
+    claudeAgents: claudeAgentsResult.items,
+    dispatchJobs,
+    transcripts,
+    now,
+    staleAfterMs,
+  });
+
+  const projectsWithGit = await Promise.all(
+    projects.map(async (project) => {
+      let git: ProjectGit | null = null;
+      try {
+        const status = await getGitStatus(project.cwd);
+        if (status) {
+          const commit = status.branchCommits[0] ?? status.masterCommits[0] ?? null;
+          git = {
+            branch: status.branch,
+            dirty: status.changedFiles.length > 0,
+            ahead: status.ahead,
+            behind: status.behind,
+            lastCommit: commit
+              ? { sha: commit.sha, subject: commit.subject, at: commit.committedAt }
+              : null,
+          };
+        }
+      } catch (err) {
+        warnings.push(`git status failed for ${project.name}: ${String(err)}`);
+      }
+      return { name: project.name, cwd: project.cwd, git, agents: project.agents };
+    }),
+  );
+
+  const summary: AgentsSummary = {
+    needsYou: 0,
+    working: 0,
+    idle: 0,
+    stale: 0,
+    done: 0,
+    dispatch: 0,
+  };
+  for (const project of projectsWithGit) {
+    for (const agent of project.agents) {
+      if (agent.source === "dispatch") summary.dispatch += 1;
+      switch (agent.state) {
+        case "needs_you":
+          summary.needsYou += 1;
+          break;
+        case "working":
+          summary.working += 1;
+          break;
+        case "idle":
+          summary.idle += 1;
+          break;
+        case "stale":
+          summary.stale += 1;
+          break;
+        case "done":
+          summary.done += 1;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  return {
+    generatedAt: now,
+    staleAfterHours: staleHours,
+    summary,
+    projects: projectsWithGit,
+    warnings,
+  };
 }

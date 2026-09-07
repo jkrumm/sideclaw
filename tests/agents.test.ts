@@ -107,10 +107,10 @@ describe("parseTranscriptTail", () => {
     });
   });
 
-  test("lastReply is capped at 400 chars", () => {
-    const long = "x".repeat(500);
+  test("lastReply is capped at 800 chars", () => {
+    const long = "x".repeat(900);
     const tail = parseTranscriptTail(assistantLine(long, "2026-09-01T00:00:00.000Z"));
-    expect(tail.lastReply?.length).toBe(400);
+    expect(tail.lastReply?.length).toBe(800);
   });
 
   test("a multi-block assistant message picks the last non-empty text block within it", () => {
