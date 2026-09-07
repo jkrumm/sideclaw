@@ -1,5 +1,5 @@
 import { Elysia } from "elysia";
-import { buildSnapshot, renderText, type AgentEnrichment } from "../lib/agents.ts";
+import { buildSnapshot, parseCols, renderText, type AgentEnrichment } from "../lib/agents.ts";
 import { latestJobResult } from "../jobs/store.ts";
 import {
   mergeOverviewIntoSnapshot,
@@ -68,6 +68,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
   .get("/agents.txt", async ({ query, set }) => {
     const startMs = performance.now();
     const color = query.color === "1" || query.ansi === "1";
+    const cols = parseCols(query.cols);
     logger.info(
       { event: "agents.request", tool: "agents", format: "text" },
       "agents snapshot requested",
@@ -85,7 +86,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       },
       "agents snapshot built",
     );
-    return renderText(data, { color });
+    return renderText(data, { color, cols });
   })
   .get("/overview", async () => {
     const startMs = performance.now();
@@ -111,6 +112,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
   .get("/overview.txt", async ({ query, set }) => {
     const startMs = performance.now();
     const color = query.color === "1" || query.ansi === "1";
+    const cols = parseCols(query.cols);
     logger.info(
       { event: "overview.request", tool: "overview", format: "text" },
       "overview snapshot requested",
@@ -139,5 +141,5 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       },
       "overview snapshot built",
     );
-    return renderText(snapshot, { enrichment, overview: merged.overview, color });
+    return renderText(snapshot, { enrichment, overview: merged.overview, color, cols });
   });

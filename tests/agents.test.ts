@@ -19,8 +19,10 @@ import {
   readTranscriptTailFile,
   renderText,
   stripAnsi,
+  type AgentEnrichment,
   type AgentsSnapshot,
   type ClaudeAgentRaw,
+  type RenderTextOptions,
   type DispatchJobRaw,
   type HerdrAgentRaw,
   type HerdrWorkspaceRaw,
@@ -794,6 +796,168 @@ describe("renderText with color", () => {
       // Every visible-clamped line still ends in a reset once truncated.
       expect(stripAnsi(line).length).toBeLessThanOrEqual(110);
       if (line.includes("\x1b[")) expect(line.endsWith("\x1b[0m")).toBe(true);
+    }
+  });
+});
+
+// ── renderText — narrow terminal (opts.cols) ────────────────────────────────────────────────
+
+describe("renderText with cols", () => {
+  // Deliberately over-long everywhere a real terminal could wrap: two agents (one blocked with
+  // a long waitingFor, one plain), a long title, a long branch/project name, and — via
+  // enrichment — a long standing line. Shared by both narrow-width tests below.
+  function bigFixture(): { data: AgentsSnapshot; enrichment: Map<string, AgentEnrichment> } {
+    const data: AgentsSnapshot = {
+      generatedAt: NOW,
+      staleAfterHours: 24,
+      summary: { needsYou: 1, working: 1, idle: 0, stale: 0, done: 0, dispatch: 0 },
+      warnings: [],
+      projects: [
+        {
+          name: "a-fairly-long-project-name-for-testing",
+          cwd: "/x/some-project",
+          git: {
+            branch: "a-fairly-long-feature-branch-name",
+            dirty: true,
+            ahead: 0,
+            behind: 0,
+            lastCommit: null,
+          },
+          agents: [
+            {
+              id: "a1",
+              source: "herdr",
+              sessionId: "a1",
+              paneId: "wR:p4",
+              workspaceId: "wR",
+              title: "T".repeat(200),
+              state: "needs_you",
+              herdrStatus: "blocked",
+              claudeStatus: null,
+              waitingFor: "w".repeat(200),
+              tier: null,
+              lastPrompt: null,
+              lastReply: null,
+              lastActivityAt: NOW - 5 * 60_000,
+              startedAt: null,
+            },
+            {
+              id: "a2",
+              source: "claude",
+              sessionId: "a2",
+              paneId: null,
+              workspaceId: null,
+              title: "another task in progress",
+              state: "working",
+              herdrStatus: null,
+              claudeStatus: "busy",
+              waitingFor: null,
+              tier: null,
+              lastPrompt: null,
+              lastReply: null,
+              lastActivityAt: NOW - 60_000,
+              startedAt: null,
+            },
+          ],
+        },
+      ],
+    };
+    const enrichment = new Map<string, { recommendation: "answer"; standing: string }>([
+      ["a1", { recommendation: "answer", standing: "s".repeat(300) }],
+    ]);
+    return { data, enrichment };
+  }
+
+  function assertWidthHolds(cols: number) {
+    const { data, enrichment } = bigFixture();
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, color: true, cols });
+    const lines = text.split("\n");
+    for (const line of lines) {
+      expect(stripAnsi(line).length).toBeLessThanOrEqual(cols);
+    }
+    // The standing line's truncation must still elide with "…", not get chopped mid-ellipsis
+    // by the hard clamp — this is what the `standingMax = cols - 8` offset (not just `cols`)
+    // exists for.
+    const standingLine = lines.find((l) => l.includes("—"));
+    expect(standingLine).toBeDefined();
+    expect(stripAnsi(standingLine as string).endsWith("…")).toBe(true);
+  }
+
+  test("every line's visible width stays within cols=80 on the big fixture", () => {
+    assertWidthHolds(80);
+  });
+
+  test("every line's visible width stays within cols=60 on the big fixture", () => {
+    assertWidthHolds(60);
+  });
+
+  test("title is capped at cols-40 (min 20) — a cols=45 title never grows the line", () => {
+    const { data, enrichment } = bigFixture();
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, cols: 45 });
+    const agentLine = text.split("\n").find((l) => l.includes("TTTT"));
+    expect(agentLine).toBeDefined();
+    // MIN_TITLE_CHARS(20) survives as the truncated title's length (incl. the elided "…").
+    expect(agentLine).toContain("T".repeat(19) + "…");
+  });
+
+  test("project line drops the agent-count suffix below cols=90", () => {
+    const { data, enrichment } = bigFixture();
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, cols: 80 });
+    const projectLine = text.split("\n").find((l) => l.includes("▸"));
+    expect(projectLine).toBeDefined();
+    expect(projectLine).not.toContain("agents]");
+  });
+
+  test("project line keeps the agent-count suffix at cols=90 and above", () => {
+    const { data, enrichment } = bigFixture();
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, cols: 90 });
+    const projectLine = text.split("\n").find((l) => l.includes("▸"));
+    expect(projectLine).toContain("[2 agents]");
+  });
+
+  test("header splits into two lines below cols=100", () => {
+    const { data, enrichment } = bigFixture();
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, cols: 80 });
+    const lines = text.split("\n");
+    expect(lines[0]).toContain("needs_you");
+    expect(lines[0]).not.toContain("overview");
+    expect(lines[1]).toContain("overview");
+  });
+
+  test("header stays one (unsplit) line once cols is wide enough to hold it whole", () => {
+    const { data, enrichment } = bigFixture();
+    // Wide enough that the combined counts+timestamp+overview header (~115 chars here) is
+    // never truncated — cols=100 alone only guarantees "not split", not "not clamped", since
+    // `cols` "replaces the fixed 110 clamp for every line" including the header.
+    const text = renderText(data, { enrichment, overview: { ageMs: 0 }, cols: 150 });
+    const lines = text.split("\n");
+    expect(lines[0]).toContain("needs_you");
+    expect(lines[0]).toContain("overview");
+    expect(lines.filter((l) => l.includes("overview")).length).toBe(1);
+  });
+
+  // MUTATION-VERIFIED: replacing `standingMax = cols - 8` with `cols` (dropping the prefix
+  // offset) turns this red — clampVisible's hard cut then lands mid-ellipsis, so the standing
+  // line no longer ends with "…".
+  test("mutation guard: the standing cap leaves room for the '      — ' prefix", () => {
+    assertWidthHolds(80);
+    assertWidthHolds(60);
+  });
+
+  test("default behaviour (no opts.cols at all) is unaffected by the narrow-width machinery", () => {
+    const { data, enrichment } = bigFixture();
+    const opts: RenderTextOptions = { enrichment, overview: { ageMs: 0 } };
+    const text = renderText(data, opts);
+    // Single header line (never split — legacy path), title truncated at the fixed
+    // MAX_TITLE_CHARS (48), agent-count suffix kept — all exactly as before `cols` existed.
+    const lines = text.split("\n");
+    expect(lines[0]).toContain("overview"); // not split into two lines
+    expect(lines.filter((l) => l.includes("overview")).length).toBe(1);
+    expect(text).toContain("[2 agents]");
+    // Header stays exempt from the clamp in this path (documented above) — every OTHER line
+    // still respects the fixed 110-char cap.
+    for (const line of lines.slice(1)) {
+      expect(line.length).toBeLessThanOrEqual(110);
     }
   });
 });

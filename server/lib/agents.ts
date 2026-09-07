@@ -580,6 +580,36 @@ const MAX_TITLE_CHARS = 48;
 // off by it (truncate elides at maxChars, clampLine would otherwise cut mid-ellipsis).
 const MAX_STANDING_CHARS = MAX_LINE_CHARS - 8;
 
+// ── Narrow-terminal rendering (`?cols=` on the .txt routes, for a phone-width herdr/watch
+// pane) ──────────────────────────────────────────────────────────────────────────────────────
+//
+// `opts.cols` UNSET is the legacy path: every width above stays the fixed MAX_LINE_CHARS/
+// MAX_TITLE_CHARS/MAX_STANDING_CHARS constants, byte-identical to before `cols` existed — this
+// is what keeps every pre-existing test (which never sets `opts.cols`) passing unchanged. A
+// caller that DOES set `opts.cols` (the .txt routes always do, default 110) gets every visible
+// width re-derived from it instead: MIN_COLS/MAX_COLS bound the route's query value,
+// MIN_TITLE_CHARS floors the title budget so an aggressively narrow `cols` never collapses it
+// to nothing.
+export const MIN_COLS = 40;
+export const MAX_COLS = 200;
+export const DEFAULT_COLS = 110;
+const MIN_TITLE_CHARS = 20;
+// Below this width, "  [N agents]" on the project line would routinely be the difference
+// between fitting and wrapping on a phone terminal — drop it, the agent list itself still
+// shows the count.
+const DROP_AGENT_COUNT_BELOW_COLS = 90;
+// Below this width, the single header line (counts + ISO timestamp + overview age) routinely
+// exceeds `cols` on its own — split it rather than let a narrow terminal wrap it mid-sentence.
+const SPLIT_HEADER_BELOW_COLS = 100;
+
+/** Clamps and defaults the `?cols=` query param — shared by the `.txt` routes so the bounds
+ *  live in one place next to the renderer that consumes them. Non-numeric/absent → `DEFAULT_COLS`. */
+export function parseCols(raw: string | undefined): number {
+  const parsed = raw ? parseInt(raw, 10) : NaN;
+  if (!Number.isFinite(parsed)) return DEFAULT_COLS;
+  return Math.min(MAX_COLS, Math.max(MIN_COLS, parsed));
+}
+
 // ── ANSI colour (opt-in, `?color=1`/`?ansi=1` on the .txt routes) ──────────────────────────────
 //
 // SGR only, no 256/truecolor — this renders in a herdr pane via `watch --color`, and plain
@@ -790,8 +820,8 @@ export function truncate(text: string, maxChars: number): string {
   return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
 }
 
-function clampLine(line: string): string {
-  return line.length > MAX_LINE_CHARS ? line.slice(0, MAX_LINE_CHARS) : line;
+function clampLine(line: string, maxChars: number = MAX_LINE_CHARS): string {
+  return line.length > maxChars ? line.slice(0, maxChars) : line;
 }
 
 /** Per-agent LLM enrichment, keyed by agent id — the `overview` job's result merged onto a
@@ -813,6 +843,13 @@ export interface RenderTextOptions {
    *  herdr overview pane). Omitted or `false` renders byte-identical plain text — this is what
    *  keeps every pre-existing test and caller unaffected. */
   color?: boolean;
+  /** Opt-in narrow-terminal width (`?cols=` on the .txt routes, `MIN_COLS`–`MAX_COLS`, phone
+   *  width for a herdr/`watch` pane). Omitted (undefined) keeps the legacy fixed
+   *  MAX_LINE_CHARS/MAX_TITLE_CHARS/MAX_STANDING_CHARS clamp — this is what keeps every
+   *  pre-existing test and caller unaffected. Set (the .txt routes always set it, default
+   *  `DEFAULT_COLS`), every visible width re-derives from it instead — see the constants above
+   *  `parseCols`. */
+  cols?: number;
 }
 
 /** Renders the same snapshot GET /api/agents returns as compact plain text for `watch`.
@@ -822,28 +859,58 @@ export interface RenderTextOptions {
  *  path), behavior is byte-identical to before enrichment existed. `opts.color` (see
  *  `RenderTextOptions`) additionally colours every span with SGR codes and prepends a
  *  recommendation-count summary bar — `stripAnsi()` of that output (minus the bar line)
- *  is byte-identical to the uncoloured render. */
+ *  is byte-identical to the uncoloured render. `opts.cols` re-derives every visible-width
+ *  budget from a narrower terminal width instead of the fixed 110-char default. */
 export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): string {
   const { summary, generatedAt, projects } = snapshot;
   const color = opts?.color === true;
+  const cols = opts?.cols;
+  const lineMax = cols ?? MAX_LINE_CHARS;
+  const titleMax = cols != null ? Math.max(MIN_TITLE_CHARS, cols - 40) : MAX_TITLE_CHARS;
+  const standingMax = cols != null ? cols - 8 : MAX_STANDING_CHARS;
+  const dropAgentCount = cols != null && cols < DROP_AGENT_COUNT_BELOW_COLS;
+  const splitHeader = cols != null && cols < SPLIT_HEADER_BELOW_COLS;
   const lines: string[] = [];
 
   const generatedAtIso = new Date(generatedAt).toISOString();
-  let header =
+  const countsText =
     `agents: ${summary.needsYou} needs_you · ${summary.working} working · ${summary.idle} idle · ` +
-    `${summary.stale} stale · ${summary.done} done · ${summary.dispatch} dispatch  (${generatedAtIso})`;
+    `${summary.stale} stale · ${summary.done} done · ${summary.dispatch} dispatch`;
+  let metaText = `(${generatedAtIso})`;
   if (opts && "overview" in opts) {
-    header +=
+    metaText +=
       opts.overview != null
         ? `  · overview ${relativeAge(generatedAt - opts.overview.ageMs, generatedAt)}`
         : "  · overview none";
   }
-  // NOT clampLine'd: the header is entirely first-party, bounded content (summary counts, an
-  // ISO timestamp, the short overview suffix) — clampLine's cap exists to bound EXTERNALLY-
-  // influenced text (an agent's title/waitingFor), and the base header (100 chars) plus the
-  // overview suffix (~15-18 chars) already exceeds 110, so clamping it would silently drop
-  // the "overview <age>"/"overview none" suffix the caller asked for on every call.
-  lines.push(color ? `${DIM}${header}${RESET}` : header);
+  // Legacy (`cols` unset): NOT clampLine'd, always a single line — the header is entirely
+  // first-party, bounded content (summary counts, an ISO timestamp, the short overview suffix)
+  // — clampLine's cap exists to bound EXTERNALLY-influenced text (an agent's title/waitingFor),
+  // and the combined header (100 chars) plus the overview suffix (~15-18 chars) already exceeds
+  // 110, so clamping it would silently drop the "overview <age>"/"overview none" suffix the
+  // caller asked for on every call.
+  //
+  // `cols` set: it "replaces the fixed 110 visible-width clamp for every line" (including this
+  // one) — a caller asking for a narrow phone width is choosing to accept a hard cut over an
+  // unbounded header, which `splitHeader` (cols < SPLIT_HEADER_BELOW_COLS) already halves the
+  // odds of needing.
+  if (splitHeader) {
+    const line1 = color ? `${DIM}${countsText}${RESET}` : countsText;
+    const line2 = color ? `${DIM}${metaText}${RESET}` : metaText;
+    if (color) {
+      lines.push(clampVisible(line1, lineMax), clampVisible(line2, lineMax));
+    } else {
+      lines.push(clampLine(line1, lineMax), clampLine(line2, lineMax));
+    }
+  } else {
+    const header = `${countsText}  ${metaText}`;
+    const headerLine = color ? `${DIM}${header}${RESET}` : header;
+    if (cols != null) {
+      lines.push(color ? clampVisible(headerLine, lineMax) : clampLine(headerLine, lineMax));
+    } else {
+      lines.push(headerLine);
+    }
+  }
 
   if (color) {
     const bar = buildRecommendationBar(projects, opts?.enrichment, opts?.overview != null);
@@ -852,16 +919,17 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
 
   for (const project of projects) {
     const branch = project.git ? project.git.branch + (project.git.dirty ? "*" : "") : "?";
+    const agentCountSuffix = dropAgentCount ? "" : `  [${project.agents.length} agents]`;
     if (color) {
       const branchName = project.git ? project.git.branch : "?";
       const dirty = project.git?.dirty ?? false;
       const coloredBranch = `${CYAN}${branchName}${RESET}${dirty ? `${RED}*${RESET}` : ""}`;
       const projectLine =
         `${BOLD}▸ ${project.name}  ${RESET}${coloredBranch}` +
-        `${BOLD}  [${project.agents.length} agents]${RESET}`;
-      lines.push(clampVisible(projectLine, MAX_LINE_CHARS));
+        (agentCountSuffix ? `${BOLD}${agentCountSuffix}${RESET}` : "");
+      lines.push(clampVisible(projectLine, lineMax));
     } else {
-      lines.push(clampLine(`▸ ${project.name}  ${branch}  [${project.agents.length} agents]`));
+      lines.push(clampLine(`▸ ${project.name}  ${branch}${agentCountSuffix}`, lineMax));
     }
 
     for (const agent of project.agents) {
@@ -870,7 +938,7 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
         ? RECOMMENDATION_ICON[enrichment.recommendation]
         : STATE_ICON[agent.state];
       const statePadded = agent.state.padEnd(9);
-      const title = truncate(agent.title ?? "(untitled)", MAX_TITLE_CHARS);
+      const title = truncate(agent.title ?? "(untitled)", titleMax);
       const age = relativeAge(agent.lastActivityAt, generatedAt);
       const base = `  ${icon} ${statePadded} ${title}  · ${age}`;
 
@@ -879,17 +947,17 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
         const spanColor = categoryColor(category);
         let line = spanColor ? `${spanColor}${base}${RESET}` : base;
         if (agent.waitingFor) line += `${RED}  · ${agent.waitingFor}${RESET}`;
-        lines.push(clampVisible(line, MAX_LINE_CHARS));
+        lines.push(clampVisible(line, lineMax));
         if (enrichment?.standing) {
-          const standingText = `      — ${truncate(enrichment.standing, MAX_STANDING_CHARS)}`;
-          lines.push(clampVisible(`${DIM}${standingText}${RESET}`, MAX_LINE_CHARS));
+          const standingText = `      — ${truncate(enrichment.standing, standingMax)}`;
+          lines.push(clampVisible(`${DIM}${standingText}${RESET}`, lineMax));
         }
       } else {
         let line = base;
         if (agent.waitingFor) line += `  · ${agent.waitingFor}`;
-        lines.push(clampLine(line));
+        lines.push(clampLine(line, lineMax));
         if (enrichment?.standing) {
-          lines.push(clampLine(`      — ${truncate(enrichment.standing, MAX_STANDING_CHARS)}`));
+          lines.push(clampLine(`      — ${truncate(enrichment.standing, standingMax)}`, lineMax));
         }
       }
     }

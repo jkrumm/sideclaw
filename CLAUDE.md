@@ -146,6 +146,10 @@ synchronous HTTP, not a job: no queue, no worker session, answers in one request
 - **`?color=1` (also `?ansi=1`) on `/api/agents.txt` and `/api/overview.txt`** opts into an
   ANSI-coloured render (SGR only) — the herdr `overview` pane runs `watch --color` against it.
   Plain output with no query is byte-identical to before the flag existed.
+- **`?cols=N` (40–200, default 110)** re-derives every visible-width budget from a narrower
+  terminal width — a phone-width `watch` pane. Title/standing caps shrink with it, the project
+  line drops `[N agents]` below cols 90, and the header splits into two lines below cols 100.
+  Omitting `cols` keeps the legacy fixed 110-char clamp untouched.
 - Binds on `0.0.0.0` like the rest of the LaunchAgent HTTP server, so **port 7705 must stay
   ungranted in the tailnet ACL** — this endpoint carries no auth of its own.
 - Pure units (`encodeProjectDir`, `parseTranscriptTail`, `deriveState`, `mergeAgents`,
