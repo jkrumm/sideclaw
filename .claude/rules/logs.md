@@ -1,92 +1,9 @@
-# sideclaw Structured Logs — ~/Library/Logs/sideclaw.jsonl
+# sideclaw Structured Logs
 
-NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and the MCP server
-(`source: "mcp"`) write to the same file. Level is a string (not a numeric code).
+NDJSON at `~/Library/Logs/sideclaw.jsonl` — never `/tmp` (macOS sweeps
+untouched `/tmp` files after 3+ days; a KeepAlive agent's fd survives the
+sweep into an unlinked inode). Both the HTTP server (`source: "app"`) and the
+MCP process (`source: "mcp"`) write here.
 
-## Schema
-
-| Field        | Type     | Description                                          |
-| ------------ | -------- | ---------------------------------------------------- |
-| `time`       | string   | ISO 8601 UTC — `"2026-04-05T12:34:56.789Z"`          |
-| `level`      | string   | `"debug"` \| `"info"` \| `"warn"` \| `"error"`       |
-| `msg`        | string   | Human-readable summary                               |
-| `pid`        | number   | OS process ID                                        |
-| `source`     | string   | `"app"` (HTTP server) \| `"mcp"` (MCP process)       |
-| `event`      | string?  | Structured event type — see list below               |
-| `tool`       | string?  | MCP tool name: `"check"`                             |
-| `project`    | string?  | Absolute cwd of target repo                          |
-| `model`      | string?  | Claude model used in session                         |
-| `durationMs` | number?  | Execution duration in ms                             |
-| `costUsd`    | number?  | Session cost from claude envelope                    |
-| `turns`      | number?  | `num_turns` from claude envelope                     |
-| `passed`     | boolean? | Outcome for validation tools                         |
-| `method`     | string?  | HTTP method                                          |
-| `path`       | string?  | URL path (no query string)                           |
-| `status`     | number?  | HTTP response status code                            |
-| `err`        | object?  | `{ type, message, stack }` — pino stdSerializers.err |
-
-## Event types
-
-| Event                      | Source  | Description                                                                                                                                           |
-| -------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `app.startup`              | app     | HTTP server started                                                                                                                                   |
-| `app.request`              | app     | HTTP request completed (not emitted for `/health`, `/api/build-id`)                                                                                   |
-| `mcp.startup`              | mcp     | MCP server ready                                                                                                                                      |
-| `mcp.tool.start`           | mcp     | Tool invocation began                                                                                                                                 |
-| `mcp.tool.end`             | mcp     | Tool invocation completed (carries `passed`, `durationMs`)                                                                                            |
-| `session.spawn`            | mcp     | `claude -p` subprocess started                                                                                                                        |
-| `session.end`              | mcp     | Session completed successfully (carries `costUsd`, `turns`, `durationMs`)                                                                             |
-| `session.timeout`          | mcp     | Session hit timeout                                                                                                                                   |
-| `session.error`            | mcp     | Session returned `is_error` or produced no output                                                                                                     |
-| `session.recovered_output` | mcp/app | `result` field was empty; JSON recovered from the last assistant text (worker ended on a tool call)                                                   |
-| `implement.git_recovery`   | app     | `implement` got no parseable report; result reconstructed from `git status` (carries `newlyChanged`)                                                  |
-| `github.cache.hit`         | app     | Octokit request served from cache (carries `kind: "soft" \| "304"`, `url`)                                                                            |
-| `github.cache.miss`        | app     | Octokit response stored to cache (carries `url`, `status`)                                                                                            |
-| `job.create`               | app     | Async job submitted (carries `jobId`, `tool`)                                                                                                         |
-| `job.start`                | app     | Job promoted from pending to running (carries `jobId`, `tool`, `running`, `pending`, `max`)                                                           |
-| `job.done`                 | app     | Job finished successfully (carries `jobId`)                                                                                                           |
-| `job.fail`                 | app     | Job handler threw (carries `jobId`, `error`)                                                                                                          |
-| `job.recover`              | app     | Startup reconciliation (carries `interrupted`, `requeued`)                                                                                            |
-| `mcp.tool.submit`          | mcp     | Thin MCP tool submitted a job to the HTTP server (carries `tool`, `jobId`, `status`)                                                                  |
-| `quota.read`               | mcp     | Max subscription quota read, file-cache or live API (carries `quotaSource: "file"\|"api"\|"unknown"`, `fiveHourPct`, `sevenDayPct` — never the token) |
-| `backend.select`           | mcp     | Worker auth backend resolved for a session launch (carries `tool`, `model`, `backend`, `reason`; `fiveHourPct`/`sevenDayPct` when `reason: "quota"`)  |
-| `backend.fallback`         | mcp     | Reactive once-only retry from `max` onto `iu` after a quota-flavored failure (carries `tool`, `model`, `backend: "iu"`, `reason: "rate-limited"`)     |
-| `backend.fallback` (`iu-unavailable`) | mcp/app | Reactive once-only retry from `iu` onto `max` after an IU transport failure or missing IU credentials (carries `tool`, `model` — the fallback model, e.g. Haiku for check — `backend: "max"`)  |
-| `session.stderr`           | mcp/app | Worker stderr; **warn** when the session failed (timeout, non-zero exit, `is_error`), debug otherwise (carries `tool`, `model`, `backend`, `exitCode`, `stderr` ≤4 KB) |
-| `check.retry`              | app     | `check` output was prose, not schema JSON — one JSON-only retry (carries `project`, `error`)                                                              |
-| `job.requeue`              | app     | Boot recovery re-queued an interrupted check/overview/narrative/review once (carries `jobId`, `tool`, `attempts`)                                        |
-| `app.argo_push`            | app     | Overview pushed to Argo (carries `status`: `ok` \| `no-secret` \| `http-error` \| `network-error` \| `build-error`, `trigger`: `job` \| `timer`, `httpStatus`) |
-| `app.shutdown`             | app     | SIGTERM received / grace period result (carries `running`, `workers`, `killedWorkers`)                                                                   |
-
-## Query patterns
-
-```bash
-# Live tail (pretty)
-tail -f ~/Library/Logs/sideclaw.jsonl | jq .
-
-# MCP logs only
-tail -f ~/Library/Logs/sideclaw.jsonl | jq 'select(.source == "mcp")'
-
-# All MCP tool results
-jq 'select(.event == "mcp.tool.end")' ~/Library/Logs/sideclaw.jsonl
-
-# Failed tool runs
-jq 'select(.event == "mcp.tool.end" and .passed == false)' ~/Library/Logs/sideclaw.jsonl
-
-# Session cost by project
-jq -s 'group_by(.project) | map({project: .[0].project, totalCostUsd: [.[].costUsd // 0] | add, runs: length})' \
-  <(jq 'select(.event == "session.end")' ~/Library/Logs/sideclaw.jsonl)
-
-# Recent errors (last 50)
-jq 'select(.level == "error")' ~/Library/Logs/sideclaw.jsonl | tail -50 | jq .
-
-# Slow HTTP requests (>500ms)
-jq 'select(.event == "app.request" and .durationMs > 500)' ~/Library/Logs/sideclaw.jsonl
-
-# Model usage breakdown
-jq -s 'group_by(.model) | map({model: .[0].model, count: length})' \
-  <(jq 'select(.event == "session.end")' ~/Library/Logs/sideclaw.jsonl)
-
-# Today's entries
-jq --arg d "$(date -u +%Y-%m-%d)" 'select(.time | startswith($d))' ~/Library/Logs/sideclaw.jsonl
-```
+Quick filter: `jq 'select(.event == "mcp.tool.end")' ~/Library/Logs/sideclaw.jsonl`.
+Full field/event schema and query patterns: `docs/logging.md`.

@@ -4,42 +4,17 @@ description: sideclaw deployment — LaunchAgent only, never standalone
 
 # sideclaw Deployment Rule
 
-sideclaw runs **exclusively via macOS LaunchAgent**. Never start the server directly.
+sideclaw runs **exclusively via macOS LaunchAgent**. Never start the server
+directly (`make dev`/`make start` exit with an error; `bun run dev`/`bun run
+start`/`bun server/index.ts` conflict with the LaunchAgent's port 7705).
 
-## Forbidden commands
+Use `make build` (frontend only), `make reload` (build + drain + restart,
+`FORCE=1` while jobs are running), `make install-agent` / `make
+uninstall-agent`. Logs: `~/Library/Logs/sideclaw.{log,err}` — never `/tmp`
+(see `.claude/rules/logs.md`). Edit the tracked `com.jkrumm.sideclaw-server.plist`,
+never the live one — `make install-agent` overwrites it verbatim.
 
-Do NOT suggest or run any of these:
-- `make dev`
-- `make start`
-- `bun run dev`
-- `bun run start`
-- `bun server/index.ts`
-- Any command that binds port 7705 or 7706 directly
-
-All of the above either exit with an error (Makefile targets) or would conflict with the running LaunchAgent.
-
-## Allowed commands
-
-| Command | Purpose |
-|-|-|
-| `make build` | Build frontend to `dist/` (no server) |
-| `make reload` | Build + kickstart LaunchAgent (use after code changes) |
-| `make install-agent` | One-time install + start LaunchAgent |
-| `make uninstall-agent` | Remove LaunchAgent |
-
-## Validating changes
-
-After `make reload`, check `http://sideclaw.local` in the browser.
-Logs: `tail -f ~/Library/Logs/sideclaw.log` / `tail -f ~/Library/Logs/sideclaw.err`
-
-Not `/tmp` — a KeepAlive agent opens its stdio once at spawn, and macOS's
-periodic cleanup sweeps `/tmp` files untouched for 3+ days, leaving the process
-writing into an unlinked inode that no `tail` can reach. `make install-agent`
-copies `com.jkrumm.sideclaw-server.plist` verbatim, so edit the tracked plist,
-never the live one.
-
-The label is `com.jkrumm.sideclaw-server` and the program is
-`scripts/sideclaw-start.sh` rather than `bun` directly. Both dodge a macOS
-Background Task Management denial that otherwise makes launchd skip `RunAtLoad`
-and leave the server down after a reboot; the rationale and the verification
-command are in the repo CLAUDE.md. Don't "simplify" either back.
+The label `com.jkrumm.sideclaw-server` and the `scripts/sideclaw-start.sh`
+wrapper both dodge a macOS Background Task Management denial that otherwise
+skips `RunAtLoad` after a reboot — don't "simplify" either back. Full
+forensic story: `docs/deployment.md`.
