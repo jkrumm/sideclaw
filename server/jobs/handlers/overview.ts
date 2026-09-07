@@ -3,7 +3,7 @@ import { join } from "path";
 import { existsSync } from "fs";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { CHECK_MODEL, runSession, zodValidator } from "../../mcp/session-runner.ts";
+import { CHECK_MODEL, runSession, zodValidator, type Backend } from "../../mcp/session-runner.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
@@ -89,6 +89,15 @@ export type OverviewAgentEntry = z.infer<typeof OVERVIEW_AGENT_ENTRY>;
 export const OVERVIEW_OUTPUT = z.object({
   generatedAt: z.number().describe("Epoch ms this overview job finished."),
   model: z.string().describe("Worker model id actually used."),
+  backend: z
+    .enum(["iu", "max"])
+    .optional()
+    .describe(
+      "Worker auth backend actually used for this run — 'iu' (IU unified endpoint) or 'max' " +
+        "(Max subscription). Surfaces the dynamic Max-quota fallback (session-runner.ts's " +
+        "chooseBackend): a run can land on 'iu' even with SIDECLAW_WORKER_BACKEND=max if Max " +
+        "quota was tight. Absent on results from before this field existed.",
+    ),
   snapshotGeneratedAt: z
     .number()
     .describe("Epoch ms of the deterministic snapshot this job enriched."),
@@ -233,6 +242,7 @@ export function reconcileOverview(
   workerAgents: OverviewWorkerAgent[],
   model: string,
   generatedAt: number,
+  backend?: Backend,
 ): OverviewOutput {
   const known = new Map<string, { sessionId: string | null; project: string }>();
   for (const project of snapshot.projects as Project[]) {
@@ -279,7 +289,7 @@ export function reconcileOverview(
     });
   }
 
-  return { generatedAt, model, snapshotGeneratedAt: snapshot.generatedAt, agents };
+  return { generatedAt, model, backend, snapshotGeneratedAt: snapshot.generatedAt, agents };
 }
 
 // ── Reconciliation: cached job result → a FRESH snapshot (GET /api/overview) ────
@@ -401,6 +411,12 @@ export async function runOverview(
     throw new Error(result.error ?? "overview produced no result");
   }
 
-  const output = reconcileOverview(snapshot, result.data.agents, resolvedModel, Date.now());
+  const output = reconcileOverview(
+    snapshot,
+    result.data.agents,
+    resolvedModel,
+    Date.now(),
+    result.backend,
+  );
   return OVERVIEW_OUTPUT.parse(output);
 }

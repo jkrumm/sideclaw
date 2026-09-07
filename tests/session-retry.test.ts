@@ -55,16 +55,13 @@ describe("retryBackoffMs", () => {
 });
 
 describe("resolveBackend", () => {
-  // SIDECLAW_WORKER_BACKEND is read once at module load, so these assert against
-  // the live setting rather than a simulated one. .env pins it to "max".
-  test("a non-Claude id is forced onto iu — max only serves Anthropic models", () => {
-    expect(resolveBackend("DeepSeek-V4-Flash")).toBe("iu");
-    expect(resolveBackend("glm-5.3-flash")).toBe("iu");
-  });
-
-  test("a claude-* id keeps the configured max backend", () => {
-    expect(resolveBackend("claude-sonnet-5[1m]")).toBe("max");
-    expect(resolveBackend("claude-haiku-4-5")).toBe("max");
+  // resolveBackend is now async (it may read live Max quota — see
+  // tests/backend-select.test.ts for the full quota-fallback decision matrix via
+  // the pure chooseBackend). Only the non-claude short circuit is IO-free and
+  // deterministic enough to assert here; it never touches readMaxQuota.
+  test("a non-Claude id is forced onto iu — max only serves Anthropic models, no quota lookup", async () => {
+    expect((await resolveBackend("DeepSeek-V4-Flash")).backend).toBe("iu");
+    expect((await resolveBackend("glm-5.3-flash")).backend).toBe("iu");
   });
 });
 

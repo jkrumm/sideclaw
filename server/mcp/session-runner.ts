@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { z } from "zod";
 import { logger } from "./logger.ts";
 import { getIuConfig } from "../lib/iu-openai.ts";
+import { readMaxQuota, type MaxQuota } from "../lib/quota.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -23,7 +24,7 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
 // (see `writeSessionEnv`) so usage-tracker classifies worker spend correctly
 // (IU vs Max).
 
-type Backend = "iu" | "max";
+export type Backend = "iu" | "max";
 
 /** Configured worker auth backend, for every model id — this is the whole
  *  selection (see `backend` in runSessionAttempt; there is no per-model-id
@@ -32,6 +33,21 @@ type Backend = "iu" | "max";
  *  once at module load, so a flag flip requires `make reload`. */
 const CONFIGURED_WORKER_BACKEND: Backend =
   process.env.SIDECLAW_WORKER_BACKEND === "max" ? "max" : "iu";
+
+/** Dynamic-fallback escape hatch for `CONFIGURED_WORKER_BACKEND === "max"`: "iu"
+ *  (default) lets `resolveBackend` fall a claude-* session off Max onto the IU
+ *  endpoint once quota gets tight; "none" disables the check entirely (stay on
+ *  Max no matter what — the pre-existing behavior). Read once at module load,
+ *  like `CONFIGURED_WORKER_BACKEND` — a flip needs `make reload`. */
+const WORKER_FALLBACK: "iu" | "none" =
+  process.env.SIDECLAW_WORKER_FALLBACK === "none" ? "none" : "iu";
+
+/** Five-hour-window utilization percent (0-100) at or above which a `max`
+ *  session falls back to `iu`. */
+const MAX_QUOTA_CEILING = Number(process.env.SIDECLAW_MAX_QUOTA_CEILING ?? 90);
+/** Seven-day-window utilization percent (0-100) at or above which a `max`
+ *  session falls back to `iu`. */
+const MAX_WEEKLY_CEILING = Number(process.env.SIDECLAW_MAX_WEEKLY_CEILING ?? 95);
 // Worker model tiers — single source of truth. Call sites import these instead of
 // hardcoding ids so a tier change is one edit. Both route via CONFIGURED_WORKER_BACKEND
 // (IU by default, Max on the explicit env override).
@@ -232,6 +248,11 @@ export interface SessionResult<T = unknown> {
   attempts?: number;
   /** True if an earlier attempt failed and was retried before this result. */
   retried?: boolean;
+  /** Backend the attempt that produced this result actually ran on — set
+   *  regardless of ok/error, so a job handler or the retry loop can tell which
+   *  auth path a given result came from (relevant once a quota fallback can
+   *  switch mid-session-launch from "max" to "iu"). */
+  backend?: Backend;
 }
 
 /** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
@@ -525,17 +546,93 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
 // failures, and only before the worker has produced any output a retry could
 // duplicate or corrupt.
 
-/** Effective backend for a model id.
+/** Input to `chooseBackend` — everything the pure decision needs, with no I/O of
+ *  its own so it is trivially unit-testable. `configured` and `quota` are passed
+ *  in rather than read from module state/network, for the same reason. */
+export interface ChooseBackendInput {
+  configured: Backend;
+  model: string;
+  quota: MaxQuota;
+  ceilingFiveHour: number;
+  ceilingSevenDay: number;
+  fallback: "iu" | "none";
+}
+
+export interface ChooseBackendResult {
+  backend: Backend;
+  reason: "non-claude-model" | "fallback-disabled" | "quota-unknown" | "quota" | "ok";
+}
+
+/** Pure backend decision — no network, no clock beyond what `quota` already
+ *  carries. Rules, in order:
  *
- *  `max` means "inject nothing and let the CLI fall through to the inherited
- *  OAuth profile", which only ever serves Anthropic's own models. A non-Claude
- *  id sent there is rejected outright, so the configured backend is overridden
- *  to `iu` for those — this is what keeps `SIDECLAW_WORKER_BACKEND=max` (the
- *  live setting) from breaking `check` the moment CHECK_MODEL stops being a
- *  claude-* id. */
-export function resolveBackend(model: string): Backend {
-  if (CONFIGURED_WORKER_BACKEND === "max" && !model.startsWith("claude")) return "iu";
-  return CONFIGURED_WORKER_BACKEND;
+ *  1. A non-Claude model id always goes to `iu` — `max` only ever serves
+ *     Anthropic's own models, so a gateway id there is rejected outright. This
+ *     subsumes the old sync `resolveBackend`'s only rule.
+ *  2. `fallback === "none"` disables the dynamic check — stay on `configured`.
+ *  3. Unknown quota (`quota.source === "unknown"`, i.e. neither the statusline
+ *     cache nor the live API produced a fresh reading) never blocks — stay on
+ *     `configured` rather than guess.
+ *  4. Either window at or above its ceiling (`>=`, so the ceiling itself
+ *     already trips it) falls back to `iu`.
+ *  5. Otherwise stay on `configured` — healthy quota is not a reason to move
+ *     an `iu`-configured install onto `max`, only to keep a `max`-configured
+ *     one there. */
+export function chooseBackend(input: ChooseBackendInput): ChooseBackendResult {
+  const { configured, model, quota, ceilingFiveHour, ceilingSevenDay, fallback } = input;
+  if (!model.startsWith("claude")) return { backend: "iu", reason: "non-claude-model" };
+  if (fallback === "none") return { backend: configured, reason: "fallback-disabled" };
+  if (quota.source === "unknown") return { backend: configured, reason: "quota-unknown" };
+  const fiveHourExceeded = quota.fiveHourPct !== null && quota.fiveHourPct >= ceilingFiveHour;
+  const sevenDayExceeded = quota.sevenDayPct !== null && quota.sevenDayPct >= ceilingSevenDay;
+  if (fiveHourExceeded || sevenDayExceeded) return { backend: "iu", reason: "quota" };
+  return { backend: configured, reason: "ok" };
+}
+
+/** Effective backend for a model id, resolved once per session launch.
+ *
+ *  Reads live Max quota (network + Keychain) ONLY when it could actually change
+ *  the answer: `CONFIGURED_WORKER_BACKEND === "max"` and `model` is a claude-*
+ *  id — every other case is decided by `chooseBackend`'s cheap, I/O-free rules
+ *  1/2 and short-circuits before touching `readMaxQuota()`. This is what keeps
+ *  `check`/`review`/etc. on the `iu` backend, or an install with
+ *  `SIDECLAW_WORKER_BACKEND=iu`, from paying a quota lookup on every session. */
+export async function resolveBackend(
+  model: string,
+): Promise<ChooseBackendResult & { quota?: MaxQuota }> {
+  if (!model.startsWith("claude")) return { backend: "iu", reason: "non-claude-model" };
+  if (CONFIGURED_WORKER_BACKEND !== "max") {
+    return { backend: CONFIGURED_WORKER_BACKEND, reason: "ok" };
+  }
+  if (WORKER_FALLBACK === "none") return { backend: "max", reason: "fallback-disabled" };
+
+  const quota = await readMaxQuota();
+  const choice = chooseBackend({
+    configured: CONFIGURED_WORKER_BACKEND,
+    model,
+    quota,
+    ceilingFiveHour: MAX_QUOTA_CEILING,
+    ceilingSevenDay: MAX_WEEKLY_CEILING,
+    fallback: WORKER_FALLBACK,
+  });
+  return { ...choice, quota };
+}
+
+// The IU gateway re-wraps a rate-limit/overload the same way it wraps a client
+// error (see WRAPPED_TERMINAL_RE below), and Max's own OAuth path 429s with
+// "usage limit"/"rate limit" language rather than a bare status code. Matched
+// case-insensitively over whatever text a failed attempt produced (stderr +
+// stdout + the constructed error message all funnel into `SessionResult.error`).
+// Deliberately broad — a false positive costs one extra retry on `iu`, which is
+// cheap; a false negative means a real quota exhaustion never falls back.
+const QUOTA_ERROR_RE = /hit your (usage )?limit|usage limit|rate.?limit|429|overloaded|quota/i;
+
+/** Does this failed-attempt text look like Max quota/rate-limit exhaustion
+ *  rather than a generic transport or logic failure? Pure — feeds the reactive
+ *  once-only `max` → `iu` retry in `runSession`, never the transient-transport
+ *  retry (`isRetryableSessionError`), which stays backend-agnostic. */
+export function isQuotaError(text: string): boolean {
+  return QUOTA_ERROR_RE.test(text);
 }
 
 /** Total attempts per session, including the first — at most 2 retries. */
@@ -603,6 +700,11 @@ export function retryBackoffMs(attempt: number): number {
 async function runSessionAttempt<T = unknown>(
   opts: SessionOptions<T>,
   turnsRef: { current: number },
+  /** Set by `runSession`'s reactive retry: skip `resolveBackend` entirely and
+   *  force this one attempt onto the given backend (a quota-flavored `max`
+   *  failure retrying once on `iu`). Logs `backend.fallback` instead of the
+   *  normal `backend.select`. */
+  forcedBackend?: Backend,
 ): Promise<SessionResult<T>> {
   const {
     cwd,
@@ -623,12 +725,34 @@ async function runSessionAttempt<T = unknown>(
 
   const sessionUuid = randomUUID();
   const tsStart = new Date().toISOString();
-  // The backend is the same for every model id — see the module-level comment and
-  // CONFIGURED_WORKER_BACKEND above. A DeepSeek (or any other non-Claude) id
-  // resolves through IU's native Anthropic transport exactly like a claude-* id,
-  // since IU is itself a multi-provider gateway.
   // Resolved before emitAttribution so nothing below depends on declaration order.
-  const backend: Backend = resolveBackend(model);
+  // `chooseBackend`'s full rule set (model id, fallback flag, quota ceilings) —
+  // see the module-level comment on `resolveBackend`/`chooseBackend` above. A
+  // forced retry skips it outright: the caller already decided.
+  const resolved: ChooseBackendResult & { quota?: MaxQuota } = forcedBackend
+    ? { backend: forcedBackend, reason: "quota" }
+    : await resolveBackend(model);
+  const backend: Backend = resolved.backend;
+  if (forcedBackend) {
+    logger.warn(
+      { event: "backend.fallback", tool, model, backend, reason: "rate-limited" },
+      "falling back to iu after a max-quota-flavored failure",
+    );
+  } else {
+    logger.info(
+      {
+        event: "backend.select",
+        tool,
+        model,
+        backend,
+        reason: resolved.reason,
+        ...(resolved.reason === "quota" && resolved.quota
+          ? { fiveHourPct: resolved.quota.fiveHourPct, sevenDayPct: resolved.quota.sevenDayPct }
+          : {}),
+      },
+      "backend selected",
+    );
+  }
 
   const emitAttribution = (
     outcome: "ok" | "error" | "timeout",
@@ -661,7 +785,7 @@ async function runSessionAttempt<T = unknown>(
         "IU config unavailable",
       );
       emitAttribution("error", { reason: "iu_config_error" });
-      return { ok: false, error: message };
+      return { ok: false, error: message, backend };
     }
   }
 
@@ -938,7 +1062,7 @@ async function runSessionAttempt<T = unknown>(
 
   if (timedOut) {
     emitAttribution("timeout", { durationMs, turns });
-    return { ok: false, error: `Session timed out after ${timeoutMs}ms` };
+    return { ok: false, error: `Session timed out after ${timeoutMs}ms`, backend };
   }
 
   if (exitCode !== 0) {
@@ -946,13 +1070,14 @@ async function runSessionAttempt<T = unknown>(
     return {
       ok: false,
       error: `Session exited with code ${exitCode}${stderrTrimmed ? `. stderr: ${stderrTrimmed}` : ""}`,
+      backend,
     };
   }
 
   if (!envelope) {
     logger.error({ event: "session.error", project: cwd }, "no result event in stream");
     emitAttribution("error", { durationMs, turns, reason: "no_envelope" });
-    return { ok: false, error: "Session ended without a result event" };
+    return { ok: false, error: "Session ended without a result event", backend };
   }
 
   logger.debug(
@@ -974,7 +1099,7 @@ async function runSessionAttempt<T = unknown>(
       "session is_error",
     );
     emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
-    return { ok: false, error: errMsg };
+    return { ok: false, error: errMsg, backend };
   }
 
   // total_cost_usd is populated normally on both the IU native Anthropic transport
@@ -985,6 +1110,7 @@ async function runSessionAttempt<T = unknown>(
         event: "session.end",
         project: cwd,
         model,
+        backend,
         durationMs,
         costUsd: envelope.total_cost_usd,
         turns: envelope.num_turns,
@@ -1010,15 +1136,15 @@ async function runSessionAttempt<T = unknown>(
         // long run has real material to preserve. Returning a bare error here was silently
         // discarding it on what is, for a strict schema, the LIKELIEST failure path.
         const asText = typeof value === "string" ? value : safeStringify(value);
-        return { ok: false, error: v.error, noOutput: true, rawText: asText };
+        return { ok: false, error: v.error, noOutput: true, rawText: asText, backend };
       }
       logSessionEnd();
       emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
-      return { ok: true, data: v.value };
+      return { ok: true, data: v.value, backend };
     }
     logSessionEnd();
     emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
-    return { ok: true, data: value };
+    return { ok: true, data: value, backend };
   };
 
   // --json-schema puts the parsed object in structured_output; fall back to result string
@@ -1043,6 +1169,7 @@ async function runSessionAttempt<T = unknown>(
       error: `result field is not valid JSON: ${raw.slice(0, 500)}`,
       noOutput: true,
       rawText: raw,
+      backend,
     };
   }
 
@@ -1068,6 +1195,7 @@ async function runSessionAttempt<T = unknown>(
     error: "Session produced no output (empty structured_output and result)",
     noOutput: true,
     rawText: lastAssistantText || undefined,
+    backend,
   };
 }
 
@@ -1075,19 +1203,42 @@ async function runSessionAttempt<T = unknown>(
  *  transport failure. A retry only happens when both hold: `isRetryableSessionError`
  *  matches the failure, and the worker never produced an assistant turn (so it
  *  cannot have started writing files) — anything past that point is re-run at the
- *  caller's own risk, not this one's. */
+ *  caller's own risk, not this one's.
+ *
+ *  A second, narrower retry sits ahead of that one: an attempt that ran on `max`,
+ *  produced no output yet, and failed with text `isQuotaError` recognizes (Max
+ *  quota/rate-limit exhaustion, not a generic transport blip) forces exactly one
+ *  retry onto `iu` instead of re-trying the same exhausted backend. It takes
+ *  precedence over the transient-transport retry (same failure would otherwise
+ *  also match a bare "429" in `isRetryableSessionError`) and never re-triggers —
+ *  `usedQuotaFallback` latches after the first switch, so a quota-flavored
+ *  failure on the fallback `iu` attempt itself is not retried again. */
 export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<SessionResult<T>> {
   let attempt = 0;
+  let usedQuotaFallback = false;
+  let forcedBackend: Backend | undefined;
   while (true) {
     attempt++;
     const turnsRef = { current: 0 };
-    const result = await runSessionAttempt(opts, turnsRef);
+    const result = await runSessionAttempt(opts, turnsRef, forcedBackend);
     const isLastAttempt = attempt >= MAX_SESSION_ATTEMPTS;
-    const canRetry =
+    const noOutputYet = turnsRef.current === 0;
+
+    const quotaFallback =
       !result.ok &&
+      !usedQuotaFallback &&
       !isLastAttempt &&
-      turnsRef.current === 0 &&
-      isRetryableSessionError(result.error ?? "");
+      result.backend === "max" &&
+      noOutputYet &&
+      isQuotaError(result.error ?? "");
+    if (quotaFallback) {
+      usedQuotaFallback = true;
+      forcedBackend = "iu";
+      continue;
+    }
+
+    const canRetry =
+      !result.ok && !isLastAttempt && noOutputYet && isRetryableSessionError(result.error ?? "");
     if (!canRetry) {
       return { ...result, attempts: attempt, retried: attempt > 1 };
     }

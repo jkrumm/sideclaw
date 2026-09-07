@@ -5,49 +5,52 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 
 ## Schema
 
-| Field | Type | Description |
-|-|-|-|
-| `time` | string | ISO 8601 UTC — `"2026-04-05T12:34:56.789Z"` |
-| `level` | string | `"debug"` \| `"info"` \| `"warn"` \| `"error"` |
-| `msg` | string | Human-readable summary |
-| `pid` | number | OS process ID |
-| `source` | string | `"app"` (HTTP server) \| `"mcp"` (MCP process) |
-| `event` | string? | Structured event type — see list below |
-| `tool` | string? | MCP tool name: `"check"` |
-| `project` | string? | Absolute cwd of target repo |
-| `model` | string? | Claude model used in session |
-| `durationMs` | number? | Execution duration in ms |
-| `costUsd` | number? | Session cost from claude envelope |
-| `turns` | number? | `num_turns` from claude envelope |
-| `passed` | boolean? | Outcome for validation tools |
-| `method` | string? | HTTP method |
-| `path` | string? | URL path (no query string) |
-| `status` | number? | HTTP response status code |
-| `err` | object? | `{ type, message, stack }` — pino stdSerializers.err |
+| Field        | Type     | Description                                          |
+| ------------ | -------- | ---------------------------------------------------- |
+| `time`       | string   | ISO 8601 UTC — `"2026-04-05T12:34:56.789Z"`          |
+| `level`      | string   | `"debug"` \| `"info"` \| `"warn"` \| `"error"`       |
+| `msg`        | string   | Human-readable summary                               |
+| `pid`        | number   | OS process ID                                        |
+| `source`     | string   | `"app"` (HTTP server) \| `"mcp"` (MCP process)       |
+| `event`      | string?  | Structured event type — see list below               |
+| `tool`       | string?  | MCP tool name: `"check"`                             |
+| `project`    | string?  | Absolute cwd of target repo                          |
+| `model`      | string?  | Claude model used in session                         |
+| `durationMs` | number?  | Execution duration in ms                             |
+| `costUsd`    | number?  | Session cost from claude envelope                    |
+| `turns`      | number?  | `num_turns` from claude envelope                     |
+| `passed`     | boolean? | Outcome for validation tools                         |
+| `method`     | string?  | HTTP method                                          |
+| `path`       | string?  | URL path (no query string)                           |
+| `status`     | number?  | HTTP response status code                            |
+| `err`        | object?  | `{ type, message, stack }` — pino stdSerializers.err |
 
 ## Event types
 
-| Event | Source | Description |
-|-|-|-|
-| `app.startup` | app | HTTP server started |
-| `app.request` | app | HTTP request completed (not emitted for `/health`, `/api/build-id`) |
-| `mcp.startup` | mcp | MCP server ready |
-| `mcp.tool.start` | mcp | Tool invocation began |
-| `mcp.tool.end` | mcp | Tool invocation completed (carries `passed`, `durationMs`) |
-| `session.spawn` | mcp | `claude -p` subprocess started |
-| `session.end` | mcp | Session completed successfully (carries `costUsd`, `turns`, `durationMs`) |
-| `session.timeout` | mcp | Session hit timeout |
-| `session.error` | mcp | Session returned `is_error` or produced no output |
-| `session.recovered_output` | mcp/app | `result` field was empty; JSON recovered from the last assistant text (worker ended on a tool call) |
-| `implement.git_recovery` | app | `implement` got no parseable report; result reconstructed from `git status` (carries `newlyChanged`) |
-| `github.cache.hit` | app | Octokit request served from cache (carries `kind: "soft" \| "304"`, `url`) |
-| `github.cache.miss` | app | Octokit response stored to cache (carries `url`, `status`) |
-| `job.create` | app | Async job submitted (carries `jobId`, `tool`) |
-| `job.start` | app | Job promoted from pending to running (carries `jobId`, `tool`, `running`, `pending`, `max`) |
-| `job.done` | app | Job finished successfully (carries `jobId`) |
-| `job.fail` | app | Job handler threw (carries `jobId`, `error`) |
-| `job.recover` | app | Startup reconciliation (carries `interrupted`, `requeued`) |
-| `mcp.tool.submit` | mcp | Thin MCP tool submitted a job to the HTTP server (carries `tool`, `jobId`, `status`) |
+| Event                      | Source  | Description                                                                                                                                           |
+| -------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `app.startup`              | app     | HTTP server started                                                                                                                                   |
+| `app.request`              | app     | HTTP request completed (not emitted for `/health`, `/api/build-id`)                                                                                   |
+| `mcp.startup`              | mcp     | MCP server ready                                                                                                                                      |
+| `mcp.tool.start`           | mcp     | Tool invocation began                                                                                                                                 |
+| `mcp.tool.end`             | mcp     | Tool invocation completed (carries `passed`, `durationMs`)                                                                                            |
+| `session.spawn`            | mcp     | `claude -p` subprocess started                                                                                                                        |
+| `session.end`              | mcp     | Session completed successfully (carries `costUsd`, `turns`, `durationMs`)                                                                             |
+| `session.timeout`          | mcp     | Session hit timeout                                                                                                                                   |
+| `session.error`            | mcp     | Session returned `is_error` or produced no output                                                                                                     |
+| `session.recovered_output` | mcp/app | `result` field was empty; JSON recovered from the last assistant text (worker ended on a tool call)                                                   |
+| `implement.git_recovery`   | app     | `implement` got no parseable report; result reconstructed from `git status` (carries `newlyChanged`)                                                  |
+| `github.cache.hit`         | app     | Octokit request served from cache (carries `kind: "soft" \| "304"`, `url`)                                                                            |
+| `github.cache.miss`        | app     | Octokit response stored to cache (carries `url`, `status`)                                                                                            |
+| `job.create`               | app     | Async job submitted (carries `jobId`, `tool`)                                                                                                         |
+| `job.start`                | app     | Job promoted from pending to running (carries `jobId`, `tool`, `running`, `pending`, `max`)                                                           |
+| `job.done`                 | app     | Job finished successfully (carries `jobId`)                                                                                                           |
+| `job.fail`                 | app     | Job handler threw (carries `jobId`, `error`)                                                                                                          |
+| `job.recover`              | app     | Startup reconciliation (carries `interrupted`, `requeued`)                                                                                            |
+| `mcp.tool.submit`          | mcp     | Thin MCP tool submitted a job to the HTTP server (carries `tool`, `jobId`, `status`)                                                                  |
+| `quota.read`               | mcp     | Max subscription quota read, file-cache or live API (carries `quotaSource: "file"\|"api"\|"unknown"`, `fiveHourPct`, `sevenDayPct` — never the token) |
+| `backend.select`           | mcp     | Worker auth backend resolved for a session launch (carries `tool`, `model`, `backend`, `reason`; `fiveHourPct`/`sevenDayPct` when `reason: "quota"`)  |
+| `backend.fallback`         | mcp     | Reactive once-only retry from `max` onto `iu` after a quota-flavored failure (carries `tool`, `model`, `backend: "iu"`, `reason: "rate-limited"`)     |
 
 ## Query patterns
 
