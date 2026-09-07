@@ -95,6 +95,35 @@ try {
 const runningIds = new Set<string>();
 
 let executor: JobExecutor | null = null;
+/** Set on SIGTERM: a job finishing inside the grace window must not pull the next pending
+ *  row into `running`, where the deadline would kill it and burn its one re-queue. Pending
+ *  rows simply wait for the restarted process. */
+let draining = false;
+
+export function setDraining(): void {
+  draining = true;
+}
+let onDone: ((job: JobRecord) => void) | null = null;
+
+/** Tools whose interrupted run is re-queued ONCE on boot (attempts 1 → 2). All are
+ *  read-only and idempotent — re-running costs tokens, never correctness. `dispatch`
+ *  is deliberately absent: an `implement` episode may have pushed a branch or opened a
+ *  PR before the restart, and a second episode would do it again; `excalidraw_diagram`
+ *  writes a file. Those stay `interrupted` for the caller to decide. */
+const REQUEUE_ON_RECOVER: ReadonlySet<JobTool> = new Set<JobTool>([
+  "check",
+  "overview",
+  "narrative",
+  "review",
+]);
+const MAX_RECOVER_ATTEMPTS = 2;
+
+/** Pure boot-recovery decision for a `running` row whose worker died with the previous
+ *  process. Exported for tests. */
+export function recoveryStatusFor(tool: JobTool, attempts: number): "pending" | "interrupted" {
+  if (!REQUEUE_ON_RECOVER.has(tool)) return "interrupted";
+  return attempts < MAX_RECOVER_ATTEMPTS ? "pending" : "interrupted";
+}
 
 // ── Row mapping ──────────────────────────────────────────────────────────────
 
@@ -120,9 +149,15 @@ function fetchRow(id: string): JobRow | null {
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
-/** Wire the executor and run startup recovery + prune. Call once at HTTP server boot. */
-export function initJobStore(opts: { executor: JobExecutor }): void {
+/** Wire the executor and run startup recovery + prune. Call once at HTTP server boot.
+ *  `onDone` fires after a job's `done` row is committed (so `latestJobResult` already
+ *  sees it) — the Argo push hooks in here. */
+export function initJobStore(opts: {
+  executor: JobExecutor;
+  onDone?: (job: JobRecord) => void;
+}): void {
   executor = opts.executor;
+  onDone = opts.onDone ?? null;
   recover();
   prune();
   promote();
@@ -191,11 +226,71 @@ export function queueStats(): { running: number; pending: number; max: number } 
   return { running: runningIds.size, pending, max: MAX_CONCURRENT };
 }
 
+// ── Health (GET /api/jobs/health — read by dotfiles' devhost-health) ─────────
+
+const FAILED_LAST_HOUR_LIMIT = 3;
+const OLDEST_PENDING_LIMIT_MS = 15 * 60 * 1000;
+
+export interface JobHealthStats {
+  running: number;
+  pending: number;
+  failedLastHour: number;
+  interruptedLastHour: number;
+  /** Age of the oldest `pending` row, or null when nothing is queued. */
+  oldestPendingAgeMs: number | null;
+  lastFailure: { tool: JobTool; at: number; error: string | null } | null;
+}
+
+export type JobHealth = JobHealthStats & { ok: boolean };
+
+/** Pure verdict over the stats. Exported for tests. A pending job older than 15 min
+ *  means the queue is wedged (the concurrency gate never freed a slot); three failures
+ *  in an hour means a worker lane is dead, not one flaky run. */
+export function evaluateJobHealth(stats: JobHealthStats): JobHealth {
+  const ok =
+    stats.failedLastHour < FAILED_LAST_HOUR_LIMIT &&
+    (stats.oldestPendingAgeMs === null || stats.oldestPendingAgeMs <= OLDEST_PENDING_LIMIT_MS);
+  return { ok, ...stats };
+}
+
+export function jobHealth(now = Date.now()): JobHealth {
+  const hourAgo = now - 60 * 60 * 1000;
+  const count = (status: string) =>
+    db
+      .query<{ n: number }, [string, number]>(
+        "SELECT COUNT(*) AS n FROM jobs WHERE status = ? AND finished_at >= ?",
+      )
+      .get(status, hourAgo)?.n ?? 0;
+  const oldestPending = db
+    .query<{ created_at: number }, []>(
+      "SELECT created_at FROM jobs WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1",
+    )
+    .get();
+  const lastFailed = db
+    .query<JobRow, []>(
+      "SELECT * FROM jobs WHERE status = 'failed' ORDER BY finished_at DESC LIMIT 1",
+    )
+    .get();
+  return evaluateJobHealth({
+    ...queueStats(),
+    failedLastHour: count("failed"),
+    interruptedLastHour: count("interrupted"),
+    oldestPendingAgeMs: oldestPending ? Math.max(0, now - oldestPending.created_at) : null,
+    lastFailure: lastFailed
+      ? {
+          tool: lastFailed.tool as JobTool,
+          at: lastFailed.finished_at ?? lastFailed.created_at,
+          error: lastFailed.error,
+        }
+      : null,
+  });
+}
+
 // ── Scheduler ────────────────────────────────────────────────────────────────
 
-/** Promote pending jobs to running while concurrency slots remain. */
+/** Promote pending jobs to running while concurrency slots remain — never while draining. */
 function promote(): void {
-  if (!executor) return;
+  if (!executor || draining) return;
   while (runningIds.size < MAX_CONCURRENT) {
     const row = db
       .query<JobRow, []>(
@@ -262,6 +357,16 @@ function finish(
     { event: status === "done" ? "job.done" : "job.fail", jobId: id, error: outcome.error },
     `job ${status}`,
   );
+  if (status === "done" && onDone) {
+    const row = fetchRow(id);
+    if (row) {
+      try {
+        onDone(rowToRecord(row));
+      } catch (err) {
+        logger.warn({ event: "job.done_hook_failed", jobId: id, error: String(err) }, "hook");
+      }
+    }
+  }
   prune();
   promote();
 }
@@ -269,21 +374,41 @@ function finish(
 // ── Recovery & retention ─────────────────────────────────────────────────────
 
 /** On boot, any `running` row is a leftover from a dead process — its worker
- *  subprocess is gone, so the result is unrecoverable. Mark it `interrupted`.
- *  `pending` rows never started; leave them to be promoted. */
+ *  subprocess is gone. Idempotent read-only tools (`REQUEUE_ON_RECOVER`) on their
+ *  first attempt go back to `pending` and run again (attempts 1 → 2 on promotion);
+ *  everything else — a second interruption, or a tool with side effects — is marked
+ *  `interrupted`. `pending` rows never started; they are simply promoted. */
 function recover(): void {
   const now = Date.now();
-  const res = db.run(
-    "UPDATE jobs SET status = 'interrupted', error = 'HTTP server restarted while job was running', finished_at = ? WHERE status = 'running'",
-    [now],
-  );
-  const interrupted = res.changes;
+  const running = db.query<JobRow, []>("SELECT * FROM jobs WHERE status = 'running'").all();
+  let interrupted = 0;
+  let requeued = 0;
+  for (const row of running) {
+    const next = recoveryStatusFor(row.tool as JobTool, row.attempts);
+    if (next === "pending") {
+      db.run(
+        "UPDATE jobs SET status = 'pending', progress = NULL, started_at = NULL, error = NULL WHERE id = ?",
+        [row.id],
+      );
+      requeued++;
+      logger.warn(
+        { event: "job.requeue", jobId: row.id, tool: row.tool, attempts: row.attempts },
+        "interrupted job re-queued once",
+      );
+    } else {
+      db.run(
+        "UPDATE jobs SET status = 'interrupted', error = 'HTTP server restarted while job was running', finished_at = ? WHERE id = ?",
+        [now, row.id],
+      );
+      interrupted++;
+    }
+  }
   const pending =
     db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'").get()
       ?.n ?? 0;
   if (interrupted > 0 || pending > 0) {
     logger.info(
-      { event: "job.recover", interrupted, requeued: pending },
+      { event: "job.recover", interrupted, requeued, pending },
       "job recovery on startup",
     );
   }

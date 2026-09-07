@@ -1,5 +1,5 @@
 import { Elysia, t } from "elysia";
-import { createJob, getJob, listJobs, queueStats } from "../jobs/store.ts";
+import { createJob, getJob, jobHealth, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool } from "../jobs/types.ts";
 
 // HTTP surface for the async job system. The MCP tools are thin clients of these
@@ -29,6 +29,11 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
 
   // List recent jobs + queue depth (for monitoring / a future dashboard panel).
   .get("/", () => ({ ok: true as const, jobs: listJobs(), stats: queueStats() }))
+
+  // Queue health for the devhost heartbeat: `ok` is false when ≥3 jobs failed in the last
+  // hour or the oldest pending job has waited >15 min. Static route, so it is registered
+  // before `/:id` — never resolved as a job named "health".
+  .get("/health", () => jobHealth())
 
   // Poll a single job's state. `job.status` terminal ⇒ `result` or `error` is set.
   .get("/:id", ({ params, set }) => {

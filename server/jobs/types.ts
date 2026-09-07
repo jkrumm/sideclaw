@@ -31,11 +31,13 @@ export function isJobTool(value: string): value is JobTool {
 /**
  * Job lifecycle:
  *   pending → running → done | failed
- *   pending/running → interrupted   (only on process restart recovery)
+ *   running → pending                (restart recovery: check/overview/narrative/review, once)
+ *   running → interrupted            (restart recovery: everything else, or a 2nd interruption)
  *
  * `pending` jobs are admitted but waiting for a concurrency slot. `interrupted`
  * is terminal and means the HTTP server restarted while the job was in flight —
- * the worker subprocess died with it, so the result is unrecoverable.
+ * the worker subprocess died with it, so the result is unrecoverable. See
+ * `recoveryStatusFor` in store.ts for which tools get the one re-run.
  */
 export type JobStatus = "pending" | "running" | "done" | "failed" | "interrupted";
 
@@ -72,7 +74,7 @@ export interface JobRecord {
   error: string | null;
   /** Live progress while running; last snapshot is retained after terminal. Null until first event. */
   progress: JobProgress | null;
-  /** Execution attempts (currently always 0→1; retries are a future phase). */
+  /** Execution attempts — 1 for a normal run, 2 after a boot-recovery re-queue. */
   attempts: number;
   createdAt: number;
   startedAt: number | null;

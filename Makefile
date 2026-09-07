@@ -7,10 +7,24 @@ start:
 build:
 	bun run build
 
+# Refuses while jobs are running unless FORCE=1 — a reload kills every worker session
+# mid-flight (check/overview/narrative/review are re-queued once on boot, dispatch and
+# excalidraw are marked interrupted). SIGTERM rather than `kickstart -k`: the server drains
+# running jobs for up to 20 s (server/index.ts) and exits; KeepAlive restarts it. The old
+# PID is polled away first so the kickstart that skips launchd's respawn throttle never
+# lands on the process that is still draining.
 reload: build
+	@if [ -z "$(FORCE)" ]; then \
+	  n=$$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.running // 0' 2>/dev/null || echo 0); \
+	  if [ "$${n:-0}" != "0" ]; then echo "refusing to reload: $$n job(s) running — wait, or FORCE=1 make reload"; exit 1; fi; \
+	fi
 	@pkill -f "sideclaw/server/mcp.ts" 2>/dev/null || true
-	launchctl kickstart -k gui/$$(id -u)/com.jkrumm.sideclaw-server
-	@echo "sideclaw reloaded"
+	@old=$$(launchctl print gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null | awk '/^[[:space:]]*pid = /{print $$3; exit}'); \
+	launchctl kill SIGTERM gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null || true; \
+	i=0; while [ -n "$$old" ] && kill -0 "$$old" 2>/dev/null && [ $$i -lt 50 ]; do sleep 0.5; i=$$((i+1)); done; \
+	launchctl kickstart gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null || true; \
+	i=0; until curl -sf --max-time 2 http://127.0.0.1:7705/health >/dev/null 2>&1 || [ $$i -ge 40 ]; do sleep 0.5; i=$$((i+1)); done; \
+	curl -sf --max-time 2 http://127.0.0.1:7705/health >/dev/null && echo "sideclaw reloaded" || { echo "sideclaw did not come back on :7705 — tail ~/Library/Logs/sideclaw.err"; exit 1; }
 
 # The legacy `com.jkrumm.sideclaw` label is booted out and its plist removed
 # first. Leaving it behind is not merely untidy: it is the label Background

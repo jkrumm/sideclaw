@@ -15,3 +15,10 @@ process.env.LOG_LEVEL ??= "silent";
 // tear down a live episode's worktree mid-flight. Individual fixtures narrow this further to
 // their own temp dir; this is the backstop for a test that forgets.
 process.env.SIDECLAW_WORKTREE_ROOT ??= mkdtempSync(join(tmpdir(), "sideclaw-test-worktrees-"));
+
+// The job store opens its sqlite file at import, and the agents/overview suites import it
+// transitively — without this every test run reads (and prunes) the live server's queue.
+process.env.SIDECLAW_JOBS_DB ??= join(
+  mkdtempSync(join(tmpdir(), "sideclaw-test-jobs-")),
+  "jobs.db",
+);
