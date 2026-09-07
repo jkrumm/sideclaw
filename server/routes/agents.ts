@@ -1,48 +1,16 @@
 import { Elysia } from "elysia";
-import { buildSnapshot, parseCols, renderText, type AgentEnrichment } from "../lib/agents.ts";
-import { latestJobResult } from "../jobs/store.ts";
-import {
-  mergeOverviewIntoSnapshot,
-  OVERVIEW_OUTPUT,
-  type OverviewOutput,
-} from "../jobs/handlers/overview.ts";
+import { parseCols, renderText, type AgentEnrichment } from "../lib/agents.ts";
+import { buildOverviewPayload, cachedBuildSnapshot } from "../lib/overview-payload.ts";
 import { appLogger as logger } from "../logger.ts";
 
 // Deterministic, read-only, no-LLM agent overview: one JSON snapshot of every Claude Code
 // agent on this Mac mini, grouped by project. Single producer behind Hermes, an Argo
 // dashboard, a brain page and a herdr pane. See CLAUDE.md's `### agents` section.
 //
-// `buildSnapshot` itself now lives in lib/agents.ts — the `overview` job calls it
-// in-process too, rather than looping back over HTTP to this route.
-
-/** Reads the latest completed `overview` job result, re-validated against its own output
- *  schema (the row is untyped JSON from sqlite) — a schema drift between an old cached job
- *  and the current OVERVIEW_OUTPUT shape degrades to "no cached overview" rather than a
- *  500. */
-function readCachedOverview(): OverviewOutput | null {
-  const cached = latestJobResult("overview");
-  if (!cached) return null;
-  const parsed = OVERVIEW_OUTPUT.safeParse(cached.result);
-  if (!parsed.success) {
-    logger.warn(
-      { event: "overview.cache_parse_failed", tool: "overview", error: parsed.error.message },
-      "cached overview job result failed schema validation — treating as absent",
-    );
-    return null;
-  }
-  return parsed.data;
-}
-
-/** Fresh deterministic snapshot + the latest completed overview job, merged by agent id. Both
- *  GET /api/overview and GET /api/overview.txt share this — the JSON route returns the merged
- *  projects/agents directly, the text route additionally projects it into `renderText`'s
- *  enrichment map. */
-async function buildOverviewResponse() {
-  const snapshot = await buildSnapshot();
-  const cached = readCachedOverview();
-  const merged = mergeOverviewIntoSnapshot(snapshot, cached);
-  return { snapshot, merged };
-}
+// `buildSnapshot` itself lives in lib/agents.ts — the `overview` job calls it in-process
+// too, rather than looping back over HTTP to this route. The routes here read it through
+// `cachedBuildSnapshot` (20 s, lib/overview-payload.ts): the herdr pane, Hermes and the
+// Argo push all poll within seconds of each other and share one build.
 
 export const agentsRoutes = new Elysia({ prefix: "/api" })
   .get("/agents", async () => {
@@ -51,7 +19,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       { event: "agents.request", tool: "agents", format: "json" },
       "agents snapshot requested",
     );
-    const data = await buildSnapshot();
+    const data = await cachedBuildSnapshot();
     logger.info(
       {
         event: "agents.response",
@@ -73,7 +41,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       { event: "agents.request", tool: "agents", format: "text" },
       "agents snapshot requested",
     );
-    const data = await buildSnapshot();
+    const data = await cachedBuildSnapshot();
     set.headers["content-type"] = "text/plain; charset=utf-8";
     logger.info(
       {
@@ -94,20 +62,19 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       { event: "overview.request", tool: "overview", format: "json" },
       "overview snapshot requested",
     );
-    const { snapshot, merged } = await buildOverviewResponse();
-    const data = { ...snapshot, projects: merged.projects, overview: merged.overview };
+    const { merged, payload } = await buildOverviewPayload();
     logger.info(
       {
         event: "overview.response",
         tool: "overview",
         format: "json",
-        projects: data.projects.length,
+        projects: payload.projects.length,
         cached: merged.overview != null,
         durationMs: Math.round(performance.now() - startMs),
       },
       "overview snapshot built",
     );
-    return { ok: true, data };
+    return { ok: true, data: payload };
   })
   .get("/overview.txt", async ({ query, set }) => {
     const startMs = performance.now();
@@ -117,7 +84,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       { event: "overview.request", tool: "overview", format: "text" },
       "overview snapshot requested",
     );
-    const { snapshot, merged } = await buildOverviewResponse();
+    const { snapshot, merged } = await buildOverviewPayload();
     const enrichment = new Map<string, AgentEnrichment>();
     for (const project of merged.projects) {
       for (const agent of project.agents) {

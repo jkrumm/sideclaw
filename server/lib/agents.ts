@@ -1,5 +1,5 @@
 import { basename, join } from "path";
-import { existsSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { z } from "zod";
 import { appLogger as logger } from "../logger.ts";
@@ -179,6 +179,20 @@ export const AGENTS_SUMMARY_OUTPUT = z.object({
 });
 export type AgentsSummary = z.infer<typeof AGENTS_SUMMARY_OUTPUT>;
 
+/** One pending present-human request from dotfiles' `ask-human.sh` queue
+ *  (`~/.local/state/human-queue/<id>.req` with no `<id>.res` yet). Deterministic data, never
+ *  fed to the overview LLM — a human reads it, nothing needs to reason about it. */
+export const HUMAN_QUEUE_OUTPUT = z.object({
+  id: z.string().describe("Request id, e.g. 20260907T101553-13011."),
+  askedAt: z.string().nullable().describe("ISO timestamp the request was enqueued (`created`)."),
+  question: z.string().describe("What the agent needs a present human for (`text`)."),
+  cmd: z
+    .string()
+    .nullable()
+    .describe("Proposed command for the human to review and run on the MacBook, or null."),
+});
+export type HumanQueueEntry = z.infer<typeof HUMAN_QUEUE_OUTPUT>;
+
 export const AGENTS_SNAPSHOT_OUTPUT = z.object({
   generatedAt: z.number().describe("Epoch ms this snapshot was produced."),
   staleAfterHours: z
@@ -188,6 +202,11 @@ export const AGENTS_SNAPSHOT_OUTPUT = z.object({
   projects: z
     .array(PROJECT_OUTPUT)
     .describe("Sorted most-urgent-first: needs_you > working > idle > stale > done, then by name."),
+  humanQueue: z
+    .array(HUMAN_QUEUE_OUTPUT)
+    .describe(
+      "Pending ask-human requests (no result yet), newest first. Drained by `make human-queue`.",
+    ),
   warnings: z
     .array(z.string())
     .describe("Non-fatal collector failures, e.g. a herdr or claude CLI call failed or timed out."),
@@ -824,6 +843,21 @@ function clampLine(line: string, maxChars: number = MAX_LINE_CHARS): string {
   return line.length > maxChars ? line.slice(0, maxChars) : line;
 }
 
+/** Fit the single-line header into `max` columns WITHOUT ever cutting the meta suffix
+ *  (`· overview <age>` / `· overview none`). Cheapest concession first: the ISO date becomes
+ *  time-of-day (the pane refreshes every 30 s — the date is noise there), then the counts
+ *  text is truncated. The suffix is the one thing a `watch` pane exists to show. Pure,
+ *  exported for tests. */
+export function fitHeader(counts: string, iso: string, suffix: string, max: number): string {
+  const full = `${counts}  (${iso})${suffix}`;
+  if (full.length <= max) return full;
+  const timeOnly = iso.length > 11 ? iso.slice(11) : iso;
+  const tail = `  (${timeOnly})${suffix}`;
+  const compact = `${counts}${tail}`;
+  if (compact.length <= max) return compact;
+  return `${truncate(counts, Math.max(MIN_TITLE_CHARS, max - tail.length))}${tail}`;
+}
+
 /** Per-agent LLM enrichment, keyed by agent id — the `overview` job's result merged onto a
  *  fresh deterministic snapshot by `GET /api/overview`. Absent (or the agent's id missing
  *  from the map) means "no recommendation available", which `renderText` falls back on the
@@ -890,10 +924,10 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
   // 110, so clamping it would silently drop the "overview <age>"/"overview none" suffix the
   // caller asked for on every call.
   //
-  // `cols` set: it "replaces the fixed 110 visible-width clamp for every line" (including this
-  // one) — a caller asking for a narrow phone width is choosing to accept a hard cut over an
-  // unbounded header, which `splitHeader` (cols < SPLIT_HEADER_BELOW_COLS) already halves the
-  // odds of needing.
+  // `cols` set: the line still must not exceed cols, but the cut lands on the COUNTS, never
+  // on the meta suffix — `fitHeader` shortens the timestamp to time-of-day first and only
+  // then truncates the counts, so `· overview <age>` (the one thing the pane exists to show)
+  // survives the default 110 cols, where the full header (~115 chars) used to lose it.
   if (splitHeader) {
     const line1 = color ? `${DIM}${countsText}${RESET}` : countsText;
     const line2 = color ? `${DIM}${metaText}${RESET}` : metaText;
@@ -903,18 +937,34 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
       lines.push(clampLine(line1, lineMax), clampLine(line2, lineMax));
     }
   } else {
-    const header = `${countsText}  ${metaText}`;
-    const headerLine = color ? `${DIM}${header}${RESET}` : header;
-    if (cols != null) {
-      lines.push(color ? clampVisible(headerLine, lineMax) : clampLine(headerLine, lineMax));
-    } else {
-      lines.push(headerLine);
-    }
+    const header =
+      cols != null
+        ? fitHeader(countsText, generatedAtIso, metaText.slice(generatedAtIso.length + 2), lineMax)
+        : `${countsText}  ${metaText}`;
+    lines.push(color ? `${DIM}${header}${RESET}` : header);
   }
 
   if (color) {
     const bar = buildRecommendationBar(projects, opts?.enrichment, opts?.overview != null);
     if (bar) lines.push(bar);
+  }
+
+  // Present-human work, before any project: an agent blocked on a fingerprint or a
+  // person-only decision is the most actionable line on the screen, and no `overview` job
+  // needs to run for it to be right. Drained on the MacBook by `make human-queue`.
+  if (snapshot.humanQueue.length > 0) {
+    const heading = `needs you (human queue: ${snapshot.humanQueue.length})`;
+    lines.push(color ? `${BOLD_RED}${heading}${RESET}` : heading);
+    for (const req of snapshot.humanQueue) {
+      const askedMs = req.askedAt ? Date.parse(req.askedAt) : Number.NaN;
+      const age = relativeAge(Number.isNaN(askedMs) ? null : askedMs, generatedAt);
+      const marker = req.cmd ? "  [cmd]" : "";
+      const question = req.question.replace(/\s+/g, " ").trim();
+      // "  ! " + question + "  · " + age + marker — the two fixed pieces are 8 chars together.
+      const budget = Math.max(MIN_TITLE_CHARS, lineMax - 8 - age.length - marker.length);
+      const line = `  ! ${truncate(question, budget)}  · ${age}${marker}`;
+      lines.push(color ? clampVisible(`${RED}${line}${RESET}`, lineMax) : clampLine(line, lineMax));
+    }
   }
 
   for (const project of projects) {
@@ -1001,6 +1051,77 @@ async function runCli(cmd: string[], timeoutMs = CLI_TIMEOUT_MS): Promise<string
 export interface CollectorResult<T> {
   items: T[];
   warning: string | null;
+}
+
+// ── Human queue (dotfiles' ask-human.sh) ────────────────────────────────────────────────────
+//
+// `${XDG_STATE_HOME:-~/.local/state}/human-queue/<id>.req` is one flat JSON object
+// `{ id, created, host, cwd, text, cmd }` written by ask-human.sh on the mini; `<id>.res`
+// appears once a human acted on it from the MacBook (`make human-queue`). Pending = a .req
+// with no matching .res. Read directly, no shell-out: the format is the queue's own
+// contract (scripts/lib/human-queue-json.sh), and a request file a human has not yet seen
+// must never be fed to a model — this is deterministic data for a human's eyes.
+
+export function humanQueueDir(): string {
+  return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "human-queue");
+}
+
+/** Drops the C0 bytes dotfiles' human-queue.sh `printable()` drops (`\t`, `\n`, `\r` kept —
+ *  the renderer collapses whitespace). A request is written by an agent on the mini and
+ *  lands in a `watch --color` pane and in Hermes, so a stray ESC must never reach either.
+ *  A char-code scan for the same reason `stripAnsi` is one: `no-control-regex`. */
+function stripControlBytes(text: string): string {
+  let out = "";
+  for (const ch of text) {
+    const code = ch.charCodeAt(0);
+    const control =
+      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f;
+    if (!control) out += ch;
+  }
+  return out;
+}
+
+/** Pure: one `.req` body → a queue entry, or null when it is not the expected shape. */
+export function parseHumanQueueRequest(text: string, fallbackId: string): HumanQueueEntry | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const question = typeof r.text === "string" ? stripControlBytes(r.text) : null;
+  if (question === null) return null;
+  const cmd = typeof r.cmd === "string" ? stripControlBytes(r.cmd) : "";
+  return {
+    id: typeof r.id === "string" && r.id ? r.id : fallbackId,
+    askedAt: typeof r.created === "string" ? r.created : null,
+    question,
+    cmd: cmd || null,
+  };
+}
+
+/** Pending requests in `dir`, newest first (ids sort chronologically: `YYYYMMDDTHHMMSS-n`).
+ *  A missing directory is an empty queue, never a warning — the MacBook may simply never
+ *  have been asked for anything. */
+export function readHumanQueue(dir = humanQueueDir()): CollectorResult<HumanQueueEntry> {
+  if (!existsSync(dir)) return { items: [], warning: null };
+  try {
+    const names = new Set(readdirSync(dir));
+    const items: HumanQueueEntry[] = [];
+    for (const name of names) {
+      if (!name.endsWith(".req") || name.startsWith(".")) continue;
+      const id = name.slice(0, -".req".length);
+      if (names.has(`${id}.res`)) continue;
+      const entry = parseHumanQueueRequest(readFileSync(join(dir, name), "utf-8"), id);
+      if (entry) items.push(entry);
+    }
+    items.sort((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    return { items, warning: null };
+  } catch (err) {
+    return { items: [], warning: `human-queue read failed: ${String(err)}` };
+  }
 }
 
 /** `herdr agent list` → the herdr-tracked panes running a Claude agent. */
@@ -1153,10 +1274,13 @@ export async function buildSnapshot(staleHoursOverride?: number): Promise<Agents
     readClaudeAgents(),
   ]);
 
+  const humanQueueResult = readHumanQueue();
+
   const warnings = [
     herdrAgentsResult.warning,
     herdrWorkspacesResult.warning,
     claudeAgentsResult.warning,
+    humanQueueResult.warning,
   ].filter((w): w is string => w != null);
 
   // Unique (cwd, sessionId) pairs across both sources — a herdr pane and its claude registry
@@ -1254,6 +1378,7 @@ export async function buildSnapshot(staleHoursOverride?: number): Promise<Agents
     staleAfterHours: staleHours,
     summary,
     projects: projectsWithGit,
+    humanQueue: humanQueueResult.items,
     warnings,
   };
 }

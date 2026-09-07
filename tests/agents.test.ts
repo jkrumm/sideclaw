@@ -12,6 +12,12 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
+  fitHeader,
+  parseHumanQueueRequest,
+  readHumanQueue,
+  type HumanQueueEntry,
+} from "../server/lib/agents.ts";
+import {
   deriveState,
   encodeProjectDir,
   mergeAgents,
@@ -601,6 +607,7 @@ describe("renderText", () => {
       staleAfterHours: 24,
       summary: { needsYou: 0, working: 0, idle: 0, stale: 0, done: 0, dispatch: 0 },
       projects: [],
+      humanQueue: [],
       warnings: [],
       ...overrides,
     };
@@ -722,6 +729,7 @@ describe("renderText with color", () => {
           ],
         },
       ],
+      humanQueue: [],
       warnings: [],
       ...overrides,
     };
@@ -812,6 +820,7 @@ describe("renderText with cols", () => {
       staleAfterHours: 24,
       summary: { needsYou: 1, working: 1, idle: 0, stale: 0, done: 0, dispatch: 0 },
       warnings: [],
+      humanQueue: [],
       projects: [
         {
           name: "a-fairly-long-project-name-for-testing",
@@ -959,5 +968,176 @@ describe("renderText with cols", () => {
     for (const line of lines.slice(1)) {
       expect(line.length).toBeLessThanOrEqual(110);
     }
+  });
+});
+
+// ── Human queue (ask-human.sh requests surfaced in the snapshot) ────────────────────────────
+
+describe("parseHumanQueueRequest", () => {
+  test("maps the queue's own request shape onto {id, askedAt, question, cmd}", () => {
+    const body =
+      '{"id":"20260907T101553-13011","created":"2026-09-07T08:15:53Z","host":"mini",' +
+      '"cwd":"/Users/x/audio-gateway","text":"reseed the cache","cmd":"make secrets-seed"}';
+    expect(parseHumanQueueRequest(body, "fallback")).toEqual({
+      id: "20260907T101553-13011",
+      askedAt: "2026-09-07T08:15:53Z",
+      question: "reseed the cache",
+      cmd: "make secrets-seed",
+    });
+  });
+
+  test("a null cmd stays null; a missing id falls back to the filename id", () => {
+    const body = '{"created":"2026-09-07T08:15:53Z","text":"do a thing","cmd":null}';
+    expect(parseHumanQueueRequest(body, "from-file")).toEqual({
+      id: "from-file",
+      askedAt: "2026-09-07T08:15:53Z",
+      question: "do a thing",
+      cmd: null,
+    });
+  });
+
+  test("control bytes are stripped from text and cmd — the line lands in a watch pane and in Hermes", () => {
+    const body = JSON.stringify({
+      created: "2026-09-07T08:15:53Z",
+      text: "reseed\u001b[31m the\u0000 cache\tnow\n",
+      cmd: "make\u0007 secrets-seed",
+    });
+    expect(parseHumanQueueRequest(body, "x")).toEqual({
+      id: "x",
+      askedAt: "2026-09-07T08:15:53Z",
+      question: "reseed[31m the cache\tnow\n",
+      cmd: "make secrets-seed",
+    });
+  });
+
+  test("malformed JSON or a body without text is dropped, never thrown", () => {
+    expect(parseHumanQueueRequest("{not json", "x")).toBeNull();
+    expect(parseHumanQueueRequest('{"id":"a"}', "x")).toBeNull();
+    expect(parseHumanQueueRequest("[]", "x")).toBeNull();
+  });
+});
+
+describe("readHumanQueue", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "sideclaw-hq-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function req(id: string, text: string): void {
+    writeFileSync(
+      join(dir, `${id}.req`),
+      JSON.stringify({ id, created: "2026-09-07T08:00:00Z", text, cmd: null }),
+    );
+  }
+
+  test("a missing directory is an empty queue with no warning", () => {
+    expect(readHumanQueue(join(dir, "nope"))).toEqual({ items: [], warning: null });
+  });
+
+  test("only .req files WITHOUT a matching .res are pending, newest id first", () => {
+    req("20260901T000000-1", "old, answered");
+    writeFileSync(join(dir, "20260901T000000-1.res"), '{"status":"done"}');
+    req("20260905T000000-2", "older pending");
+    req("20260907T000000-3", "newest pending");
+    writeFileSync(join(dir, ".20260907T000000-9.req.tmp"), "{}"); // ask-human's temp file
+    writeFileSync(join(dir, "20260907T000000-4.req"), "garbage");
+    const { items, warning } = readHumanQueue(dir);
+    expect(warning).toBeNull();
+    expect(items.map((i: HumanQueueEntry) => i.id)).toEqual([
+      "20260907T000000-3",
+      "20260905T000000-2",
+    ]);
+  });
+});
+
+describe("renderText human-queue block and header suffix", () => {
+  const NOW_MS = Date.parse("2026-09-07T10:00:00Z");
+  function snap(humanQueue: HumanQueueEntry[]): AgentsSnapshot {
+    return {
+      generatedAt: NOW_MS,
+      staleAfterHours: 24,
+      summary: { needsYou: 0, working: 0, idle: 0, stale: 0, done: 0, dispatch: 0 },
+      projects: [],
+      humanQueue,
+      warnings: [],
+    };
+  }
+  const entry: HumanQueueEntry = {
+    id: "20260907T080000-1",
+    askedAt: "2026-09-07T08:00:00Z",
+    question: "Push the tailnet ACL:\n  new grant tag:vps → tag:devhost",
+    cmd: "make tailscale-acl-push",
+  };
+
+  test("an empty queue renders no block — byte-identical to before the field existed", () => {
+    const text = renderText(snap([]));
+    expect(text).not.toContain("needs you");
+  });
+
+  test("a pending request renders a 'needs you' block right under the header, newlines collapsed", () => {
+    const lines = renderText(snap([entry])).split("\n");
+    expect(lines[1]).toBe("needs you (human queue: 1)");
+    expect(lines[2]).toBe("  ! Push the tailnet ACL: new grant tag:vps → tag:devhost  · 2h  [cmd]");
+  });
+
+  test("the block stays within the width budget and keeps the age + [cmd] marker", () => {
+    const long = { ...entry, question: "q".repeat(300) };
+    const line =
+      renderText(snap([long]), { cols: 80 })
+        .split("\n")
+        .find((l) => l.startsWith("  ! ")) ?? "";
+    expect(line.length).toBeLessThanOrEqual(80);
+    expect(line.endsWith("  · 2h  [cmd]")).toBe(true);
+  });
+
+  test("the block is rendered from the snapshot alone — no overview enrichment needed", () => {
+    const text = renderText(snap([entry]), { enrichment: new Map(), overview: null, cols: 110 });
+    expect(text).toContain("needs you (human queue: 1)");
+    expect(text.split("\n")[0]).toContain("overview none");
+  });
+});
+
+describe("fitHeader", () => {
+  const counts = "agents: 1 needs_you · 2 working · 0 idle · 0 stale · 0 done · 0 dispatch";
+  const iso = "2026-09-07T10:15:53.123Z";
+  const suffix = "  · overview 2m";
+
+  test("fits as-is when the full header is within the budget", () => {
+    expect(fitHeader(counts, iso, suffix, 200)).toBe(`${counts}  (${iso})${suffix}`);
+  });
+
+  test("at the default 110 cols the date is dropped, the overview suffix survives intact", () => {
+    const out = fitHeader(counts, iso, suffix, 110);
+    expect(out.length).toBeLessThanOrEqual(110);
+    expect(out.endsWith(suffix)).toBe(true);
+    expect(out).toContain("(10:15:53.123Z)");
+    expect(out.startsWith(counts)).toBe(true);
+  });
+
+  test("when even the compact form overflows, the counts are truncated, never the suffix", () => {
+    const out = fitHeader(counts, iso, suffix, 70);
+    expect(out.length).toBeLessThanOrEqual(70);
+    expect(out.endsWith(suffix)).toBe(true);
+    expect(out).toContain("…");
+  });
+
+  test("MUTATION GUARD: the default-cols overview.txt header keeps '· overview' (the regression)", () => {
+    const text = renderText(
+      {
+        generatedAt: Date.parse(iso),
+        staleAfterHours: 24,
+        summary: { needsYou: 1, working: 2, idle: 0, stale: 0, done: 0, dispatch: 0 },
+        projects: [],
+        humanQueue: [],
+        warnings: [],
+      },
+      { enrichment: new Map(), overview: { ageMs: 120_000 }, cols: 110 },
+    );
+    const header = text.split("\n")[0] ?? "";
+    expect(header.length).toBeLessThanOrEqual(110);
+    expect(header).toContain("· overview 2m");
   });
 });

@@ -5,7 +5,9 @@ import type { JobTool, JobView } from "../jobs/types.ts";
 // disconnect); the HTTP server (LaunchAgent :7705) is durable and hosts the jobs.
 
 const PORT = process.env.PORT ?? "7705";
-const BASE = process.env.SIDECLAW_HTTP_URL ?? `http://localhost:${PORT}`;
+// 127.0.0.1, not `localhost`: the server binds loopback v4 only (server/index.ts), and a
+// resolver that hands out ::1 first would turn every submit into a connection refusal.
+const BASE = process.env.SIDECLAW_HTTP_URL ?? `http://127.0.0.1:${PORT}`;
 
 /** Liveness probe so a down HTTP server produces a clear error, not an opaque fetch failure. */
 export async function httpReachable(): Promise<boolean> {
