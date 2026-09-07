@@ -12,6 +12,8 @@ import { describe, expect, test } from "bun:test";
 import {
   buildNarrativePrompt,
   clampSections,
+  clampToWordBoundary,
+  clampWhatItIs,
   extractSessionProse,
   renderNarrativePage,
   stripInventedLinks,
@@ -97,6 +99,72 @@ describe("clampSections", () => {
   test("well-formed sections pass through unchanged", () => {
     const s = sections();
     expect(clampSections(s)).toEqual(s);
+  });
+});
+
+// ── clampWhatItIs / clampToWordBoundary — never mid-word, never mid-sentence ────
+
+describe("clampWhatItIs", () => {
+  test("text within the cap is returned untouched", () => {
+    const text = "A short, complete description.";
+    expect(clampWhatItIs(text, 450, 200)).toBe(text);
+  });
+
+  // MUTATION-VERIFIED: replacing `sentenceEnd >= minSentenceChars` with `sentenceEnd > -1`
+  // (accepting ANY sentence boundary, however early) turns this red — it would cut after the
+  // first short sentence ("Short one.") instead of the second, dropping real content.
+  test("cuts at the last full-sentence boundary at or before the cap, no ellipsis", () => {
+    const first = "Short one. ";
+    const second = "A".repeat(150) + ". ";
+    const third = "B".repeat(400) + ".";
+    const text = first + second + third;
+    const out = clampWhatItIs(text, 180, 50);
+    expect(out).toBe((first + second).trim());
+    expect(out.endsWith("…")).toBe(false);
+    expect(out.length).toBeLessThanOrEqual(180);
+  });
+
+  test("falls back to the last word boundary with an ellipsis when no sentence boundary qualifies", () => {
+    const text = "one two three four five six seven eight nine ten " + "x".repeat(500);
+    const out = clampWhatItIs(text, 60, 200);
+    expect(out.endsWith("…")).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(60);
+    // The character immediately before the ellipsis must be a real word character, not a
+    // fragment split out of a longer word — i.e. the cut landed on a space in the source text.
+    const withoutEllipsis = out.slice(0, -1);
+    expect(text.startsWith(withoutEllipsis)).toBe(true);
+    expect(text[withoutEllipsis.length]).toBe(" ");
+  });
+
+  test("a sentence boundary earlier than minSentenceChars is rejected, falling back to word boundary", () => {
+    const text = "Hi. " + "word ".repeat(100);
+    const out = clampWhatItIs(text, 40, 200);
+    expect(out.endsWith("…")).toBe(true);
+    // Not just the short first sentence — the word-boundary fallback keeps filling toward the
+    // cap instead of stopping at the sentence that was too short to qualify.
+    expect(out.length).toBeGreaterThan("Hi.".length);
+  });
+});
+
+describe("clampToWordBoundary", () => {
+  test("text within the cap is returned untouched, no ellipsis", () => {
+    const text = "meteo blends forecast models into one product.";
+    expect(clampToWordBoundary(text, 160)).toBe(text);
+  });
+
+  // MUTATION-VERIFIED: dropping the `- 1` ellipsis reservation in the word-boundary index
+  // lookup turns this red — the returned string (word-boundary text + "…") would be 161 chars,
+  // one over the cap.
+  test("cuts at the last word boundary and appends an ellipsis, never mid-word", () => {
+    const text =
+      "meteo blends multiple weather and wave forecast models into one single product " +
+      "served from a tileserver on the home mini network";
+    const out = clampToWordBoundary(text, 60);
+    expect(out.length).toBeLessThanOrEqual(60);
+    expect(out.endsWith("…")).toBe(true);
+    const withoutEllipsis = out.slice(0, -1);
+    expect(text.startsWith(withoutEllipsis)).toBe(true);
+    expect(text[withoutEllipsis.length]).toBe(" ");
   });
 });
 

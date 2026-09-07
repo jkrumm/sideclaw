@@ -30,6 +30,7 @@ const MIN_PROSE_BLOCK_CHARS = 200;
 const MAX_PROSE_BLOCKS_PER_SESSION = 3;
 
 const WHAT_IT_IS_MAX_CHARS = 450;
+const WHAT_IT_IS_MIN_SENTENCE_CHARS = 200;
 const WHERE_IT_STANDS_MAX_ITEMS = 5;
 const WHERE_IT_STANDS_MAX_CHARS = 160;
 const HOW_IT_GOT_HERE_MAX_ITEMS = 8;
@@ -157,13 +158,68 @@ export function stripInventedLinks(text: string): string {
 
 // ── Pure: section cap enforcement ───────────────────────────────────────────────
 
+/** Index of the last space at or before `limit` — the fallback word boundary when no better
+ *  cut point exists. Falls back to a hard `limit` cut only when the text has no space at all
+ *  in that window (pathological, e.g. one very long token). */
+function lastWordBoundaryIndex(text: string, limit: number): number {
+  const idx = text.slice(0, limit).lastIndexOf(" ");
+  return idx > 0 ? idx : limit;
+}
+
+/** Index just past the last sentence-ending punctuation (`.`/`!`/`?` followed by whitespace or
+ *  end of string) at or before `limit`, or -1 if none exists in that window. */
+function lastSentenceEndIndex(text: string, limit: number): number {
+  const re = /[.!?](?=\s|$)/g;
+  let end = -1;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const candidate = m.index + 1;
+    if (candidate > limit) break;
+    end = candidate;
+  }
+  return end;
+}
+
+/** Clamps `whatItIs` to `maxChars` without ever cutting mid-word or mid-sentence: prefers the
+ *  last full-sentence boundary at or before the cap (no ellipsis — it's already a complete
+ *  thought), as long as that keeps at least `minSentenceChars` so a short cap doesn't strip the
+ *  whole paragraph to one clause; otherwise falls back to the last word boundary with an
+ *  ellipsis. Text already within the cap is returned untouched. */
+export function clampWhatItIs(text: string, maxChars: number, minSentenceChars: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+
+  const sentenceEnd = lastSentenceEndIndex(trimmed, maxChars);
+  if (sentenceEnd >= minSentenceChars) return trimmed.slice(0, sentenceEnd);
+
+  // Reserve 1 char for the appended "…" so the final string never exceeds maxChars.
+  const wordEnd = lastWordBoundaryIndex(trimmed, maxChars - 1);
+  return `${trimmed.slice(0, wordEnd).trimEnd()}…`;
+}
+
+/** Clamps to `maxChars` at the last word boundary, appending "…" — never mid-word. Used for
+ *  the frontmatter `description`, which has no sentence-boundary preference of its own (it's
+ *  already the first sentence of `whatItIs`). Text already within the cap is returned
+ *  untouched, with no ellipsis. */
+export function clampToWordBoundary(text: string, maxChars: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  // Reserve 1 char for the appended "…" so the final string never exceeds maxChars.
+  const wordEnd = lastWordBoundaryIndex(trimmed, maxChars - 1);
+  return `${trimmed.slice(0, wordEnd).trimEnd()}…`;
+}
+
 /** Enforces every hard cap from the skill prompt in code, after the model answers — never
  *  trust the model to have counted its own characters. `howItGotHere` keeps the most RECENT
  *  entries when over the item cap (the list is oldest→newest, so trimming the front preserves
  *  the current arc rather than the earliest history). */
 export function clampSections(sections: NarrativeSections): NarrativeSections {
   return {
-    whatItIs: truncate(sections.whatItIs.trim(), WHAT_IT_IS_MAX_CHARS),
+    whatItIs: clampWhatItIs(
+      sections.whatItIs.trim(),
+      WHAT_IT_IS_MAX_CHARS,
+      WHAT_IT_IS_MIN_SENTENCE_CHARS,
+    ),
     whereItStands: sections.whereItStands
       .slice(0, WHERE_IT_STANDS_MAX_ITEMS)
       .map((s) => truncate(s.trim(), WHERE_IT_STANDS_MAX_CHARS)),
@@ -216,7 +272,7 @@ export interface RenderNarrativePageInput {
  *  have already run `clampSections`/link-stripping on `sections`. */
 export function renderNarrativePage(input: RenderNarrativePageInput): string {
   const { project, cwd, since, timestamp, sections } = input;
-  const description = truncate(firstSentence(sections.whatItIs), DESCRIPTION_MAX_CHARS);
+  const description = clampToWordBoundary(firstSentence(sections.whatItIs), DESCRIPTION_MAX_CHARS);
   const repo = basename(cwd);
   const revisedFrom = since ?? "bootstrap";
 

@@ -35,9 +35,13 @@ whatever needs rewriting so the page reads as if it had always said this.
 
 ### Sections you produce
 
-- **`whatItIs`** — at most 3 sentences, at most 450 characters. What the project is and does,
-  right now, in plain terms. Rewrite this whenever the project's purpose or shape actually
-  shifted; otherwise carry it forward unchanged (do not reword for the sake of rewording).
+- **`whatItIs`** — **at most 3 sentences and at most 450 characters, hard limits.** What the
+  project is and does, right now, in plain terms. Rewrite this whenever the project's purpose or
+  shape actually shifted; otherwise carry it forward unchanged (do not reword for the sake of
+  rewording). Count before you answer: if your draft runs past 3 sentences or 450 characters, it
+  will be cut off by code afterward with no regard for where your thought was headed — that is a
+  failure of this field, not a safety net, so write within the limit rather than relying on
+  truncation to save you.
 - **`whereItStands`** — at most 5 bullets, each at most 160 characters. The current state:
   what's live, what's stable, what's actively in flux. Present tense.
 - **`howItGotHere`** — at most 8 entries, each `{ date: "YYYY-MM-DD", text: "..." }`, text at
