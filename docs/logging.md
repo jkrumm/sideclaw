@@ -47,8 +47,8 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `github.cache.miss`        | app     | Octokit response stored to cache (carries `url`, `status`)                                                                                            |
 | `job.create`               | app     | Async job submitted (carries `jobId`, `tool`)                                                                                                         |
 | `job.start`                | app     | Job promoted from pending to running (carries `jobId`, `tool`, `running`, `pending`, `max`)                                                           |
-| `job.done`                 | app     | Job finished successfully (carries `jobId`)                                                                                                           |
-| `job.fail`                 | app     | Job handler threw (carries `jobId`, `error`)                                                                                                          |
+| `job.done`                 | app     | Job finished successfully (carries `jobId`, `tool`, `durationMs`)                                                                                     |
+| `job.fail`                 | app     | Job handler threw (carries `jobId`, `tool`, `durationMs`, `error`)                                                                                    |
 | `job.recover`              | app     | Startup reconciliation (carries `interrupted`, `requeued`)                                                                                            |
 | `mcp.tool.submit`          | mcp     | Thin MCP tool submitted a job to the HTTP server (carries `tool`, `jobId`, `status`)                                                                  |
 | `routing.overrides`        | mcp/app | Logged once at startup when `SIDECLAW_MODEL_*`/`SIDECLAW_BACKEND_*` overrides are in effect — **warn** if any was refused, info otherwise (carries `overrides`, the full applied/refused list from `GET /api/routing`) |
@@ -61,7 +61,10 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `check.retry`              | app     | `check` output was prose, not schema JSON — one JSON-only retry (carries `project`, `error`)                                                              |
 | `job.requeue`              | app     | Boot recovery re-queued an interrupted check/overview/narrative/review once (carries `jobId`, `tool`, `attempts`)                                        |
 | `app.argo_push`            | app     | Overview pushed to Argo (carries `status`: `ok` \| `no-secret` \| `http-error` \| `network-error` \| `build-error`, `trigger`: `job` \| `timer`, `httpStatus`) |
-| `app.shutdown`             | app     | SIGTERM received / grace period result (carries `running`, `workers`, `killedWorkers`)                                                                   |
+| `app.shutdown` (begin)     | app     | SIGTERM (drain) or SIGINT (forced abort, `FORCE=1 make reload`) received (carries `running`, `workers`, `graceMs`, `forced`) — `forced: true` distinguishes a deliberate FORCE abort from a real crash |
+| `app.shutdown` (escalate)  | app     | A SIGINT arrived while a SIGTERM drain was already in progress and shortened it to an immediate abort (carries only `escalate: true` — no `running`/`workers`/`graceMs`, distinct from the begin/finish shapes above and below) |
+| `app.shutdown` (finish)    | app     | The drain concluded — fully drained, grace period exhausted, or a forced/escalated abort (carries `running`, `killedWorkers`, `flushMs`, `forced`) |
+| `job.shutdown_abandoned`   | app     | A job's worker was one `terminateActiveSessions()` actually SIGTERMed this drain — its row is left `running` for the next boot's crash recovery rather than written `failed` (carries `jobId`, `tool`, `error`); an unrelated failure landing in the same drain window is NOT logged here — it goes through the normal `job.fail` path |
 | `dispatch.worktree_salvaged`        | app     | A discarded dispatch worktree's dirty tree and/or unpushed commits were bundled before teardown (carries `branch`, `path`, `bytes`, `orphanCommits`, `dirty`) — see `docs/dispatch-security.md` § Worktree salvage |
 | `dispatch.worktree_salvage_failed`  | app     | Worktree salvage attempt failed or produced nothing usable; teardown proceeds regardless (carries `branch`, `error`)                                     |
 
@@ -89,6 +92,10 @@ jq 'select(.level == "error")' ~/Library/Logs/sideclaw.jsonl | tail -50 | jq .
 
 # Slow HTTP requests (>500ms)
 jq 'select(.event == "app.request" and .durationMs > 500)' ~/Library/Logs/sideclaw.jsonl
+
+# Job duration by tool (p50/p95/max) — no jobId join needed once job.done/job.fail carry it
+jq -s 'group_by(.tool) | map({tool: .[0].tool, n: length, durations: (map(.durationMs) | sort)})' \
+  <(jq 'select(.event == "job.done" or .event == "job.fail")' ~/Library/Logs/sideclaw.jsonl)
 
 # Model usage breakdown
 jq -s 'group_by(.model) | map({model: .[0].model, count: length})' \

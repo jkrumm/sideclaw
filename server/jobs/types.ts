@@ -15,7 +15,10 @@ export type JobTool =
   | "overview"
   | "narrative";
 
-export const JOB_TOOLS: readonly JobTool[] = [
+// Not exported — nothing outside this file needs the raw list, only the `isJobTool` guard
+// built from it (fallow flagged the export itself as consumer-less; the guard is the public
+// surface, this backs it).
+const JOB_TOOLS: readonly JobTool[] = [
   "check",
   "review",
   "excalidraw_diagram",
@@ -38,10 +41,19 @@ export function isJobTool(value: string): value is JobTool {
  * is terminal and means the HTTP server restarted while the job was in flight —
  * the worker subprocess died with it, so the result is unrecoverable. See
  * `recoveryStatusFor` in store.ts for which tools get the one re-run.
+ *
+ * A `running` row whose worker was killed by a SIGTERM/SIGINT drain (`server/lib/shutdown.ts`)
+ * is deliberately left at `running` rather than transitioned to `failed` — `execute()`'s catch
+ * block in store.ts skips `finish()` for exactly the jobs `terminateActiveSessions()` just
+ * SIGTERMed (tracked via `markDrainKilled`, not merely "draining is true"), so the row reaches
+ * the next boot exactly as if the process had crashed, and goes through the same
+ * `pending`/`interrupted` reconciliation above instead of being counted as a real failure. A
+ * genuinely unrelated failure landing in the same drain window still gets written `failed`.
  */
 export type JobStatus = "pending" | "running" | "done" | "failed" | "interrupted";
 
-export const TERMINAL_STATUSES: readonly JobStatus[] = ["done", "failed", "interrupted"];
+// Not exported — same reasoning as JOB_TOOLS above: `isTerminal` is the public surface.
+const TERMINAL_STATUSES: readonly JobStatus[] = ["done", "failed", "interrupted"];
 
 export function isTerminal(status: JobStatus): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);

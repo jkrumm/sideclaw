@@ -12,8 +12,8 @@ routing table assigns it. Mini-only by design — see the dotfiles global CLAUDE
 
 ```bash
 make install-agent   # one-time: build + install + start the LaunchAgent
-make reload          # after code changes: build, SIGTERM-drain running jobs (≤20 s), restart
-FORCE=1 make reload  # reload even while jobs are running (they are re-queued once or interrupted)
+make reload          # after code changes: build, SIGTERM-drain running jobs (≤40 min), restart
+FORCE=1 make reload  # SIGINT now, discarding running jobs (read-only ones are re-queued once on boot)
 make build           # frontend only
 ```
 
@@ -21,6 +21,9 @@ Never start the server by hand (`bun server/index.ts`) — the LaunchAgent owns 
 The MCP server is registered at user scope by dotfiles' `make setup`
 (`claude mcp add --scope user sideclaw -- bun run ~/SourceRoot/sideclaw/server/mcp.ts`).
 A tool **schema** change needs an MCP reconnect (`/mcp`), not just `make reload`.
+A **plist** change (`com.jkrumm.sideclaw-server.plist`) needs `make install-agent`
+(`launchctl bootstrap`) — `make reload` only signals the already-loaded job definition and
+refuses if it detects the tracked plist has drifted from the installed one.
 
 ## Endpoints
 

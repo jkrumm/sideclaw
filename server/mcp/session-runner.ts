@@ -785,25 +785,32 @@ export function retryBackoffMs(attempt: number): number {
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
 
-/** Worker subprocesses alive in THIS process. The HTTP server's SIGTERM handler
- *  (`server/index.ts`) reads the count to decide how long to wait, then terminates
- *  what is left so a `make reload` never orphans a `claude -p` that keeps editing a
- *  worktree the boot sweep is about to delete. */
-const activeProcs = new Set<ReturnType<typeof Bun.spawn>>();
+/** Worker subprocesses alive in THIS process, mapped to the job they belong to (`undefined`
+ *  for a session run outside the job system, e.g. review's adversary text call). The HTTP
+ *  server's SIGTERM handler (`server/index.ts`) reads the count to decide how long to wait,
+ *  then terminates what is left so a `make reload` never orphans a `claude -p` that keeps
+ *  editing a worktree the boot sweep is about to delete. */
+const activeProcs = new Map<ReturnType<typeof Bun.spawn>, string | undefined>();
 
 export function activeSessionCount(): number {
   return activeProcs.size;
 }
 
-export function terminateActiveSessions(): number {
-  let n = 0;
-  for (const proc of activeProcs) {
+/** Kill every active worker subprocess and return the ids of the jobs they belonged to (a
+ *  process with no `jobId` — a session run outside the job system — is silently dropped, not
+ *  emitted as `undefined`). server/jobs/store.ts's `markDrainKilled` records exactly these ids
+ *  before the killed subprocess's `execute()` catch can run, so a job genuinely terminated by
+ *  this call can be told apart from an unrelated failure landing in the same drain window —
+ *  see the comment on `execute()`'s catch block. */
+export function terminateActiveSessions(): string[] {
+  const jobIds: string[] = [];
+  for (const [proc, jobId] of activeProcs) {
     if (proc.exitCode === null) {
       proc.kill("SIGTERM");
-      n++;
+      if (jobId !== undefined) jobIds.push(jobId);
     }
   }
-  return n;
+  return jobIds;
 }
 
 /** A retry that skips `resolveBackend`: the loop already decided where the next
@@ -1025,7 +1032,7 @@ async function runSessionAttempt<T = unknown>(
     stderr: "pipe",
     env,
   });
-  activeProcs.add(proc);
+  activeProcs.set(proc, jobId);
   void proc.exited.finally(() => activeProcs.delete(proc));
 
   // Progress heartbeat: keeps MCP client timeout alive during long-running sessions

@@ -30,7 +30,7 @@ Frontend UI (kiosk fullscreen, validating UI changes): `docs/ui-and-caching.md`.
 
 ```bash
 make build           # Build frontend to dist/ (no server start)
-make reload          # After code changes: build + SIGTERM-drain (≤20 s) + restart. Refuses while jobs run — FORCE=1 overrides
+make reload          # After code changes: build + SIGTERM-drain (≤40 min) + restart. Refuses while jobs run — FORCE=1 discards them (SIGINT), escalating an in-progress drain if one is running. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Drain window sizing
 make install-agent   # One-time: build + install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
@@ -103,6 +103,12 @@ Instead:
 3. The caller polls **`job_wait({ jobId })`** — a long-poll (~50s,
    heartbeated) that returns the result the moment the job finishes, or
    `stillRunning: true` to call again. `job_status` is a one-shot peek.
+   An explicit `maxWaitMs` may go up to **29 min**, turning a `review`'s ~9
+   round trips into one — but only because this server's `~/.claude.json`
+   entry carries a matching `timeout` (1800000). **The two are one setting in
+   two files**: without the client half, a long wait is aborted at 60s as a
+   hard error, where the 50s default would have returned a clean
+   `stillRunning`. Leave the default alone; raise it per call.
 
 While a job runs, `job_status`/`job_wait` also expose live worker progress
 derived from the worker's stream-json output: `turns`, `lastAction` (e.g.
@@ -116,20 +122,50 @@ reconnects; disk persistence survives an HTTP restart: on boot `recover()`
 re-queues an interrupted `check`/`overview`/`narrative`/`review` **once**
 (all read-only and idempotent) and marks everything else `interrupted`
 (`dispatch` is never auto re-run — an `implement` episode may already have
-pushed). `make reload` refuses while jobs are running unless `FORCE=1`, sends
-SIGTERM rather than `kickstart -k`, and drains running jobs for up to 20s
-before exiting. A **global concurrency cap**
-(`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as
+pushed). `make reload` refuses while jobs are running unless `FORCE=1` (which sends
+SIGINT — never SIGKILL, which isn't catchable and would skip the same
+handler's `terminateActiveSessions()`, orphaning `claude -p` workers that
+keep writing/committing after the reload believed it had stopped them; SIGINT
+hits the same handler with a zero grace period instead), otherwise sends
+SIGTERM rather than `kickstart -k`, and drains running jobs for up to 40 min
+(sized to the dominant single-attempt worst case, not the full
+double-timeout-fallback chain — `docs/deployment.md` § Drain window sizing)
+before exiting; a SIGINT arriving mid-drain escalates it to an immediate
+abort rather than being dropped. A job whose worker is one the drain
+actually terminated is left `running` for the next boot's ordinary
+crash-recovery, not written `failed` — an unrelated failure that merely
+lands in the same drain window still is. `make reload` also refuses
+outright if the tracked plist has drifted from the one launchd has loaded —
+checked both as a file compare and against launchd's own live
+`exit timeout` — `launchctl kill` never re-reads a changed plist, only
+`launchctl bootstrap` (`make install-agent`, which boots the current label
+out first so that bootstrap reliably takes, waits for the old PID to
+actually exit before copying the plist and bootstrapping, and now fails
+loudly — rather than reporting success unconditionally — if the new
+instance never comes up on `:7705`) does. A **global concurrency
+cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as
 `pending` so parallel agents can't trip the IU unified endpoint's rate
-limits.
+limits — while draining, that queue backs up too, which `GET
+/api/jobs/health`'s `draining: true` flag distinguishes from a wedged queue.
 
 Job lifecycle events log to `~/Library/Logs/sideclaw.jsonl` (`job.create` /
-`job.start` / `job.done` / `job.fail` / `job.recover` / `job.requeue`).
-Inspect the queue: `curl -s localhost:7705/api/jobs | jq`.
+`job.start` / `job.done` / `job.fail` / `job.recover` / `job.requeue` /
+`job.shutdown_abandoned`). Inspect the queue:
+`curl -s localhost:7705/api/jobs | jq`.
 **`GET /api/jobs/health`** → `{ ok, running, pending, failedLastHour,
-interruptedLastHour, oldestPendingAgeMs, lastFailure }`, `ok: false` when ≥3
-jobs failed in the last hour or the oldest pending job has waited >15 min —
-dotfiles' devhost-health reads it. A failed worker's stderr is logged at
+interruptedLastHour, oldestPendingAgeMs, lastFailure, draining, sinceBootMs,
+recoveredFromDrain }`, `ok: false` when ≥3 jobs failed in the last hour, or
+the oldest pending job has waited >15 min **and neither grace applies**: a
+drain intentionally stalls promotion, so queue backup alone never trips it
+while one is in flight (`draining: true`); the same backlog also gets a
+`BOOT_HEALTH_GRACE_MS` (5 min) pass right after a restart, but **only** when
+`recoveredFromDrain` is true — i.e. the previous process reached an orderly
+SIGTERM/SIGINT drain before it died (a persisted marker written the instant
+that drain began, read and cleared once on the next boot), not merely
+`sinceBootMs` being small. A raw crash never sets that marker, so a
+crash-looping process gets no grace — the backlog stays visible on every
+restart instead of permanently hiding behind "just booted." dotfiles'
+devhost-health reads it. A failed worker's stderr is logged at
 **warn** (`session.stderr`) so a post-mortem exists.
 
 ### agents, overview, narrative — one snapshot, one triage pass, one vault writer

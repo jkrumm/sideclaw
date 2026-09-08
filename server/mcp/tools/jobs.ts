@@ -8,11 +8,29 @@ import { mcpProgressCallback } from "../session-runner.ts";
 // these retrieve the eventual result. `job_wait` is the primary primitive — a
 // server-friendly long-poll that blocks (with progress heartbeats) until the job
 // finishes or the wait window elapses, so the agent never tight-loops and the
-// 60s MCP client timeout never trips.
+// MCP client timeout never trips.
 
 const POLL_INTERVAL_MS = 2000;
-const DEFAULT_WAIT_MS = 50_000;
-const MAX_WAIT_MS = 55_000; // stay under the MCP client's 60s request timeout
+// Default stays under the MCP client's 60 s out-of-the-box request timeout, so a caller that
+// passes nothing behaves exactly as before and never eats a hard transport abort.
+export const DEFAULT_WAIT_MS = 50_000;
+// The ceiling an explicit `maxWaitMs` may reach. Raising it only pays off when this server's
+// entry in `~/.claude.json` carries a matching `timeout` — the client aborts the request on
+// its own clock, and an abort is a hard failure where the 50 s default would have returned a
+// clean `stillRunning`. The two numbers are one setting in two files; move them together.
+// Worth moving: measured over 91 jobs, a `review` (p50 345 s, max 685 s) costs nine wait
+// rounds at 50 s — nine model turns spent asking "done yet?" — against one at this ceiling.
+// 29 min leaves a minute of headroom under a 30 min client timeout, matching `dispatch`'s own
+// longest job timeout.
+export const MAX_WAIT_MS = 29 * 60 * 1000;
+
+/** Pure clamp for the `maxWaitMs` input: missing → `DEFAULT_WAIT_MS`, floored at 1000 ms (a
+ *  sub-second budget would just thrash the poll loop below for no benefit), ceiled at
+ *  `MAX_WAIT_MS`. Exported so the boundary — raised from 55 s to 29 min in the same change —
+ *  is tested directly instead of only through a live MCP call. */
+export function clampMaxWaitMs(maxWaitMs: number | undefined): number {
+  return Math.min(Math.max(maxWaitMs ?? DEFAULT_WAIT_MS, 1000), MAX_WAIT_MS);
+}
 
 const JOB_STATE_OUTPUT = z.object({
   jobId: z.string(),
@@ -130,7 +148,8 @@ OUTPUT: \`status\` (pending/running/done/failed/interrupted) and \`stillRunning\
       title: "Wait for Job",
       description: `Block until a background job finishes (or the wait window elapses), then return its state. This is the normal way to consume check/review: submit → job_wait → use result.
 
-BEHAVIOR: polls internally and sends progress heartbeats, so it is safe for long jobs and won't trip the MCP timeout. Waits up to ~50s per call. If the job is still running when the window elapses, it returns with \`stillRunning: true\` — simply call job_wait again with the same jobId to keep waiting (loop until stillRunning is false). You may also do other work between calls.
+BEHAVIOR: polls internally and sends progress heartbeats, so it is safe for long jobs. Waits ~50s per call by default; if the job is still running when the window elapses it returns \`stillRunning: true\` — call job_wait again with the same jobId (loop until stillRunning is false). You may also do other work between calls.
+LONG JOBS: pass an explicit \`maxWaitMs\` to wait in ONE call instead of looping — a review (typically 5-11 min) otherwise costs ~9 round trips. Only do this if this server's \`~/.claude.json\` entry sets a \`timeout\` at least as large; without it the client aborts at 60s and the abort is a hard error, unlike the clean \`stillRunning\` the default returns.
 OUTPUT: when \`status\` is "done", \`result\` holds the tool's structured output; "failed"/"interrupted" set \`error\`.`,
       inputSchema: {
         jobId: z.string().describe("The job id returned by check/review."),
@@ -138,7 +157,7 @@ OUTPUT: when \`status\` is "done", \`result\` holds the tool's structured output
           .number()
           .optional()
           .describe(
-            `Max time to block this call, in ms. Default ${DEFAULT_WAIT_MS}, capped at ${MAX_WAIT_MS}.`,
+            `Max time to block this call, in ms. Default ${DEFAULT_WAIT_MS} (safe with any client), capped at ${MAX_WAIT_MS}. Values above the default require a matching \`timeout\` on this server's ~/.claude.json entry.`,
           ),
       },
       outputSchema: JOB_STATE_OUTPUT.shape,
@@ -147,7 +166,7 @@ OUTPUT: when \`status\` is "done", \`result\` holds the tool's structured output
     async ({ jobId, maxWaitMs }, extra) => {
       if (!(await httpReachable())) return down();
 
-      const budget = Math.min(Math.max(maxWaitMs ?? DEFAULT_WAIT_MS, 1000), MAX_WAIT_MS);
+      const budget = clampMaxWaitMs(maxWaitMs);
       const deadline = Date.now() + budget;
       const onProgress = mcpProgressCallback(extra);
 

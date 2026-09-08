@@ -13,12 +13,19 @@ import { agentsRoutes } from "./routes/agents";
 import { routingRoutes } from "./routes/routing";
 import { sweepStaleWorktrees } from "./jobs/handlers/dispatch-git.ts";
 import { jobsRoutes } from "./routes/jobs";
-import { initJobStore, queueStats, setDraining } from "./jobs/store";
+import {
+  initJobStore,
+  markDrainCompleted,
+  markDrainKilled,
+  queueStats,
+  setDraining,
+} from "./jobs/store";
 import { executeJob } from "./jobs/executor";
 import { pushOverviewToArgo } from "./lib/argo-push.ts";
 import { activeSessionCount, terminateActiveSessions } from "./mcp/session-runner.ts";
 import { setProcessKind } from "./lib/process-context.ts";
 import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
+import { createShutdownController, SHUTDOWN_GRACE_MS } from "./lib/shutdown.ts";
 
 // Must run before any job handler launches a session — session-runner.ts reads this per
 // call (see process-context.ts) to tag its logs `source: "app"` instead of the "mcp" default,
@@ -128,35 +135,68 @@ logger.info(
     : `sideclaw running on ${HOSTNAME}:${PORT}`,
 );
 
-// Graceful stop on SIGTERM (`make reload` → `launchctl kill SIGTERM`, or launchd itself).
-// Worker sessions have no checkpoint — a `claude -p` run is atomic from the job's point of
-// view — so this only buys a job that is seconds from finishing its result. Whatever is
-// still running after the grace period is SIGTERMed and exits with the process; boot
-// recovery then re-queues check/overview/narrative/review once (store.ts `recover`) and
-// marks the rest `interrupted`. KeepAlive brings the server straight back.
-const SHUTDOWN_GRACE_MS = 20_000;
-let shuttingDown = false;
-process.on("SIGTERM", () => {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  setDraining();
-  const { running } = queueStats();
-  logger.info(
-    { event: "app.shutdown", running, workers: activeSessionCount(), graceMs: SHUTDOWN_GRACE_MS },
-    "SIGTERM — draining running jobs",
-  );
-  const deadline = Date.now() + SHUTDOWN_GRACE_MS;
-  const tick = setInterval(() => {
-    const left = queueStats().running;
-    if (left > 0 && Date.now() < deadline) return;
-    clearInterval(tick);
-    const killed = terminateActiveSessions();
-    logger.info(
-      { event: "app.shutdown", running: left, killedWorkers: killed },
-      left > 0 ? "grace period over — exiting with jobs still running" : "drained — exiting",
-    );
-    process.exit(0);
-  }, 500);
+// Graceful stop on SIGTERM (`make reload` → `launchctl kill SIGTERM`, or launchd itself) and
+// forced stop on SIGINT (`FORCE=1 make reload` → `launchctl kill SIGINT`, or a SIGINT that
+// arrives mid-drain to escalate it — see createShutdownController's doc comment). Worker
+// sessions have no checkpoint — a `claude -p` run is atomic from the job's point of view — so a
+// drain buys a job time to actually finish, not just "seconds from finishing". Whatever is
+// still running after the grace period is SIGTERMed and exits with the process; a drain-killed
+// job's row is left `running` for the next boot's ordinary crash-recovery to reconcile
+// (store.ts `execute()`/`recover()`) rather than written `failed` here. KeepAlive brings the
+// server straight back. `SHUTDOWN_GRACE_MS`/`SHUTDOWN_FLUSH_MS`, their sizing rationale, and the
+// drain state machine itself live in lib/shutdown.ts (kept out of this module so they're
+// importable — and unit-testable with fake deps/clock — without pulling in this file's own
+// `app.listen()` side effect).
+//
+// SIGINT, not SIGKILL, carries "abandon now": SIGKILL is not catchable, so it would skip this
+// very handler and `terminateActiveSessions()` would never run — the `claude -p` children have
+// no process group detachment and no parent-death signal, so they'd become orphans that keep
+// writing/committing in their worktree after the reload believed it had stopped them. SIGINT is
+// not otherwise wired in this process (no readline/TTY prompt to interrupt), so reusing it here
+// doesn't shadow anything.
+const shutdownController = createShutdownController({
+  terminateActiveSessions,
+  activeSessionCount,
+  queueStats: () => ({ running: queueStats().running }),
+  setDraining,
+  markDrainKilled,
+  markDrainCompleted,
+  log: (level, fields, msg) => logger[level](fields, msg),
+  exit: (code) => process.exit(code),
+  now: () => Date.now(),
+  scheduleFlush: (cb, ms) => setTimeout(cb, ms),
 });
+
+// The controller decides WHEN a drain is over; this interval only decides HOW OFTEN to ask.
+// Started lazily (only once a drain is actually in progress, never for an immediate
+// finish/forced-abort) and torn down as soon as `isActive()` goes false. Two different call
+// sites can observe that: a normal `tick()` inside the interval (the common case — the drain
+// either empties the queue or hits its deadline while polling), OR `onSignal` itself right
+// after `begin()` returns, for the case `tick()` never gets a chance to run at all — a SIGINT
+// arriving mid-drain finishes the controller SYNCHRONOUSLY inside `begin()` (escalation, see
+// `createShutdownController`'s doc comment), so without this second check the existing interval
+// would sit until its own next 500ms tick to notice `isActive()` had already gone false and
+// clear itself — one harmless but avoidable empty tick.
+let drainPoll: ReturnType<typeof setInterval> | null = null;
+function onSignal(signal: "SIGTERM" | "SIGINT", graceMs: number): void {
+  shutdownController.begin(signal, graceMs);
+  if (shutdownController.isActive()) {
+    if (drainPoll === null) {
+      drainPoll = setInterval(() => {
+        shutdownController.tick();
+        if (!shutdownController.isActive() && drainPoll !== null) {
+          clearInterval(drainPoll);
+          drainPoll = null;
+        }
+      }, 500);
+    }
+  } else if (drainPoll !== null) {
+    clearInterval(drainPoll);
+    drainPoll = null;
+  }
+}
+
+process.on("SIGTERM", () => onSignal("SIGTERM", SHUTDOWN_GRACE_MS));
+process.on("SIGINT", () => onSignal("SIGINT", 0));
 
 export type App = typeof app;
