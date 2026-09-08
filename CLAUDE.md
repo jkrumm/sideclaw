@@ -3,11 +3,13 @@
 ## Architecture
 
 React frontend (Vite) + Bun/Elysia backend, running natively on the host,
-loopback-only on `:7705`. Reached via Caddy: `https://sideclaw.test` locally,
-`https://sideclaw.mini.jkrumm.com` over the tailnet — never a direct grant on
-7705. (A few source files still reference `http://sideclaw.local`, a
-localias-proxy convention; localias isn't installed here — treat it as dead,
-see `docs/ui-and-caching.md`.)
+loopback-only on `:7705`. Reached via Caddy: `https://sideclaw.test` locally
+— **no tailnet door, deliberately**. `~/.config/caddy-tailnet.ports` carries
+an explicit `exclude sideclaw`: the job API has no auth, so a tailnet twin
+would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
+implement`. Don't remove that exclusion. (A few source files still reference
+`http://sideclaw.local`, a localias-proxy convention; localias isn't
+installed here — treat it as dead, see `docs/ui-and-caching.md`.)
 
 Bun loads `.env` automatically from the `sideclaw/` directory — all env vars
 (`PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH`, `GITHUB_TOKEN`, `SIDECLAW_*`,
@@ -16,8 +18,7 @@ cwd-based, so the **MCP process** (spawned with the calling session's cwd)
 imports `server/lib/load-env.ts` first thing in `mcp.ts` to read the same
 file — existing environment always wins over the file.
 
-Frontend UI (GitHub caching, GitPanel opt-in, kiosk fullscreen, validating UI
-changes): `docs/ui-and-caching.md`.
+Frontend UI (kiosk fullscreen, validating UI changes): `docs/ui-and-caching.md`.
 
 ## Running sideclaw
 

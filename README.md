@@ -40,8 +40,7 @@ Logs: `~/Library/Logs/sideclaw.jsonl` (structured, both processes), `sideclaw.{l
 | Key | Purpose |
 |-|-|
 | `PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH` | repo roots for the dashboard |
-| `GITHUB_TOKEN` | fallback GitHub credential (primary is `secrets-run read op://mini/github/token`) |
-| `SIDECLAW_GIT_ENABLED`, `VITE_SIDECLAW_GIT_ENABLED` | `true` turns on the GitPanel + GitHub polling (off by default) |
+| `GITHUB_TOKEN` | fallback GitHub credential for `dispatch` artifacts (primary is `secrets-run read op://mini/github/token`) |
 | `RESEARCH_GATEWAY_URL`, `RESEARCH_GATEWAY_TOKEN` | lets review angle workers validate external claims |
 | `SIDECLAW_MODEL_<TOOL>`, `SIDECLAW_BACKEND_<TOOL>` | per-tool routing override (`iu` \| `max`); a gateway id never lands on `max` |
 | `SIDECLAW_WORKER_FALLBACK=none` | disable both fallback directions |

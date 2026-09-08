@@ -1,40 +1,18 @@
-# Frontend UI — GitHub caching, GitPanel, kiosk mode
+# Frontend UI — kiosk mode, reaching the dashboard
 
 The React dashboard (`src/`) is a secondary surface — the MCP tools and the
 job queue are the primary interface. This covers the parts of the UI that
 aren't self-evident from the component tree.
 
-## GitHub API caching
-
-All Octokit calls go through an ETag + soft-TTL cache installed as request
-hooks (`server/lib/github-cache.ts`). Two layers:
-
-1. **Soft-TTL fan-out (10s default, 5min for `/contents/`)** — repeat
-   requests within the window return cached data without touching GitHub.
-2. **ETag revalidation** — past soft-TTL, `If-None-Match` is sent; 304
-   responses are converted back to cached payloads (free against the primary
-   5,000/hr rate limit).
-
-Cache keys are the fully resolved request URL (`octokit.request.endpoint()`),
-so per-repo isolation is enforced. Frontend polling (`GitPanel.tsx`) runs at
-30s and pauses while the tab is hidden. Observe via
-`jq 'select(.event | startswith("github.cache"))' ~/Library/Logs/sideclaw.jsonl`.
-
-## Enabling the GitPanel
-
-The git surface is **off by default** — opt in per `.env`.
-
-Set `SIDECLAW_GIT_ENABLED=true` + `VITE_SIDECLAW_GIT_ENABLED=true` in `.env`
-to turn on the whole git surface — GitPanel renders, `/api/repo/git` and
-`/api/github` return live data, and `/api/actions/{chain,git}` are active.
-Left unset, the git surface stays off (`data: null`, actions return 503),
-which avoids GitHub rate-limit pressure.
-
 ## Reaching the dashboard
 
 Bind is loopback-only (`server/index.ts`). Reach it via Caddy's
-`sideclaw.test` block (`dotfiles/config/Caddyfile`) or, from another tailnet
-device, `https://sideclaw.mini.jkrumm.com`. A few source files still name
+`sideclaw.test` block (`dotfiles/config/Caddyfile`) — locally only. There is
+**deliberately no tailnet door**: `~/.config/caddy-tailnet.ports` carries an
+explicit `exclude sideclaw`, because the job API has no auth and a tailnet
+twin would let any tag:mac/phone/tablet node `POST /api/jobs` with `dispatch
+implement`. Don't add a `sideclaw.mini.jkrumm.com` block to "fix" that — it's
+the gap the exclusion exists to keep closed. A few source files still name
 `http://sideclaw.local`/allow it as a host (`vite.config.ts`, `kiosk.ts`,
 `excalidraw-hydrate.ts`) — that was a localias-proxy convention; localias
 isn't installed on this host, so treat `.local` as legacy and unreachable,

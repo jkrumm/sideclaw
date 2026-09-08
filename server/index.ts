@@ -7,9 +7,7 @@ import { notesRoutes } from "./routes/notes";
 import { eventsRoutes } from "./routes/events";
 import { markdownRoutes } from "./routes/markdown";
 import { usageRoutes } from "./routes/usage";
-import { githubRoutes } from "./routes/github";
 import { diagramsRoutes } from "./routes/diagrams";
-import { actionsRoutes } from "./routes/actions";
 import { kioskRoute } from "./routes/kiosk";
 import { agentsRoutes } from "./routes/agents";
 import { routingRoutes } from "./routes/routing";
@@ -64,9 +62,7 @@ const app = new Elysia()
   .use(eventsRoutes)
   .use(markdownRoutes)
   .use(usageRoutes)
-  .use(githubRoutes)
   .use(diagramsRoutes)
-  .use(actionsRoutes)
   .use(kioskRoute)
   .use(jobsRoutes)
   .use(agentsRoutes)

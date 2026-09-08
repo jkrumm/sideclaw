@@ -8,29 +8,18 @@ import {
   NavbarHeading,
   NonIdealState,
 } from "@blueprintjs/core";
-import { GitPanel } from "../components/GitPanel";
 import { UsageTags } from "../components/UsageTags";
 import { NotesPanel } from "../components/NotesPanel";
 import { DiagramPanel } from "../components/DiagramPanel";
 import { PanelSkeleton } from "../components/PanelSkeleton";
 import { useTheme } from "../main";
-import type { GitPanelHandle } from "../components/GitPanel";
 import type { NotesPanelHandle } from "../components/NotesPanel";
-import type { GitStatus, RepoData } from "../types";
-
-const GIT_ENABLED = import.meta.env.VITE_SIDECLAW_GIT_ENABLED === "true";
+import type { RepoData } from "../types";
 
 async function fetchRepoData(path: string): Promise<RepoData> {
   const res = await fetch(`/api/repo?path=${encodeURIComponent(path)}`);
   const json = (await res.json()) as { ok: boolean; data: RepoData };
   if (!json.ok) throw new Error("Failed to load repo");
-  return json.data;
-}
-
-async function fetchGitData(path: string): Promise<GitStatus | null> {
-  const res = await fetch(`/api/repo/git?path=${encodeURIComponent(path)}`);
-  const json = (await res.json()) as { ok: boolean; data: GitStatus | null };
-  if (!json.ok) throw new Error("Failed to load git status");
   return json.data;
 }
 
@@ -69,22 +58,11 @@ function RepoDashboardInner() {
 
   const [sseDisconnected, setSseDisconnected] = useState(false);
 
-  const gitRef = useRef<GitPanelHandle>(null);
   const notesRef = useRef<NotesPanelHandle>(null);
   const evtSourceRef = useRef<EventSource | null>(null);
 
-  // Both promises fire immediately in parallel — no waterfall
   const repoPromise = useMemo(
     () => (repoPath ? fetchRepoData(repoPath) : Promise.reject(new Error("No path"))),
-    [repoPath],
-  );
-  const gitPromise = useMemo(
-    () =>
-      !GIT_ENABLED
-        ? Promise.resolve(null)
-        : repoPath
-          ? fetchGitData(repoPath)
-          : Promise.reject(new Error("No path")),
     [repoPath],
   );
 
@@ -127,8 +105,6 @@ function RepoDashboardInner() {
           }
           knownServerStart = data.serverStart;
         }
-        // Refresh panels to catch any events missed during a disconnect gap
-        if (GIT_ENABLED) gitRef.current?.refresh();
         resetWatchdog(evtSource);
       });
 
@@ -224,11 +200,6 @@ function RepoDashboardInner() {
           padding: 24,
         }}
       >
-        {GIT_ENABLED && (
-          <Suspense fallback={<PanelSkeleton height={100} />}>
-            <GitPanel key={repoPath} ref={gitRef} repoPath={repoPath} initialPromise={gitPromise} />
-          </Suspense>
-        )}
         <DiagramPanel repoPath={repoPath} />
         <Suspense fallback={<PanelSkeleton height={200} />}>
           <NotesPanel

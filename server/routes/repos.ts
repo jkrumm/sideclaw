@@ -3,9 +3,7 @@ import { existsSync, readdirSync, statSync } from "fs";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { scanRepos } from "../lib/repo-scanner";
-import { getGitStatus } from "../lib/git";
 import { toContainerPath, toDisplayPath, WORKSPACES } from "../lib/workspace";
-import { gitEnabled } from "../lib/feature-flags";
 
 async function ensureFile(filePath: string): Promise<string> {
   if (!existsSync(filePath)) {
@@ -83,29 +81,6 @@ export const reposRoutes = new Elysia({ prefix: "/api" })
     const notesPath = join(containerPath, "sc-note.md");
     if (existsSync(notesPath)) await fs.rm(notesPath);
     return { ok: true };
-  })
-  .get("/repo/git", async ({ query, set }) => {
-    if (!gitEnabled) return { ok: true, data: null };
-
-    const path = query.path;
-    if (!path) {
-      set.status = 400;
-      return { ok: false, error: "Missing path query parameter" };
-    }
-
-    const containerPath = toContainerPath(path);
-    const git = await getGitStatus(containerPath);
-
-    // Normalise worktree paths to display paths so frontend can pass them back
-    // to API endpoints directly (e.g. /api/actions/chain { worktreePath })
-    if (git) {
-      git.worktrees = git.worktrees.map((wt) => ({
-        ...wt,
-        path: toDisplayPath(wt.path),
-      }));
-    }
-
-    return { ok: true, data: git };
   })
   .get("/repo", async ({ query, set }) => {
     const path = query.path;
