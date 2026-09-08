@@ -67,8 +67,41 @@ the caller.
 - **`readOnly: true` is not the whole boundary.** It removes Edit/Write but
   not `Bash`, and the brief that seeds the episode is attacker-influenced
   text — so for a sensitive episode this scan is the actual boundary, not a
-  courtesy check on top of the permission profile. Restricting `Bash` itself
-  is a separate, larger decision, out of scope here.
+  courtesy check on top of the permission profile.
+
+## Host reach, and why `Bash` is not restricted
+
+A worker inherits the mini's own host reach. `ssh vps` and `ssh homelab` are
+Tailscale SSH — **the device is the credential**, so every process on this box
+gets them with no key material: passwordless root on the VPS, docker group on
+HomeLab. That is not something dispatch grants; it is the machine's ambient
+authority, and an interactive session has had it all along.
+
+**Measured 2026-09-08, before deciding not to act on it.** `--disallowedTools`
+does accept scoped patterns and deny rules do survive
+`--dangerously-skip-permissions` — `Bash(ssh *)` correctly blocked `ssh vps id`.
+But `sh -c "ssh vps id"` walked straight through it: the matcher does not
+recurse into a wrapper shell. A `sandbox.network.strictAllowlist` with an empty
+`allowedDomains`, passed via `--settings`, did not engage either — `curl
+https://example.com` still returned 200. So there is **no in-process control
+here that holds against an injected brief**; a pattern deny that one word
+defeats is documentation, not a boundary.
+
+The decision is to keep the reach, deliberately:
+
+- Fixing VPS and HomeLab problems *is* the job, and neither has CI/CD — a
+  merged PR changes nothing there. Removing `ssh` would make the incident class
+  this whole loop exists for unfixable by it.
+- The real control is at the input, not the capability: brief and context are
+  already fenced in nonce-delimited data blocks (`lib/prompt-fence.ts`), which
+  is the layer that actually addresses an attacker-influenced brief.
+- This is a single-operator estate. The residual risk is a third-party
+  container emitting a log line that reaches an alert and then a brief.
+
+The real boundary, if one is ever wanted, is a **separate tailnet identity for
+dispatch workers** with no sudo and no HomeLab grant — an ACL change, not a
+Claude Code flag. Do not reach for `--disallowedTools` or the sandbox for this;
+both were tested and neither holds.
 
 ## Worktree isolation
 
