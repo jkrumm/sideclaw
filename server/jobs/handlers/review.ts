@@ -403,11 +403,15 @@ async function routeExtraAngles(
     prompt,
     tool: "review:router",
     jobId,
-    route: routeFor("review"),
+    route: routeFor("review_router"),
     jsonSchema: ROUTER_JSON_SCHEMA,
     maxTurns: 8,
     timeoutMs: 3 * 60 * 1000,
     readOnly: true,
+    // Same CLASSIFY tier as check/overview, so it inherits glm-5.3-flash's measured habit of
+    // stalling after it has already emitted its answer. Safe here for the same reason it is
+    // safe there: the router has no tools and no side effects, so a re-run costs one session.
+    retryAfterOutput: true,
     settingSources: "project",
     validate: zodValidator(ROUTER_OUTPUT),
     onActivity: bump ? (p) => bump(`router: ${p.lastAction}`) : undefined,

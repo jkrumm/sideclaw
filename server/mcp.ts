@@ -15,11 +15,14 @@ import { registerOverviewTool } from "./mcp/tools/overview.ts";
 import { registerNarrativeTool } from "./mcp/tools/narrative.ts";
 import { logger } from "./mcp/logger.ts";
 import { setProcessKind } from "./lib/process-context.ts";
+import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
 
 // "mcp" is already process-context.ts's default (preserved for callers that predate it), but
 // set it explicitly here anyway — this is the one process that default exists to describe, and
 // an explicit call survives a future change to that default.
 setProcessKind("mcp");
+logRoutingOverrides(logger);
+logStaleQuotaEnvVars(logger);
 
 const server = new McpServer({
   name: "sideclaw",

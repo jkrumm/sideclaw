@@ -145,18 +145,20 @@ Each agent loads project context via `--setting-sources user,project`:
 
 ## Cost Profile
 
-All angle + synthesis sessions run on **claude-sonnet-5** via the IU unified
-endpoint's native Anthropic transport — IU per-token billing, zero Max quota. The
-adversary critic uses the **IU OpenAI transport** (`gpt-5.6-terra`) directly —
-also IU per-token, also zero Max, but a different model family so its bias
-profile is uncorrelated with the claude-sonnet-5 reviewers.
+Angle + synthesis sessions run on **claude-sonnet-5** over the **Max** backend
+(`routeFor("review")`), falling back to IU per-token only when a Max session dies
+with a quota error. The router triage runs on the cheap CLASSIFY tier
+(`glm-5.3-flash` on IU), and the adversary critic uses the **IU OpenAI transport**
+(`gpt-5.6-terra`) directly — IU per-token, zero Max, and a different model family
+so its bias profile is uncorrelated with the claude-sonnet-5 reviewers. The live
+table is always `GET /api/routing`.
 
-| Component                                        | Model           |
-| ------------------------------------------------ | --------------- |
-| 1 router triage session                          | claude-sonnet-5 |
-| 2–8 angle sessions (3 in flight)                 | claude-sonnet-5 |
-| 1 adversary critic (single HTTPS call, no agent) | gpt-5.6-terra   |
-| 1 synthesis session                              | claude-sonnet-5 |
+| Component                                                                                             | Model           |
+| ----------------------------------------------------------------------------------------------------- | --------------- |
+| 1 router triage session (own `review_router` route — the cheap CLASSIFY tier, same as check/overview) | glm-5.3-flash   |
+| 2–8 angle sessions (3 in flight)                                                                      | claude-sonnet-5 |
+| 1 adversary critic (single HTTPS call, no agent)                                                      | gpt-5.6-terra   |
+| 1 synthesis session                                                                                   | claude-sonnet-5 |
 
 `gpt-5.6-terra` is a reasoning model — it thinks before answering, so it is
 slower (~50s) and pricier ($2.50/$15 per 1M, ~$0.08 a review) than the

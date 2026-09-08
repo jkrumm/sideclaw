@@ -7,7 +7,6 @@ import { logger as mcpLogger } from "./logger.ts";
 import { appLogger } from "../logger.ts";
 import { processKind } from "../lib/process-context.ts";
 import { getIuConfig } from "../lib/iu-openai.ts";
-import { readMaxQuota, type MaxQuota } from "../lib/quota.ts";
 import {
   isClaudeModel,
   withModel,
@@ -56,13 +55,6 @@ function runnerLogger(): typeof appLogger {
  *  `make reload`. */
 const WORKER_FALLBACK: "iu" | "none" =
   process.env.SIDECLAW_WORKER_FALLBACK === "none" ? "none" : "iu";
-
-/** Five-hour-window utilization percent (0-100) at or above which a `max`
- *  session falls back to `iu`. */
-const MAX_QUOTA_CEILING = Number(process.env.SIDECLAW_MAX_QUOTA_CEILING ?? 90);
-/** Seven-day-window utilization percent (0-100) at or above which a `max`
- *  session falls back to `iu`. */
-const MAX_WEEKLY_CEILING = Number(process.env.SIDECLAW_MAX_WEEKLY_CEILING ?? 95);
 
 const CLAUDE_LOG_DIR = join(homedir(), ".claude", "logs");
 
@@ -286,6 +278,16 @@ export interface SessionResult<T = unknown> {
    *  reverse fallback treats this like an IU transport failure, without a same-backend
    *  retry first (there is nothing to retry). */
   iuConfigError?: boolean;
+  /** Transport/provider-sourced text ONLY (stderr, the runner's own constructed error
+   *  message) — never model-generated stdout. Feeds `isQuotaError` classification;
+   *  `error` stays the full human-readable text regardless. Unset on branches whose
+   *  only text is the worker's own output (an unparseable `result`, a schema-validation
+   *  failure) — those must never quota-classify. See `isQuotaError`'s doc comment. */
+  classificationText?: string;
+  /** The runner observed a stream-json `system`/`api_retry` event during this attempt —
+   *  a structured signal that the CLI itself retried after a provider-side 429/529.
+   *  Checked ahead of the `classificationText` regex in `planNextAttempt`. */
+  hadApiRetry?: boolean;
 }
 
 /** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
@@ -579,94 +581,150 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
 // failures, and only before the worker has produced any output a retry could
 // duplicate or corrupt.
 
-/** Input to `chooseBackend` — everything the pure decision needs, with no I/O of
- *  its own so it is trivially unit-testable. `configured` and `quota` are passed
- *  in rather than read from module state/network, for the same reason. */
-export interface ChooseBackendInput {
-  configured: Backend;
-  model: string;
-  quota: MaxQuota;
-  ceilingFiveHour: number;
-  ceilingSevenDay: number;
-  fallback: "iu" | "none";
-}
-
-export interface ChooseBackendResult {
+export interface ResolvedBackend {
   backend: Backend;
-  reason: "non-claude-model" | "fallback-disabled" | "quota-unknown" | "quota" | "ok";
+  reason: "non-claude-model" | "ok";
 }
 
-/** Pure backend decision — no network, no clock beyond what `quota` already
- *  carries. Rules, in order:
+/** Effective backend for a route, resolved once per session launch. Pure, no I/O.
  *
- *  1. A non-Claude model id always goes to `iu` — `max` only ever serves
- *     Anthropic's own models, so a gateway id there is rejected outright. This
- *     subsumes the old sync `resolveBackend`'s only rule.
- *  2. `fallback === "none"` disables the dynamic check — stay on `configured`.
- *  3. Unknown quota (`quota.source === "unknown"`, i.e. neither the statusline
- *     cache nor the live API produced a fresh reading) never blocks — stay on
- *     `configured` rather than guess.
- *  4. Either window at or above its ceiling (`>=`, so the ceiling itself
- *     already trips it) falls back to `iu`.
- *  5. Otherwise stay on `configured` — healthy quota is not a reason to move
- *     an `iu`-configured install onto `max`, only to keep a `max`-configured
- *     one there. */
-export function chooseBackend(input: ChooseBackendInput): ChooseBackendResult {
-  const { configured, model, quota, ceilingFiveHour, ceilingSevenDay, fallback } = input;
-  if (!model.startsWith("claude")) return { backend: "iu", reason: "non-claude-model" };
-  if (fallback === "none") return { backend: configured, reason: "fallback-disabled" };
-  if (quota.source === "unknown") return { backend: configured, reason: "quota-unknown" };
-  const fiveHourExceeded = quota.fiveHourPct !== null && quota.fiveHourPct >= ceilingFiveHour;
-  const sevenDayExceeded = quota.sevenDayPct !== null && quota.sevenDayPct >= ceilingSevenDay;
-  if (fiveHourExceeded || sevenDayExceeded) return { backend: "iu", reason: "quota" };
-  return { backend: configured, reason: "ok" };
+ *  A non-Claude model id is always forced onto `iu` — `max` only ever serves
+ *  Anthropic's own models. `buildRoutingTable`/`withModel` (routing.ts) already
+ *  guarantee this by construction for any route built through the table, so this is
+ *  defense in depth for a caller that hands `runSession` a hand-built route
+ *  bypassing it (as `tests/session-retry.test.ts` does directly). Every other route
+ *  just runs on its configured backend.
+ *
+ *  This used to also read live Max subscription quota and pre-empt a `max` session
+ *  onto `iu` above a ceiling, before the session even launched. Removed 2026-09-08 —
+ *  false-positive triggers off a stale/misread quota reading, and every concurrent
+ *  worker pre-empting at once under burst, cost the owner more than the quota it
+ *  saved. Do not re-add a proactive check here: the REACTIVE fallback below (a
+ *  live `max` session that actually hits a quota-flavoured failure switches its
+ *  next attempt to `iu`) is the real safeguard and is unchanged. */
+/** Backend fallbacks in the last hour, newest first. Visibility only — nothing reads this to
+ *  throttle, gate or queue a job. It exists because the proactive quota ceilings that used to
+ *  live here were removed: across the whole log history they never once fired on real Max
+ *  exhaustion, only on false positives, so what replaces them is a number a human can look at
+ *  rather than a gate that guesses. Process-local and unpersisted by design — jobs run their
+ *  sessions in the HTTP server, so that process's count is the one worth reporting, and a
+ *  restart legitimately resets it. */
+const fallbackLog: { at: number; reason: string; tool: string }[] = [];
+const FALLBACK_WINDOW_MS = 60 * 60 * 1000;
+
+/** Exported only so `tests/session-retry.test.ts` can drive the window/aggregation
+ *  logic directly (via `bun:test`'s `setSystemTime`) without spawning a session — no
+ *  other caller outside this module should ever call it. */
+export function recordFallback(reason: string, tool: string): void {
+  const now = Date.now();
+  fallbackLog.push({ at: now, reason, tool });
+  // Prune here rather than on read: a fallback is rare, a health poll is every 30 s.
+  const cutoff = now - FALLBACK_WINDOW_MS;
+  while (fallbackLog.length > 0 && fallbackLog[0]!.at < cutoff) fallbackLog.shift();
 }
 
-/** Effective backend for a route, resolved once per session launch.
- *
- *  Reads live Max quota (network + Keychain) ONLY when it could actually change
- *  the answer: the route's primary is `max`, its model is a claude-* id and it
- *  declares an `iu` fallback — every other case is decided by `chooseBackend`'s
- *  cheap, I/O-free rules 1/2 and short-circuits before touching `readMaxQuota()`.
- *  This is what keeps an `iu`-routed tool (check, overview, narrative) from paying
- *  a quota lookup on every session. */
-export async function resolveBackend(
-  route: ToolRoute,
-): Promise<ChooseBackendResult & { quota?: MaxQuota }> {
-  const { model, backend, fallback } = route;
+export function backendFallbacksLastHour(): { count: number; reasons: Record<string, number> } {
+  const cutoff = Date.now() - FALLBACK_WINDOW_MS;
+  const recent = fallbackLog.filter((f) => f.at >= cutoff);
+  const reasons: Record<string, number> = {};
+  for (const f of recent) reasons[f.reason] = (reasons[f.reason] ?? 0) + 1;
+  return { count: recent.length, reasons };
+}
+
+export function resolveBackend(route: ToolRoute): ResolvedBackend {
+  const { model, backend } = route;
   if (!isClaudeModel(model)) return { backend: "iu", reason: "non-claude-model" };
-  if (backend !== "max") return { backend, reason: "ok" };
-  const fallbackMode: "iu" | "none" =
-    WORKER_FALLBACK === "none" || fallback?.backend !== "iu" ? "none" : "iu";
-  if (fallbackMode === "none") return { backend: "max", reason: "fallback-disabled" };
-
-  const quota = await readMaxQuota();
-  const choice = chooseBackend({
-    configured: "max",
-    model,
-    quota,
-    ceilingFiveHour: MAX_QUOTA_CEILING,
-    ceilingSevenDay: MAX_WEEKLY_CEILING,
-    fallback: fallbackMode,
-  });
-  return { ...choice, quota };
+  return { backend, reason: "ok" };
 }
 
 // The IU gateway re-wraps a rate-limit/overload the same way it wraps a client
 // error (see WRAPPED_TERMINAL_RE below), and Max's own OAuth path 429s with
 // "usage limit"/"rate limit" language rather than a bare status code. Matched
-// case-insensitively over whatever text a failed attempt produced (stderr +
-// stdout + the constructed error message all funnel into `SessionResult.error`).
-// Deliberately broad — a false positive costs one extra retry on `iu`, which is
-// cheap; a false negative means a real quota exhaustion never falls back.
+// case-insensitively, but ONLY against transport/provider-sourced text
+// (`SessionResult.classificationText` — a failed attempt's stderr and the runner's
+// own constructed error message), NEVER the model's own stdout. A worker's output
+// (a diff, an otel trace dump, a check report) can legitimately contain the words
+// "429" or "quota" with no real exhaustion behind it, and since a match here moves
+// the NEXT attempt off the already-paid `max` subscription onto the metered,
+// billed-per-token `iu` lane, a false positive there is not free — it spends real
+// money on a run that would have finished fine on `max`. See `runSessionAttempt`
+// for which branches populate `classificationText` and which deliberately leave it
+// unset. The structured `api_retry` stream-json signal (`SessionResult.hadApiRetry`
+// — the CLI itself retried after a provider-side 429/529) is checked first in
+// `planNextAttempt` and wins outright when present; it is not exhaustive on its own
+// (a definitive quota block the CLI never got to retry emits no `api_retry` event),
+// so this regex stays the fallback path rather than the only one.
 const QUOTA_ERROR_RE = /hit your (usage )?limit|usage limit|rate.?limit|429|overloaded|quota/i;
 
-/** Does this failed-attempt text look like Max quota/rate-limit exhaustion
- *  rather than a generic transport or logic failure? Pure — feeds the reactive
- *  once-only `max` → `iu` retry in `runSession`, never the transient-transport
- *  retry (`isRetryableSessionError`), which stays backend-agnostic. */
+/** Does this TRANSPORT-sourced text look like Max quota/rate-limit exhaustion rather
+ *  than a generic transport or logic failure? Pure — feeds the reactive once-only
+ *  `max` → `iu` retry in `runSession` (call with `classificationText`, never the full
+ *  human-readable `error`), never the transient-transport retry
+ *  (`isRetryableSessionError`), which stays backend-agnostic. */
 export function isQuotaError(text: string): boolean {
   return QUOTA_ERROR_RE.test(text);
+}
+
+/** Classify an `is_error` result envelope for the reactive quota fallback. Pure —
+ *  extracted so the zero-turn carve-out below is unit-testable without spawning a
+ *  session.
+ *
+ *  `envelope.errors` is the CLI's own structured error array — transport-sourced,
+ *  always safe to classify against. `envelope.result` is NOT, in general: on an
+ *  `is_error` envelope it can still carry real model-generated text (confirmed by
+ *  reading the branch that produces it — a worker ending mid-response can leave its
+ *  own stdout in `result` alongside `is_error: true`), so classifying it
+ *  unconditionally would send a run that would have finished fine on `max` onto the
+ *  metered `iu` lane on nothing more than the word "quota" in the model's own output.
+ *
+ *  But a terminal Max quota/usage-limit rejection is observed to arrive in exactly
+ *  this shape too: `is_error` with no `errors` array and no `result` text
+ *  proven to be the model's — because it never got a turn at all. `turnsObserved`
+ *  (assistant-turn count, incremented only on a stream-json `assistant` event — see
+ *  `handleEvent` in `runSessionAttempt`) is a hard proof, not a heuristic: zero turns
+ *  means the model produced literally nothing, of any kind, so `result` cannot be its
+ *  text — whatever text is there must be transport/gateway-sourced, and is the ONLY
+ *  diagnosis available (no `errors`, and with no assistant turn there was never a
+ *  chance to observe an `api_retry` event either). Below that carve-out, `result`
+ *  stays unclassified, same as before.
+ *
+ *  The asymmetry that justifies drawing the line at turns rather than, say,
+ *  `lastAssistantText`: a false positive here (misclassifying real zero-turn model
+ *  text as quota) costs one wasted retry on `iu`; a false negative (missing a real
+ *  quota block because it doesn't fit this exact shape) means the reactive fallback
+ *  — the only safeguard left since the proactive quota pre-check was removed
+ *  2026-09-08 — never fires at all. That asymmetry is why the carve-out exists
+ *  rather than leaving `is_error` unclassified whenever `errors` is empty. */
+export function classifyErrorEnvelope(
+  envelope: { errors?: string[]; result?: string },
+  turnsObserved: number,
+): { errMsg: string; classificationText: string | undefined } {
+  const structuredError = envelope.errors?.join("; ");
+  if (structuredError !== undefined) {
+    return { errMsg: structuredError, classificationText: structuredError };
+  }
+  const result = envelope.result;
+  return {
+    errMsg: String(result ?? "Unknown error"),
+    classificationText: turnsObserved === 0 ? result : undefined,
+  };
+}
+
+/** Shared failure shape for the schema-validation and JSON-parse branches — both are
+ *  "the session completed at the API level, but its own output didn't parse/validate",
+ *  so neither ever sets `classificationText` (the text is the model's own stdout, not
+ *  transport-sourced). `hadApiRetry` still propagates: it describes the attempt's
+ *  transport behavior, independent of how the attempt's own output turned out — it
+ *  used to be silently dropped on both branches while present on every other failure
+ *  return. Pure and exported purely so that propagation has direct unit coverage. */
+export function unclassifiedOutputFailure<T = unknown>(
+  error: string,
+  rawText: string,
+  hadApiRetry: boolean,
+  backend: Backend,
+  model: string,
+): SessionResult<T> {
+  return { ok: false, error, noOutput: true, rawText, hadApiRetry, backend, model };
 }
 
 /** Total attempts per session, including the first — at most 2 retries. */
@@ -788,19 +846,17 @@ async function runSessionAttempt<T = unknown>(
   const sessionUuid = randomUUID();
   const tsStart = new Date().toISOString();
   // Resolved before emitAttribution so nothing below depends on declaration order.
-  // `chooseBackend`'s full rule set (model id, fallback flag, quota ceilings) —
-  // see the module-level comment on `resolveBackend`/`chooseBackend` above. A
-  // forced retry skips it outright: the caller already decided.
-  const resolved: ChooseBackendResult & { quota?: MaxQuota } = forced
-    ? { backend: forced.backend, reason: "quota" }
-    : await resolveBackend(route);
-  const backend: Backend = resolved.backend;
+  // See the module-level comment on `resolveBackend` above. A forced retry skips it
+  // outright: the caller already decided.
+  const resolved: ResolvedBackend = resolveBackend(route);
+  const backend: Backend = forced ? forced.backend : resolved.backend;
   // Shared identity for every log line below that reports a session failure. A post-mortem
   // on 8 `session.timeout` entries came back with `model: null, backend: null, tool: null` and
   // had to be joined against jobs.db by timestamp to find out which job each one belonged to —
   // this is what makes each line self-describing instead.
   const errCtx = { tool, model, backend, jobId, timeoutMs };
   if (forced) {
+    recordFallback(forced.reason, tool);
     runnerLogger().warn(
       { event: "backend.fallback", ...errCtx, reason: forced.reason },
       forced.reason === "rate-limited"
@@ -809,14 +865,7 @@ async function runSessionAttempt<T = unknown>(
     );
   } else {
     runnerLogger().info(
-      {
-        event: "backend.select",
-        ...errCtx,
-        reason: resolved.reason,
-        ...(resolved.reason === "quota" && resolved.quota
-          ? { fiveHourPct: resolved.quota.fiveHourPct, sevenDayPct: resolved.quota.sevenDayPct }
-          : {}),
-      },
+      { event: "backend.select", ...errCtx, reason: resolved.reason },
       "backend selected",
     );
   }
@@ -852,7 +901,14 @@ async function runSessionAttempt<T = unknown>(
         "IU config unavailable",
       );
       emitAttribution("error", { reason: "iu_config_error" });
-      return { ok: false, error: message, backend, model, iuConfigError: true };
+      return {
+        ok: false,
+        error: message,
+        classificationText: message,
+        backend,
+        model,
+        iuConfigError: true,
+      };
     }
   }
 
@@ -1022,6 +1078,11 @@ async function runSessionAttempt<T = unknown>(
   // sideclaw's own `sessionUuid`). Used to tag the session_env sidecar so
   // usage-tracker joins it to the right transcript.
   let workerSessionId: string | undefined;
+  // Structured signal for quota classification (see `isQuotaError`'s doc comment):
+  // the CLI itself retried after a provider-side 429/529 at least once during this
+  // attempt. Truer than a text match, but not exhaustive — a definitive block the
+  // CLI never got to retry sets this false while still being real quota exhaustion.
+  let apiRetrySeen = false;
   let sessionEnvWritten = false;
   const maybeWriteSessionEnv = () => {
     if (sessionEnvWritten || !workerSessionId) return;
@@ -1063,8 +1124,10 @@ async function runSessionAttempt<T = unknown>(
         emitActivity();
         break;
       case "system":
-        if (ev.subtype === "api_retry") lastAction = "api retry";
-        else if (ev.subtype === "compact_boundary") lastAction = "compacting context";
+        if (ev.subtype === "api_retry") {
+          lastAction = "api retry";
+          apiRetrySeen = true;
+        } else if (ev.subtype === "compact_boundary") lastAction = "compacting context";
         if (!workerSessionId && ev.session_id) {
           workerSessionId = ev.session_id;
           maybeWriteSessionEnv();
@@ -1148,14 +1211,40 @@ async function runSessionAttempt<T = unknown>(
 
   if (timedOut) {
     emitAttribution("timeout", { durationMs, turns });
-    return { ok: false, error: `Session timed out after ${timeoutMs}ms`, backend, model };
+    const error = `Session timed out after ${timeoutMs}ms`;
+    // `classificationText` here is always this fixed string, which QUOTA_ERROR_RE never
+    // matches, and a hang produces no `api_retry` event either — a Max quota exhaustion
+    // that surfaces as a stall rather than a fast is_error/429 is invisible to both
+    // fallback signals, so the reactive max→iu fallback never fires for it (the
+    // proactive quota pre-check used to be the backstop here; removed 2026-09-08). Not
+    // fixable by guessing — a timeout has no evidence either way — so just make the
+    // blind spot visible instead of silent.
+    if (backend === "max" && !apiRetrySeen) {
+      runnerLogger().warn(
+        { event: "session.timeout_unclassified", project: cwd, ...errCtx, turns },
+        "max session timed out with no quota-classification signal — possible unseen quota exhaustion",
+      );
+    }
+    return {
+      ok: false,
+      error,
+      classificationText: error,
+      hadApiRetry: apiRetrySeen,
+      backend,
+      model,
+    };
   }
 
   if (exitCode !== 0) {
     emitAttribution("error", { durationMs, turns, exitCode });
+    // exitCode + stderr are both transport/provider-sourced (CLI diagnostics, never
+    // model stdout) — safe to reuse verbatim as the classification text.
+    const error = `Session exited with code ${exitCode}${stderrTrimmed ? `. stderr: ${stderrTrimmed}` : ""}`;
     return {
       ok: false,
-      error: `Session exited with code ${exitCode}${stderrTrimmed ? `. stderr: ${stderrTrimmed}` : ""}`,
+      error,
+      classificationText: error,
+      hadApiRetry: apiRetrySeen,
       backend,
       model,
     };
@@ -1167,7 +1256,15 @@ async function runSessionAttempt<T = unknown>(
       "no result event in stream",
     );
     emitAttribution("error", { durationMs, turns, reason: "no_envelope" });
-    return { ok: false, error: "Session ended without a result event", backend, model };
+    const error = "Session ended without a result event";
+    return {
+      ok: false,
+      error,
+      classificationText: error,
+      hadApiRetry: apiRetrySeen,
+      backend,
+      model,
+    };
   }
 
   runnerLogger().debug(
@@ -1183,13 +1280,28 @@ async function runSessionAttempt<T = unknown>(
   );
 
   if (envelope.is_error) {
-    const errMsg = envelope.errors?.join("; ") ?? String(envelope.result ?? "Unknown error");
+    // See `classifyErrorEnvelope`'s doc comment for the full reasoning: `errors` always
+    // classifies safely; `result` only classifies in the zero-turn carve-out (the model
+    // never ran, so it cannot be the source of that text) — otherwise it is used for the
+    // human-readable `error` only, never `classificationText`.
+    // Max of both counters, not the envelope's alone: the zero-turn carve-out below hands
+    // `result` to the classifier, so it must only fire when BOTH the CLI's own count and
+    // the turns we observed on the stream agree that the model never spoke.
+    const turnsObserved = Math.max(envelope.num_turns ?? 0, turns);
+    const { errMsg, classificationText } = classifyErrorEnvelope(envelope, turnsObserved);
     runnerLogger().error(
       { event: "session.error", project: cwd, ...errCtx, subtype: envelope.subtype, error: errMsg },
       "session is_error",
     );
-    emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
-    return { ok: false, error: errMsg, backend, model };
+    emitAttribution("error", { durationMs, turns: turnsObserved });
+    return {
+      ok: false,
+      error: errMsg,
+      classificationText,
+      hadApiRetry: apiRetrySeen,
+      backend,
+      model,
+    };
   }
 
   // total_cost_usd is populated normally on both the IU native Anthropic transport
@@ -1226,7 +1338,11 @@ async function runSessionAttempt<T = unknown>(
         // long run has real material to preserve. Returning a bare error here was silently
         // discarding it on what is, for a strict schema, the LIKELIEST failure path.
         const asText = typeof value === "string" ? value : safeStringify(value);
-        return { ok: false, error: v.error, noOutput: true, rawText: asText, backend, model };
+        // No `classificationText`: the session completed at the API level (this is a
+        // shape mismatch against the declared schema, not a transport failure), so
+        // there is no provider-sourced text to classify and it must never quota-match.
+        // See `unclassifiedOutputFailure` for why `hadApiRetry` still propagates.
+        return unclassifiedOutputFailure(v.error, asText, apiRetrySeen, backend, model);
       }
       logSessionEnd();
       emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
@@ -1254,14 +1370,17 @@ async function runSessionAttempt<T = unknown>(
       turns: envelope.num_turns ?? turns,
       reason: "json_parse",
     });
-    return {
-      ok: false,
-      error: `result field is not valid JSON: ${raw.slice(0, 500)}`,
-      noOutput: true,
-      rawText: raw,
+    // No `classificationText`: `raw` is the model's own stdout (a check report, a
+    // diff, …) — it can legitimately contain "429" or "quota" with no real quota
+    // exhaustion behind it, and must never feed the classifier. See
+    // `unclassifiedOutputFailure` for why `hadApiRetry` still propagates.
+    return unclassifiedOutputFailure(
+      `result field is not valid JSON: ${raw.slice(0, 500)}`,
+      raw,
+      apiRetrySeen,
       backend,
       model,
-    };
+    );
   }
 
   // Fallback: the `result` field is routinely empty for sessions that end on a
@@ -1284,9 +1403,14 @@ async function runSessionAttempt<T = unknown>(
     "session no usable output",
   );
   emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns, reason: "no_output" });
+  // The error text here is fixed/constructed, never the model's own stdout (that lives
+  // separately in `rawText`) — safe to reuse as classification text.
+  const noOutputError = "Session produced no output (empty structured_output and result)";
   return {
     ok: false,
-    error: "Session produced no output (empty structured_output and result)",
+    error: noOutputError,
+    classificationText: noOutputError,
+    hadApiRetry: apiRetrySeen,
     noOutput: true,
     rawText: lastAssistantText || undefined,
     backend,
@@ -1305,11 +1429,12 @@ async function runSessionAttempt<T = unknown>(
  *  switch) and both latched by `usedFallback` so a failure on the fallback attempt
  *  itself is never switched again:
  *
- *  - `max` → `iu`: an attempt that ran on `max`, produced no output yet, and failed
- *    with text `isQuotaError` recognizes (Max quota/rate-limit exhaustion, not a
- *    generic transport blip) forces the next attempt onto `iu`, same model. Takes
- *    precedence over the transient retry (the same failure would otherwise also match
- *    a bare "429" in `isRetryableSessionError`).
+ *  - `max` → `iu`: an attempt that ran on `max`, produced no output yet, and looks like
+ *    quota/rate-limit exhaustion — either `hadApiRetry` (the CLI itself retried after a
+ *    provider-side 429/529) or `isQuotaError` matching `classificationText` (stderr and
+ *    the runner's own constructed error text, never model stdout) — forces the next
+ *    attempt onto `iu`, same model. Takes precedence over the transient retry (the same
+ *    failure would otherwise also match a bare "429" in `isRetryableSessionError`).
  *  - `iu` → `max`: an attempt that ran on `iu` and failed with a transport error
  *    before producing output is first retried once on `iu` (a single 503 is the common
  *    case and should not spend Max quota); if THAT fails the same way, the next attempt
@@ -1326,6 +1451,12 @@ export interface AttemptOutcome {
   error?: string;
   backend?: Backend;
   iuConfigError?: boolean;
+  /** See `SessionResult.classificationText` — transport/provider-sourced text only,
+   *  never model stdout. Feeds the quota-classification check below. */
+  classificationText?: string;
+  /** See `SessionResult.hadApiRetry` — the structured `api_retry` signal, checked
+   *  ahead of `classificationText`. */
+  hadApiRetry?: boolean;
 }
 
 export interface NextAttemptInput {
@@ -1374,8 +1505,13 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   const timedOutStuck = (noOutputYet || retryAfterOutput) && error.startsWith("Session timed out");
   const switchable =
     !result.ok && !usedFallback && !isLastAttempt && (noOutputYet || timedOutStuck);
+  // The structured `api_retry` signal wins outright when present; otherwise fall back to
+  // the regex over TRANSPORT-sourced text only (`classificationText`, never the full
+  // `error`, which can embed the model's own stdout) — see `isQuotaError`'s doc comment.
+  const quotaFlavored =
+    result.hadApiRetry === true || isQuotaError(result.classificationText ?? "");
 
-  if (switchable && result.backend === "max" && fallback?.backend === "iu" && isQuotaError(error)) {
+  if (switchable && result.backend === "max" && fallback?.backend === "iu" && quotaFlavored) {
     return {
       kind: "fallback",
       forced: { backend: "iu", model: routeModel, reason: "rate-limited" },

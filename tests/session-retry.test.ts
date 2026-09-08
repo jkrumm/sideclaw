@@ -2,12 +2,16 @@
 // "Retry policy" section for why turns-produced-output is checked outside this
 // function rather than folded into it.
 
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, setSystemTime, test } from "bun:test";
 import {
   isRetryableSessionError,
   retryBackoffMs,
   resolveBackend,
   gatewayContextTokens,
+  classifyErrorEnvelope,
+  unclassifiedOutputFailure,
+  backendFallbacksLastHour,
+  recordFallback,
 } from "../server/mcp/session-runner.ts";
 
 describe("isRetryableSessionError", () => {
@@ -55,36 +59,47 @@ describe("retryBackoffMs", () => {
 });
 
 describe("resolveBackend", () => {
-  // resolveBackend is async (it may read live Max quota — see
-  // tests/backend-select.test.ts for the full quota-fallback decision matrix via
-  // the pure chooseBackend). Only the IO-free short circuits are deterministic
-  // enough to assert here; none of them touch readMaxQuota.
-  test("a non-Claude id is forced onto iu — max only serves Anthropic models, no quota lookup", async () => {
+  // Pure and synchronous — no I/O at all since the proactive Max-quota pre-check was
+  // removed 2026-09-08 (see the function's own doc comment). Its only remaining job is
+  // the non-Claude-model safeguard, kept here as defense in depth for a hand-built
+  // route that bypasses `buildRoutingTable`/`withModel` (as these fixtures do).
+  test("a non-Claude id is forced onto iu — max only serves Anthropic models", () => {
     expect(
-      (await resolveBackend({ model: "DeepSeek-V4-Flash", backend: "max", fallback: null }))
-        .backend,
+      resolveBackend({
+        model: "DeepSeek-V4-Flash",
+        backend: "max",
+        fallback: null,
+        transport: "session",
+      }).backend,
     ).toBe("iu");
     expect(
-      (await resolveBackend({ model: "glm-5.3-flash", backend: "max", fallback: null })).backend,
+      resolveBackend({
+        model: "glm-5.3-flash",
+        backend: "max",
+        fallback: null,
+        transport: "session",
+      }).backend,
     ).toBe("iu");
   });
 
-  test("an iu-routed Claude id stays on iu with no quota lookup", async () => {
-    const r = await resolveBackend({
+  test("an iu-routed Claude id stays on iu", () => {
+    const r = resolveBackend({
       model: "claude-sonnet-5[1m]",
       backend: "iu",
       fallback: { backend: "max" },
+      transport: "session",
     });
     expect(r).toEqual({ backend: "iu", reason: "ok" });
   });
 
-  test("a max route with no iu fallback never consults quota", async () => {
-    const r = await resolveBackend({
+  test("a max route with no iu fallback just stays on max — there is no proactive check to disable anymore", () => {
+    const r = resolveBackend({
       model: "claude-sonnet-5[1m]",
       backend: "max",
       fallback: null,
+      transport: "session",
     });
-    expect(r).toEqual({ backend: "max", reason: "fallback-disabled" });
+    expect(r).toEqual({ backend: "max", reason: "ok" });
   });
 });
 
@@ -127,9 +142,17 @@ describe("planNextAttempt", () => {
   });
 
   test("max + quota-flavoured failure before output → iu, same model", () => {
+    // classificationText mirrors what runSessionAttempt actually populates from
+    // transport-sourced text (stderr / the CLI's own error) — see the two tests below
+    // for why the full `error` field alone must NOT be enough.
     const plan = planNextAttempt({
       ...base,
-      result: { ok: false, backend: "max", error: "You've hit your usage limit" },
+      result: {
+        ok: false,
+        backend: "max",
+        error: "You've hit your usage limit",
+        classificationText: "You've hit your usage limit",
+      },
       fallback: maxToIu,
     });
     expect(plan).toEqual({
@@ -138,13 +161,51 @@ describe("planNextAttempt", () => {
     });
   });
 
-  test("the quota lane wins over the transient retry for a bare 429 on max", () => {
+  test("the quota lane wins over the transient retry for a bare 429 in classificationText", () => {
     const plan = planNextAttempt({
       ...base,
-      result: { ok: false, backend: "max", error: "429" },
+      result: { ok: false, backend: "max", error: "429", classificationText: "429" },
       fallback: maxToIu,
     });
     expect(plan.kind).toBe("fallback");
+  });
+
+  test("POINT 2 REGRESSION GUARD: quota-sounding MODEL OUTPUT in `error` alone must never trigger the paid iu fallback", () => {
+    // A check/otel/review worker's own stdout (a diff, an otel trace dump) can
+    // legitimately contain the word "quota" with no real exhaustion behind it. Only
+    // `error` carries that text here — no `classificationText`, no `hadApiRetry` — so
+    // this must return, not switch a run that would finish fine on max onto billed iu.
+    // (No status code in the fixture text — this isolates the quota-classification
+    // fix from `isRetryableSessionError`'s own separate, unrelated same-backend retry.)
+    const plan = planNextAttempt({
+      ...base,
+      result: {
+        ok: false,
+        backend: "max",
+        error:
+          "result field is not valid JSON: ...bumped the customer's storage quota in this diff...",
+      },
+      fallback: maxToIu,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  test("the structured api_retry signal alone (hadApiRetry, no matching classificationText) still triggers the fallback", () => {
+    const plan = planNextAttempt({
+      ...base,
+      result: {
+        ok: false,
+        backend: "max",
+        error: "session ended unexpectedly",
+        classificationText: "session ended unexpectedly",
+        hadApiRetry: true,
+      },
+      fallback: maxToIu,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "iu", model: "claude-sonnet-5[1m]", reason: "rate-limited" },
+    });
   });
 
   test("iu transport failure: one same-backend retry first, then max on the fixed fallback model", () => {
@@ -263,5 +324,108 @@ describe("planNextAttempt", () => {
       fallback: iuToHaiku,
     });
     expect(plan).toEqual({ kind: "return" });
+  });
+});
+
+// ── classifyErrorEnvelope — the is_error/no-`errors`/zero-turn carve-out ────────────
+
+describe("classifyErrorEnvelope", () => {
+  test("a structured errors[] array always classifies, regardless of turns", () => {
+    expect(classifyErrorEnvelope({ errors: ["usage limit reached"] }, 0)).toEqual({
+      errMsg: "usage limit reached",
+      classificationText: "usage limit reached",
+    });
+    expect(classifyErrorEnvelope({ errors: ["usage limit reached"] }, 5)).toEqual({
+      errMsg: "usage limit reached",
+      classificationText: "usage limit reached",
+    });
+  });
+
+  test("no errors[], zero turns: result is classified — it cannot be model text since the model never ran", () => {
+    const r = classifyErrorEnvelope({ result: "You've hit your usage limit for the day." }, 0);
+    expect(r.errMsg).toBe("You've hit your usage limit for the day.");
+    expect(r.classificationText).toBe("You've hit your usage limit for the day.");
+  });
+
+  test("no errors[], at least one turn: result is real model output and is NEVER classified", () => {
+    const r = classifyErrorEnvelope(
+      { result: "here is the diff you asked about quota handling" },
+      3,
+    );
+    expect(r.errMsg).toBe("here is the diff you asked about quota handling");
+    expect(r.classificationText).toBeUndefined();
+  });
+
+  test("no errors[] and no result at all: falls back to the generic message, never classified past zero turns", () => {
+    expect(classifyErrorEnvelope({}, 2)).toEqual({
+      errMsg: "Unknown error",
+      classificationText: undefined,
+    });
+    // Zero turns with no result text either: classificationText is `undefined` itself
+    // (there's nothing to classify), not a crash.
+    expect(classifyErrorEnvelope({}, 0)).toEqual({
+      errMsg: "Unknown error",
+      classificationText: undefined,
+    });
+  });
+});
+
+// ── unclassifiedOutputFailure — hadApiRetry must survive the schema/parse branches ──
+
+describe("unclassifiedOutputFailure", () => {
+  test("propagates hadApiRetry through while classificationText stays unset", () => {
+    expect(
+      unclassifiedOutputFailure("bad output", "raw text", true, "max", "claude-sonnet-5[1m]"),
+    ).toEqual({
+      ok: false,
+      error: "bad output",
+      noOutput: true,
+      rawText: "raw text",
+      hadApiRetry: true,
+      backend: "max",
+      model: "claude-sonnet-5[1m]",
+    });
+  });
+
+  test("hadApiRetry: false is preserved too, not dropped as falsy", () => {
+    const r = unclassifiedOutputFailure("bad output", "raw text", false, "iu", "glm-5.3-flash");
+    expect(r.hadApiRetry).toBe(false);
+  });
+});
+
+// ── backendFallbacksLastHour / recordFallback — the 1-hour window and reason tally ──
+//
+// Each test picks a base time far from the others (>1h apart) so the window itself
+// isolates tests from each other's recorded entries without needing to reset the
+// module-private log.
+
+describe("backendFallbacksLastHour / recordFallback", () => {
+  afterAll(() => setSystemTime());
+
+  test("aggregates fallbacks recorded within the window by reason", () => {
+    setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    recordFallback("rate-limited", "review");
+    recordFallback("rate-limited", "dispatch");
+    recordFallback("iu-unavailable", "check");
+    expect(backendFallbacksLastHour()).toEqual({
+      count: 3,
+      reasons: { "rate-limited": 2, "iu-unavailable": 1 },
+    });
+  });
+
+  test("an entry older than the 1-hour window is excluded", () => {
+    const t0 = new Date("2026-01-02T00:00:00Z").getTime();
+    setSystemTime(t0);
+    recordFallback("rate-limited", "review");
+    setSystemTime(t0 + 60 * 60 * 1000 + 1); // just over an hour later
+    expect(backendFallbacksLastHour()).toEqual({ count: 0, reasons: {} });
+  });
+
+  test("an entry exactly at the 1-hour boundary is still included", () => {
+    const t0 = new Date("2026-01-03T00:00:00Z").getTime();
+    setSystemTime(t0);
+    recordFallback("rate-limited", "review");
+    setSystemTime(t0 + 60 * 60 * 1000); // exactly one hour later
+    expect(backendFallbacksLastHour().count).toBe(1);
   });
 });

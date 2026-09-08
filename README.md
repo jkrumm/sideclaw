@@ -42,9 +42,8 @@ Logs: `~/Library/Logs/sideclaw.jsonl` (structured, both processes), `sideclaw.{l
 | `PERSONAL_REPOS_PATH`, `WORK_REPOS_PATH` | repo roots for the dashboard |
 | `GITHUB_TOKEN` | fallback GitHub credential for `dispatch` artifacts (primary is `secrets-run read op://mini/github/token`) |
 | `RESEARCH_GATEWAY_URL`, `RESEARCH_GATEWAY_TOKEN` | lets review angle workers validate external claims |
-| `SIDECLAW_MODEL_<TOOL>`, `SIDECLAW_BACKEND_<TOOL>` | per-tool routing override (`iu` \| `max`); a gateway id never lands on `max` |
+| `SIDECLAW_MODEL_<TOOL>`, `SIDECLAW_BACKEND_<TOOL>` | per-tool routing override (`iu` \| `max`); a gateway id never lands on `max`, and a backend override on `adversary`/`read_image`/`read_drawing` (fixed `iu-openai` transport) is refused |
 | `SIDECLAW_WORKER_FALLBACK=none` | disable both fallback directions |
-| `SIDECLAW_MAX_QUOTA_CEILING` (90), `SIDECLAW_MAX_WEEKLY_CEILING` (95) | Max→IU quota ceilings |
 | `SIDECLAW_JOB_CONCURRENCY` (3) | running-job cap |
 | `SIDECLAW_AGENT_STALE_HOURS` (24) | agent snapshot stale threshold |
 | `ARGO_URL` | Argo API base for the overview push (default `https://argo.jkrumm.com/api`) |
@@ -56,7 +55,7 @@ through `server/lib/load-env.ts`. Every routing/backend flag is read at module l
 ## Routing
 
 `server/lib/routing.ts` is the single table (check/overview on `glm-5.3-flash` over IU,
-review/dispatch/otel on `claude-sonnet-5[1m]` over Max with the quota fallback, …) and
+review/dispatch/otel on `claude-sonnet-5[1m]` over Max with a reactive fallback, …) and
 `GET /api/routing` shows what is live. Full rationale, fallback rules and every other
 mechanism: `CLAUDE.md`.
 

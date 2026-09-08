@@ -8,12 +8,26 @@ import {
   describeRoute,
   GLM_FLASH,
   HAIKU,
+  logRoutingOverrides,
+  logStaleQuotaEnvVars,
   ROUTED_TOOLS,
   routeFor,
   SONNET,
   withModel,
 } from "../server/lib/routing.ts";
 import { parseDotEnv } from "../server/lib/load-env.ts";
+
+/** Records calls instead of writing anywhere — matches the `{ info, warn }` shape both
+ *  functions under test expect. */
+function fakeLogger() {
+  const info: { obj: Record<string, unknown>; msg: string }[] = [];
+  const warn: { obj: Record<string, unknown>; msg: string }[] = [];
+  return {
+    info: (obj: Record<string, unknown>, msg: string) => info.push({ obj, msg }),
+    warn: (obj: Record<string, unknown>, msg: string) => warn.push({ obj, msg }),
+    calls: { info, warn },
+  };
+}
 
 describe("buildRoutingTable defaults", () => {
   const { routes, overrides } = buildRoutingTable({});
@@ -22,32 +36,57 @@ describe("buildRoutingTable defaults", () => {
     expect(overrides).toEqual([]);
   });
 
-  test("check and overview: glm-5.3-flash on iu, Haiku on max as the reverse lane", () => {
-    for (const tool of ["check", "overview"] as const) {
+  test("check, overview, review's router: glm-5.3-flash on iu, Haiku on max as the reverse lane (the CLASSIFY tier)", () => {
+    for (const tool of ["check", "overview", "review_router"] as const) {
       expect(routes[tool]).toEqual({
         model: GLM_FLASH,
         backend: "iu",
         fallback: { backend: "max", model: HAIKU },
+        transport: "session",
       });
     }
   });
 
-  test("narrative: Sonnet on iu, same model on max", () => {
-    expect(routes.narrative).toEqual({
-      model: SONNET,
-      backend: "iu",
-      fallback: { backend: "max" },
-    });
-  });
-
-  test("review, dispatch, otel: Sonnet on max with the quota fallback to iu", () => {
-    for (const tool of ["review", "dispatch", "otel"] as const) {
-      expect(routes[tool]).toEqual({ model: SONNET, backend: "max", fallback: { backend: "iu" } });
+  test("narrative, excalidraw: Sonnet on iu, same model on max (the PROSE tier)", () => {
+    for (const tool of ["narrative", "excalidraw"] as const) {
+      expect(routes[tool]).toEqual({
+        model: SONNET,
+        backend: "iu",
+        fallback: { backend: "max" },
+        transport: "session",
+      });
     }
   });
 
-  test("adversary stays gpt-5.6-terra on iu, no fallback", () => {
-    expect(routes.adversary).toEqual({ model: "gpt-5.6-terra", backend: "iu", fallback: null });
+  test("review (angles/synthesis), dispatch, otel: Sonnet on max with the quota fallback to iu (the JUDGE tier)", () => {
+    for (const tool of ["review", "dispatch", "otel"] as const) {
+      expect(routes[tool]).toEqual({
+        model: SONNET,
+        backend: "max",
+        fallback: { backend: "iu" },
+        transport: "session",
+      });
+    }
+  });
+
+  test("adversary stays gpt-5.6-terra on iu, no fallback, over the fixed iu-openai transport", () => {
+    expect(routes.adversary).toEqual({
+      model: "gpt-5.6-terra",
+      backend: "iu",
+      fallback: null,
+      transport: "iu-openai",
+    });
+  });
+
+  test("read_image, read_drawing: gemini-3.5-flash on iu, no fallback, over the fixed iu-openai transport (the VISION tier)", () => {
+    for (const tool of ["read_image", "read_drawing"] as const) {
+      expect(routes[tool]).toEqual({
+        model: "gemini-3.5-flash",
+        backend: "iu",
+        fallback: null,
+        transport: "iu-openai",
+      });
+    }
   });
 
   test("every routed tool has a route and a gateway id never sits on max", () => {
@@ -88,6 +127,25 @@ describe("buildRoutingTable env overrides", () => {
     const { routes, overrides } = buildRoutingTable({ SIDECLAW_BACKEND_OTEL: "bedrock" });
     expect(routes.otel.backend).toBe("max");
     expect(overrides[0]?.refused).toContain("unknown backend");
+  });
+
+  test("a backend override on a fixed iu-openai transport tool is refused, whatever the value", () => {
+    for (const [envKey, tool] of [
+      ["SIDECLAW_BACKEND_ADVERSARY", "adversary"],
+      ["SIDECLAW_BACKEND_READ_IMAGE", "read_image"],
+      ["SIDECLAW_BACKEND_READ_DRAWING", "read_drawing"],
+    ] as const) {
+      const { routes, overrides } = buildRoutingTable({ [envKey]: "max" });
+      expect(routes[tool].backend).toBe("iu");
+      expect(overrides).toEqual([
+        {
+          tool,
+          field: "backend",
+          value: "max",
+          refused: expect.stringContaining("iu-openai transport"),
+        },
+      ]);
+    }
   });
 
   test("a gateway model override on a max route forces iu and keeps a fixed-model fallback only", () => {
@@ -132,6 +190,7 @@ describe("withModel", () => {
       model: "claude-opus-5[1m]",
       backend: "max",
       fallback: { backend: "iu" },
+      transport: "session",
     });
   });
 
@@ -141,6 +200,7 @@ describe("withModel", () => {
       model: "claude-sonnet-5[1m]",
       backend: "iu",
       fallback: { backend: "max" },
+      transport: "session",
     });
   });
 
@@ -156,7 +216,13 @@ describe("withModel", () => {
       model: "DeepSeek-V4-Flash",
       backend: "iu",
       fallback: { backend: "max", model: HAIKU },
+      transport: "session",
     });
+  });
+
+  test("transport is preserved across a model override", () => {
+    const r = withModel(routeFor("adversary"), "gpt-6-terra");
+    expect(r.transport).toBe("iu-openai");
   });
 });
 
@@ -198,5 +264,87 @@ describe("parseDotEnv (the MCP process's .env loader)", () => {
       EXPORTED: "1",
       EMPTY: "",
     });
+  });
+});
+
+describe("logRoutingOverrides", () => {
+  test("no overrides at all → logs nothing", () => {
+    const log = fakeLogger();
+    logRoutingOverrides(log, []);
+    expect(log.calls.info).toEqual([]);
+    expect(log.calls.warn).toEqual([]);
+  });
+
+  test("an applied-only override list logs info, not warn", () => {
+    const log = fakeLogger();
+    const overrides = [{ tool: "check", field: "model", value: HAIKU } as const];
+    logRoutingOverrides(log, overrides);
+    expect(log.calls.warn).toEqual([]);
+    expect(log.calls.info).toEqual([
+      {
+        obj: { event: "routing.overrides", overrides },
+        msg: "routing overrides applied at startup",
+      },
+    ]);
+  });
+
+  test("any refused override in the list logs warn, even alongside applied ones", () => {
+    const log = fakeLogger();
+    const overrides = [
+      { tool: "check", field: "model", value: HAIKU } as const,
+      {
+        tool: "otel",
+        field: "backend",
+        value: "bedrock",
+        refused: 'unknown backend — expected "iu" or "max"',
+      } as const,
+    ];
+    logRoutingOverrides(log, overrides);
+    expect(log.calls.info).toEqual([]);
+    expect(log.calls.warn).toEqual([
+      {
+        obj: { event: "routing.overrides", overrides },
+        msg: "routing overrides applied at startup (one or more refused)",
+      },
+    ]);
+  });
+});
+
+describe("logStaleQuotaEnvVars", () => {
+  test("none of the three set → logs nothing", () => {
+    const log = fakeLogger();
+    logStaleQuotaEnvVars(log, {});
+    expect(log.calls.warn).toEqual([]);
+  });
+
+  test("unrelated env vars set → still logs nothing", () => {
+    const log = fakeLogger();
+    logStaleQuotaEnvVars(log, { SIDECLAW_MODEL_CHECK: HAIKU, GITHUB_TOKEN: "x" });
+    expect(log.calls.warn).toEqual([]);
+  });
+
+  test("one stale var set → warns once, naming only what's set", () => {
+    const log = fakeLogger();
+    logStaleQuotaEnvVars(log, { SIDECLAW_MAX_QUOTA_CEILING: "90" });
+    expect(log.calls.warn).toHaveLength(1);
+    expect(log.calls.warn[0]?.obj).toEqual({
+      event: "routing.stale_env",
+      vars: ["SIDECLAW_MAX_QUOTA_CEILING"],
+    });
+  });
+
+  test("all three stale vars set → one warn listing all three", () => {
+    const log = fakeLogger();
+    logStaleQuotaEnvVars(log, {
+      SIDECLAW_MAX_QUOTA_CEILING: "90",
+      SIDECLAW_MAX_WEEKLY_CEILING: "95",
+      SIDECLAW_QUOTA_FILE_MAX_AGE_S: "600",
+    });
+    expect(log.calls.warn).toHaveLength(1);
+    expect(log.calls.warn[0]?.obj.vars).toEqual([
+      "SIDECLAW_MAX_QUOTA_CEILING",
+      "SIDECLAW_MAX_WEEKLY_CEILING",
+      "SIDECLAW_QUOTA_FILE_MAX_AGE_S",
+    ]);
   });
 });

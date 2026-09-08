@@ -10,25 +10,35 @@
 // token, serves Claude AND gateway ids like glm-5.3-flash) and `max` (the inherited
 // Claude Code OAuth profile — the Max subscription, Claude ids only).
 //
-// Fallback semantics (applied in session-runner.ts, one hop only, never a second one):
-//   primary `max` → `fallback.backend: "iu"`: proactive quota ceilings (`chooseBackend`)
-//     plus the reactive retry on a quota-flavoured failure before first output.
+// Fallback semantics (applied in session-runner.ts, one hop only, never a second one), purely
+// REACTIVE — a session is only ever moved after a launch actually fails, never pre-empted:
+//   primary `max` → `fallback.backend: "iu"`: a quota-flavoured failure before first output.
 //   primary `iu`  → `fallback.backend: "max"`: the reverse lane — an IU transport failure
 //     (or missing IU credentials) before first output moves the attempt onto Max, on
 //     `fallback.model` when set (a gateway id cannot run on Max) or the same model when not.
+// (A proactive Max-quota-ceiling pre-check used to also feed the first lane — removed
+// 2026-09-08, see docs/routing-and-quota.md, do not re-add it.)
+//
+// `transport: "iu-openai"` marks the three routes (`adversary`, `read_image`, `read_drawing`)
+// that never reach `runSession` at all — a direct IU OpenAI transport call consuming only
+// `.model`. Their `backend`/`fallback` are informational defaults only; a
+// `SIDECLAW_BACKEND_<TOOL>` override on one of them is refused rather than silently accepted
+// and displayed with no effect.
 //
 // Env overrides, read once at module load (a flip needs `make reload`; the MCP process
 // loads sideclaw/.env itself — see server/lib/load-env.ts):
 //   SIDECLAW_MODEL_<TOOL>=<id>        e.g. SIDECLAW_MODEL_CHECK=claude-haiku-4-5
 //   SIDECLAW_BACKEND_<TOOL>=iu|max    e.g. SIDECLAW_BACKEND_REVIEW=iu
 // <TOOL> is the route key upper-cased. A `max` override on a non-Claude id is refused
-// back to `iu` (logged via `overrides`) — Max never serves a gateway model.
+// back to `iu` (logged via `overrides`) — Max never serves a gateway model. The effective
+// override list (applied + refused) is logged once at startup via `logRoutingOverrides`.
 
 export type Backend = "iu" | "max";
 
 export const ROUTED_TOOLS = [
   "check",
   "overview",
+  "review_router",
   "narrative",
   "review",
   "adversary",
@@ -51,28 +61,65 @@ export interface ToolRoute {
   model: string;
   backend: Backend;
   fallback: RouteFallback | null;
+  /** "session" (default): `runSession()` actually honors `backend`/`fallback`.
+   *  "iu-openai": a direct IU OpenAI transport call (adversary, read_image,
+   *  read_drawing) that only ever consumes `.model` — see the module comment above. */
+  transport: "session" | "iu-openai";
 }
 
 export const SONNET = "claude-sonnet-5[1m]";
 export const HAIKU = "claude-haiku-4-5";
 export const GLM_FLASH = "glm-5.3-flash";
 
-/** The owner's tiering decision (2026-09-07). Cheap mechanical work (check, overview)
- *  runs on glm-5.3-flash over IU with Haiku-on-Max as the reverse lane; editorial work
- *  (narrative) on Sonnet over IU; judgment-heavy work (review, dispatch, otel) on Sonnet
- *  over Max with the quota fallback to IU. The adversary angle is a direct IU OpenAI
- *  text call (no runSession, no fallback); the vision tools are the IU OpenAI transport. */
+// ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
+// touches one line instead of hunting down every duplicate. ──────────────────────────
+//
+// CLASSIFY: cheap mechanical work (check, overview, review's triage router) — glm-5.3-flash
+//   over IU with Haiku-on-Max as the reverse lane.
+// JUDGE: judgment-heavy work (review's angles/synthesis, dispatch, otel) — Sonnet over Max
+//   with the reactive quota fallback to IU.
+// PROSE: editorial/generative work (narrative, excalidraw) — Sonnet over IU with the same
+//   model on Max as the reverse lane.
+// VISION: the IU OpenAI vision transport (read_image, read_drawing) — no runSession, no
+//   fallback.
+// adversary sits alone: its own model (gpt-5.6-terra), same iu-openai transport as VISION.
+const CLASSIFY: ToolRoute = {
+  model: GLM_FLASH,
+  backend: "iu",
+  fallback: { backend: "max", model: HAIKU },
+  transport: "session",
+};
+const JUDGE: ToolRoute = {
+  model: SONNET,
+  backend: "max",
+  fallback: { backend: "iu" },
+  transport: "session",
+};
+const PROSE: ToolRoute = {
+  model: SONNET,
+  backend: "iu",
+  fallback: { backend: "max" },
+  transport: "session",
+};
+const VISION: ToolRoute = {
+  model: "gemini-3.5-flash",
+  backend: "iu",
+  fallback: null,
+  transport: "iu-openai",
+};
+
 const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
-  check: { model: GLM_FLASH, backend: "iu", fallback: { backend: "max", model: HAIKU } },
-  overview: { model: GLM_FLASH, backend: "iu", fallback: { backend: "max", model: HAIKU } },
-  narrative: { model: SONNET, backend: "iu", fallback: { backend: "max" } },
-  review: { model: SONNET, backend: "max", fallback: { backend: "iu" } },
-  adversary: { model: "gpt-5.6-terra", backend: "iu", fallback: null },
-  dispatch: { model: SONNET, backend: "max", fallback: { backend: "iu" } },
-  otel: { model: SONNET, backend: "max", fallback: { backend: "iu" } },
-  excalidraw: { model: SONNET, backend: "iu", fallback: { backend: "max" } },
-  read_image: { model: "gemini-3.5-flash", backend: "iu", fallback: null },
-  read_drawing: { model: "gemini-3.5-flash", backend: "iu", fallback: null },
+  check: CLASSIFY,
+  overview: CLASSIFY,
+  review_router: CLASSIFY,
+  narrative: PROSE,
+  review: JUDGE,
+  adversary: { model: "gpt-5.6-terra", backend: "iu", fallback: null, transport: "iu-openai" },
+  dispatch: JUDGE,
+  otel: JUDGE,
+  excalidraw: PROSE,
+  read_image: VISION,
+  read_drawing: VISION,
 };
 
 export function isClaudeModel(model: string): boolean {
@@ -112,7 +159,14 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     }
     const backendOverride = env[`SIDECLAW_BACKEND_${key}`]?.trim();
     if (backendOverride) {
-      if (backendOverride !== "iu" && backendOverride !== "max") {
+      if (base.transport === "iu-openai") {
+        overrides.push({
+          tool,
+          field: "backend",
+          value: backendOverride,
+          refused: `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — a backend override has no effect`,
+        });
+      } else if (backendOverride !== "iu" && backendOverride !== "max") {
         overrides.push({
           tool,
           field: "backend",
@@ -142,7 +196,12 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         implied: `forced by the ${model} model override — max only serves Claude ids`,
       });
     }
-    routes[tool] = { model, backend, fallback: usableFallback(base.fallback, model, backend) };
+    routes[tool] = {
+      model,
+      backend,
+      fallback: usableFallback(base.fallback, model, backend),
+      transport: base.transport,
+    };
   }
   return { routes, overrides };
 }
@@ -170,7 +229,12 @@ export function routingTable(): RoutingTable {
 /** The effective route for a tool. Always a fresh object — callers may override `model`. */
 export function routeFor(tool: RoutedTool): ToolRoute {
   const r = TABLE.routes[tool];
-  return { model: r.model, backend: r.backend, fallback: r.fallback ? { ...r.fallback } : null };
+  return {
+    model: r.model,
+    backend: r.backend,
+    fallback: r.fallback ? { ...r.fallback } : null,
+    transport: r.transport,
+  };
 }
 
 /** A route with a per-call model override (a job's `model` param). The backend is kept
@@ -183,7 +247,12 @@ export function withModel(route: ToolRoute, model: string | undefined): ToolRout
   // fixed-model fallback (check's Haiku) as declared, since it cannot run on Max itself.
   const declared =
     route.fallback && isClaudeModel(model) ? { backend: route.fallback.backend } : route.fallback;
-  return { model, backend, fallback: usableFallback(declared, model, backend) };
+  return {
+    model,
+    backend,
+    fallback: usableFallback(declared, model, backend),
+    transport: route.transport,
+  };
 }
 
 /** One-line human rendering for tool descriptions and logs: `glm-5.3-flash on iu (fallback claude-haiku-4-5 on max)`. */
@@ -192,4 +261,62 @@ export function describeRoute(route: ToolRoute): string {
     ? ` (fallback ${route.fallback.model ?? route.model} on ${route.fallback.backend})`
     : "";
   return `${route.model} on ${route.backend}${fb}`;
+}
+
+/** Log the effective override list once at startup — `warn` if any override was refused
+ *  (a typo'd `.env` entry, most likely), `info` otherwise. No-op when there are no
+ *  overrides at all, so a clean install stays quiet. Each entrypoint calls this with its
+ *  own logger AFTER `setProcessKind` so the log line is tagged with the right `source`
+ *  (routing.ts's own module-load timing runs before an entrypoint's `setProcessKind` call —
+ *  see process-context.ts — so this is deliberately NOT called at module load here).
+ *
+ *  `overrides` defaults to the real module singleton (`TABLE.overrides`) for both real
+ *  entrypoints; the param exists so tests can drive all three log branches (none /
+ *  refused / applied) without needing a second process to get a different `TABLE` built
+ *  from different env. */
+export function logRoutingOverrides(
+  log: {
+    info: (obj: Record<string, unknown>, msg: string) => void;
+    warn: (obj: Record<string, unknown>, msg: string) => void;
+  },
+  overrides: RoutingOverride[] = TABLE.overrides,
+): void {
+  if (overrides.length === 0) return;
+  const fields = { event: "routing.overrides", overrides };
+  if (overrides.some((o) => o.refused)) {
+    log.warn(fields, "routing overrides applied at startup (one or more refused)");
+  } else {
+    log.info(fields, "routing overrides applied at startup");
+  }
+}
+
+// ── Stale quota env vars ────────────────────────────────────────────────────────────
+//
+// SIDECLAW_MAX_QUOTA_CEILING, SIDECLAW_MAX_WEEKLY_CEILING and
+// SIDECLAW_QUOTA_FILE_MAX_AGE_S fed the proactive Max-quota pre-check removed
+// 2026-09-08 (see session-runner.ts's `resolveBackend` doc comment and
+// docs/routing-and-quota.md) — a real `.env` still setting one of them now gets a
+// silent no-op. `logRoutingOverrides` already surfaces a mistyped
+// `SIDECLAW_MODEL_*`/`SIDECLAW_BACKEND_*` var the same way; this applies the same
+// "warn once at startup" pattern to these three so the owner learns the fallback is
+// now purely reactive instead of finding out mid-outage.
+const STALE_QUOTA_ENV_VARS = [
+  "SIDECLAW_MAX_QUOTA_CEILING",
+  "SIDECLAW_MAX_WEEKLY_CEILING",
+  "SIDECLAW_QUOTA_FILE_MAX_AGE_S",
+] as const;
+
+/** Log once at startup (`warn`) if any of the three retired quota env vars are still set.
+ *  No-op otherwise. `env` defaults to `process.env`; overridable for tests. */
+export function logStaleQuotaEnvVars(
+  log: { warn: (obj: Record<string, unknown>, msg: string) => void },
+  env: Record<string, string | undefined> = process.env,
+): void {
+  const set = STALE_QUOTA_ENV_VARS.filter((key) => env[key] !== undefined);
+  if (set.length === 0) return;
+  log.warn(
+    { event: "routing.stale_env", vars: set },
+    "quota env var(s) set but no longer read — the proactive Max-quota pre-check was removed " +
+      "2026-09-08; the reactive max→iu fallback is now the only safeguard",
+  );
 }

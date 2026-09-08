@@ -3,6 +3,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { evaluateJobHealth, jobHealth, recoveryStatusFor } from "../server/jobs/store.ts";
+import { jobsRoutes } from "../server/routes/jobs.ts";
 
 describe("recoveryStatusFor", () => {
   test("idempotent read-only tools are re-queued once", () => {
@@ -59,5 +60,18 @@ describe("jobHealth against an empty store", () => {
       lastFailure: null,
     });
     expect(typeof h.pending).toBe("number");
+  });
+});
+
+describe("GET /api/jobs/health", () => {
+  test("carries backendFallbacks alongside the job-store health fields, not just jobHealth()'s own shape", async () => {
+    const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.backendFallbacks).toEqual({
+      count: expect.any(Number),
+      reasons: expect.any(Object),
+    });
   });
 });

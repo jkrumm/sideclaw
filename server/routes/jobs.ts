@@ -1,4 +1,5 @@
 import { Elysia, t } from "elysia";
+import { backendFallbacksLastHour } from "../mcp/session-runner.ts";
 import { createJob, getJob, jobHealth, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool } from "../jobs/types.ts";
 
@@ -33,7 +34,11 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
   // Queue health for the devhost heartbeat: `ok` is false when ≥3 jobs failed in the last
   // hour or the oldest pending job has waited >15 min. Static route, so it is registered
   // before `/:id` — never resolved as a job named "health".
-  .get("/health", () => jobHealth())
+  .get("/health", () => ({
+    ...jobHealth(),
+    // Reported, never enforced — see backendFallbacksLastHour().
+    backendFallbacks: backendFallbacksLastHour(),
+  }))
 
   // Poll a single job's state. `job.status` terminal ⇒ `result` or `error` is set.
   .get("/:id", ({ params, set }) => {

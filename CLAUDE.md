@@ -180,21 +180,24 @@ shows the effective table plus every applied or refused override.
 
 | Tool | Primary | Fallback |
 |-|-|-|
-| `check`, `overview` | `glm-5.3-flash` on **iu** | `claude-haiku-4-5` on max (IU transport failure before first output, or any timeout — `retryAfterOutput`) |
-| `narrative` | `claude-sonnet-5[1m]` on **iu** | same model on max |
-| `review` (router, angles, synthesis), `dispatch`, `otel` | `claude-sonnet-5[1m]` on **max** | same model on iu (quota ceilings, or a quota-flavoured failure) |
-| `review` adversary | `gpt-5.6-terra` on iu (direct IU OpenAI text call) | none |
-| `excalidraw` | `claude-sonnet-5[1m]` on iu | same model on max |
-| `read_image`, `read_drawing` | `gemini-3.5-flash` on iu (IU OpenAI transport) | none |
+| `check`, `overview`, `review`'s router | `glm-5.3-flash` on **iu** (the CLASSIFY tier) | `claude-haiku-4-5` on max (IU transport failure before first output, or any timeout — `retryAfterOutput`) |
+| `narrative`, `excalidraw` | `claude-sonnet-5[1m]` on **iu** (the PROSE tier) | same model on max |
+| `review` (angles, synthesis), `dispatch`, `otel` | `claude-sonnet-5[1m]` on **max** (the JUDGE tier) | same model on iu (a quota-flavoured failure) |
+| `review` adversary | `gpt-5.6-terra` on iu (direct IU OpenAI text call — fixed `iu-openai` transport, `backend`/`fallback` informational only, a `SIDECLAW_BACKEND_ADVERSARY` override is refused) | none |
+| `read_image`, `read_drawing` | `gemini-3.5-flash` on iu (the VISION tier — same fixed `iu-openai` transport and override refusal) | none |
 
 Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`, `SIDECLAW_BACKEND_<TOOL>=iu|max`
-(read once at module load → `make reload`); `SIDECLAW_WORKER_FALLBACK=none`
-pins every tool to its primary. Fallback runs **both directions** — `max`→`iu`
-on a quota-flavoured failure, `iu`→`max` on a transport failure after one
-same-backend retry — each latched so a fallback attempt is never switched
-again. Quota is read cheapest-first: the statusline's own file cache, else
-the live Keychain-backed OAuth usage API. Full backend-selection rationale,
-quota sources and the retry ladder: `docs/routing-and-quota.md`.
+(read once at module load → `make reload`; the applied/refused list is logged
+once at startup — `info`, or `warn` if anything was refused);
+`SIDECLAW_WORKER_FALLBACK=none` pins every tool to its primary. Fallback runs
+**both directions**, purely **reactively** — `max`→`iu` on a quota-flavoured
+failure, `iu`→`max` on a transport failure after one same-backend retry —
+each latched so a fallback attempt is never switched again. A proactive
+Max-quota-ceiling pre-check used to also feed the `max`→`iu` hop before a
+session even launched; removed 2026-09-08 (false-positive triggers and
+stampede behavior under burst cost more than the quota it saved) — do not
+re-add it. Full backend-selection rationale, the classification signals and
+the retry ladder: `docs/routing-and-quota.md`.
 
 **`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed
 `http` server) into its own worker session — key resolution fails soft

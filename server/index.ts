@@ -18,12 +18,15 @@ import { executeJob } from "./jobs/executor";
 import { pushOverviewToArgo } from "./lib/argo-push.ts";
 import { activeSessionCount, terminateActiveSessions } from "./mcp/session-runner.ts";
 import { setProcessKind } from "./lib/process-context.ts";
+import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
 
 // Must run before any job handler launches a session — session-runner.ts reads this per
 // call (see process-context.ts) to tag its logs `source: "app"` instead of the "mcp" default,
 // since every job (check/review/dispatch/overview/narrative) actually runs its worker sessions
 // in THIS process, not the MCP one.
 setProcessKind("app");
+logRoutingOverrides(logger);
+logStaleQuotaEnvVars(logger);
 
 const isDev = !existsSync("dist/index.html");
 const indexHtml = isDev ? null : readFileSync("dist/index.html", "utf-8");
