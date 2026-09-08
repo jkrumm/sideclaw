@@ -164,7 +164,8 @@ export function __resetForTests(): void {
 
 /** When THIS process started. A restart — whether from a crash, a `make reload` drain, or
  *  `FORCE=1`'s forced abort — can leave a backlog of `pending` rows whose `created_at`
- *  predates the restart by nearly a full `SHUTDOWN_GRACE_MS`: `draining` itself always resets
+ *  predates the restart by nearly a full drain window (`HTTP_DRAIN_GRACE_MS`, or the shorter
+ *  `SIGNAL_DRAIN_GRACE_MS` when a real signal drove it): `draining` itself always resets
  *  to `false` on a fresh process (module-scope state, not persisted), so it cannot signal "we
  *  just came back from one" the way it signals "one is in progress". `BOOT_HEALTH_GRACE_MS`
  *  below grants a grace window off this timestamp — but ONLY when `recoveredFromDrain` (below)
@@ -172,8 +173,10 @@ export function __resetForTests(): void {
  *  why a flat, unconditional grant here was the bug. */
 const bootedAt = Date.now();
 
-/** True if the `drain_completed` row (written by `setDraining()`) was present when THIS process
- *  booted — i.e. the PREVIOUS process reached an orderly SIGTERM/SIGINT drain before it died,
+/** True if the `drain_completed` row (written by `markDrainCompleted()`, from the shutdown
+ *  controller's `finish()`) was present when THIS process booted — i.e. the PREVIOUS process ran
+ *  its shutdown path to the end before it died, whichever origin drove it (a real SIGTERM/SIGINT,
+ *  or `make reload`'s self-initiated HTTP drain),
  *  as opposed to a crash (SIGKILL, OOM, an unhandled fault before the signal handler ever ran).
  *  Read once and the row deleted immediately, so a later crash-loop restart — which never calls
  *  `setDraining()` again — does not inherit a stale "yes" from an old drain days ago.
@@ -196,7 +199,7 @@ const recoveredFromDrain = (() => {
 
 /** How long after boot `evaluateJobHealth` ignores `oldestPendingAgeMs`, and only when
  *  `recoveredFromDrain` is true — long enough for the `MAX_CONCURRENT`-wide queue to work
- *  through a typical post-restart backlog from a cold start, not tied to `SHUTDOWN_GRACE_MS`
+ *  through a typical post-restart backlog from a cold start, not tied to the drain windows
  *  (that bounds how OLD a backlog can be when this process inherits it, not how fast this fresh
  *  process clears it). Without this, the first few minutes after every ordinary reload report
  *  `ok: false` for a pending job that is simply old, not wedged — the same false alarm
@@ -529,7 +532,7 @@ export function jobFinishLogFields(
 
 /** Job record + explicit finish reason, not just an id — `job.done`/`job.fail` need `tool` and
  *  a duration to be joinable/analyzable without a three-way log join (that's how the
- *  docs/deployment.md § Drain window sizing table had to be built: `job.start` joined to
+ *  docs/deployment.md § Two shutdown paths, two windows table had to be built: `job.start` joined to
  *  `job.done`/`job.fail` on `jobId` alone, per-tool, by hand). */
 function finish(
   job: JobRecord,

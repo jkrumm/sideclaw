@@ -12,10 +12,15 @@ routing table assigns it. Mini-only by design — see the dotfiles global CLAUDE
 
 ```bash
 make install-agent   # one-time: build + install + start the LaunchAgent
-make reload          # after code changes: build, SIGTERM-drain running jobs (≤40 min), restart
-FORCE=1 make reload  # SIGINT now, discarding running jobs (read-only ones are re-queued once on boot)
+make reload          # after code changes: build, self-initiated drain via POST /api/shutdown (≤40 min), restart — falls back to `launchctl kill` if the endpoint doesn't answer
+FORCE=1 make reload  # forced abort now, discarding running jobs (read-only ones are re-queued once on boot)
 make build           # frontend only
 ```
+
+`make reload`'s normal drain is long (~40 min) because it's self-initiated — launchd's own
+`ExitTimeOut` (60s, its measured hard cap regardless of the plist) never engages on that path.
+Only a real signal (reboot, logout, or the fallback above) is bound by that 60s cap. Full story:
+`docs/deployment.md` § Two shutdown paths, two windows.
 
 Never start the server by hand (`bun server/index.ts`) — the LaunchAgent owns the port.
 The MCP server is registered at user scope by dotfiles' `make setup`
@@ -35,6 +40,7 @@ refuses if it detects the tracked plist has drifted from the installed one.
 | `GET /api/jobs/health` | queue health for monitoring (`ok` false on ≥3 failures/h or a >15 min pending job) |
 | `GET /api/agents[.txt]` | deterministic agent snapshot (no LLM), incl. `humanQueue` |
 | `GET /api/overview[.txt]` | snapshot + the latest `overview` job's recommendations; `.txt` takes `?color=1&cols=N` |
+| `POST /api/shutdown[?force=1]` | self-initiated graceful shutdown — what `make reload` calls instead of signaling the process; responds immediately with `{ running }`, drains asynchronously |
 
 Logs: `~/Library/Logs/sideclaw.jsonl` (structured, both processes), `sideclaw.{log,err}` (stdio).
 

@@ -30,7 +30,7 @@ Frontend UI (kiosk fullscreen, validating UI changes): `docs/ui-and-caching.md`.
 
 ```bash
 make build           # Build frontend to dist/ (no server start)
-make reload          # After code changes: build + SIGTERM-drain (≤40 min) + restart. Refuses while jobs run — FORCE=1 discards them (SIGINT), escalating an in-progress drain if one is running. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Drain window sizing
+make reload          # After code changes: build + self-initiated drain (POST /api/shutdown, ≤40 min — launchd's real signal-and-wait timer never engages on this path) + restart. Refuses while jobs run — FORCE=1 discards them (force=1 request, or a real SIGINT), escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
 make install-agent   # One-time: build + install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
@@ -122,15 +122,22 @@ reconnects; disk persistence survives an HTTP restart: on boot `recover()`
 re-queues an interrupted `check`/`overview`/`narrative`/`review` **once**
 (all read-only and idempotent) and marks everything else `interrupted`
 (`dispatch` is never auto re-run — an `implement` episode may already have
-pushed). `make reload` refuses while jobs are running unless `FORCE=1` (which sends
-SIGINT — never SIGKILL, which isn't catchable and would skip the same
-handler's `terminateActiveSessions()`, orphaning `claude -p` workers that
-keep writing/committing after the reload believed it had stopped them; SIGINT
-hits the same handler with a zero grace period instead), otherwise sends
-SIGTERM rather than `kickstart -k`, and drains running jobs for up to 40 min
-(sized to the dominant single-attempt worst case, not the full
-double-timeout-fallback chain — `docs/deployment.md` § Drain window sizing)
-before exiting; a SIGINT arriving mid-drain escalates it to an immediate
+pushed). `make reload` refuses while jobs are running unless `FORCE=1` (which
+asks for the same forced abort as always — never SIGKILL, which isn't
+catchable and would skip `terminateActiveSessions()` entirely, orphaning
+`claude -p` workers that keep writing/committing after the reload believed it
+had stopped them). Otherwise `make reload` now asks the server to shut itself
+down (`POST /api/shutdown`, `server/routes/shutdown.ts`) instead of signaling
+it: launchd's `ExitTimeOut` only engages when launchd itself sends the signal
+and waits, so a self-initiated exit never starts that clock and can drain for
+up to `HTTP_DRAIN_GRACE_MS` (~40 min, sized to the dominant single-attempt
+worst case, not the full double-timeout-fallback chain). A real SIGTERM/SIGINT
+(reboot, logout, launchd itself, or `reload`'s own fallback when the HTTP
+endpoint doesn't answer) instead gets `SIGNAL_DRAIN_GRACE_MS` (45s) — launchd's
+`ExitTimeOut` is hard-capped at 60s on this host regardless of what the plist
+says (measured 2026-09-08), so that path has to stay short. Full story of both
+windows: `docs/deployment.md` § Two shutdown paths, two windows. A forced
+abort (`force=1`/SIGINT) arriving mid-drain escalates it to an immediate
 abort rather than being dropped. A job whose worker is one the drain
 actually terminated is left `running` for the next boot's ordinary
 crash-recovery, not written `failed` — an unrelated failure that merely
@@ -159,10 +166,12 @@ the oldest pending job has waited >15 min **and neither grace applies**: a
 drain intentionally stalls promotion, so queue backup alone never trips it
 while one is in flight (`draining: true`); the same backlog also gets a
 `BOOT_HEALTH_GRACE_MS` (5 min) pass right after a restart, but **only** when
-`recoveredFromDrain` is true — i.e. the previous process reached an orderly
-SIGTERM/SIGINT drain before it died (a persisted marker written the instant
-that drain began, read and cleared once on the next boot), not merely
-`sinceBootMs` being small. A raw crash never sets that marker, so a
+`recoveredFromDrain` is true — i.e. the previous process ran its shutdown
+path to the **end** (a persisted marker written by `markDrainCompleted()` when
+the drain finishes, read and cleared once on the next boot), not merely
+`sinceBootMs` being small. Written at the drain's *start* it would also survive
+a mid-drain SIGKILL and hand the grace to the very crash loop it exposes. A
+raw crash never sets that marker, so a
 crash-looping process gets no grace — the backlog stays visible on every
 restart instead of permanently hiding behind "just booted." dotfiles'
 devhost-health reads it. A failed worker's stderr is logged at

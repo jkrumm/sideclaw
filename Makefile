@@ -10,57 +10,77 @@ build:
 # Refuses while jobs are running unless FORCE=1 — a reload kills every worker session
 # mid-flight (check/overview/narrative/review are re-queued once on boot; dispatch and
 # excalidraw, and anything killed mid-drain regardless of tool, are left `running` for that
-# same boot recovery to reconcile — server/jobs/store.ts's `execute()`). SIGTERM rather than
-# `kickstart -k`: the server drains running jobs for up to 40 min (server/lib/shutdown.ts's
-# SHUTDOWN_GRACE_MS, sized to the dominant single-attempt worst case, NOT the full
-# double-timeout-fallback chain — see docs/deployment.md § Drain window sizing) and exits;
-# KeepAlive restarts it. The old PID is polled away first so the kickstart that skips launchd's
-# respawn throttle never lands on the process that is still draining. The stdio MCP child is
-# left alive by default — it's a thin HTTP client of the job queue, so stale handler code in it
-# is harmless, and Claude Code marks a killed stdio server failed without respawning it.
-# RESTART_MCP=1 make reload after a tool input/output schema change, because the SDK's Zod
-# validation silently strips an unknown field until the client reconnects.
+# same boot recovery to reconcile — server/jobs/store.ts's `execute()`).
+#
+# This target no longer SIGNALS the server — it POSTs to /api/shutdown (server/routes/
+# shutdown.ts) and asks it to exit ITSELF. That distinction is load-bearing, not stylistic:
+# launchd's ExitTimeOut is hard-capped at 60s on this host regardless of what the plist claims
+# (measured 2026-09-08 — see the comment on that key in com.jkrumm.sideclaw-server.plist), so a
+# real `launchctl kill SIGTERM` was always going to be SIGKILLed around the 60s mark no matter
+# what the old 40-minute in-process drain window said — that window was fiction the whole time
+# it was wired to a signal. A SELF-initiated exit never starts launchd's ExitTimeOut clock at
+# all (only a signal launchd sent itself does), so it genuinely gets the long window
+# (`HTTP_DRAIN_GRACE_MS`, server/lib/shutdown.ts, ~40 min) instead. KeepAlive restarts the
+# process once it exits, same as any other exit. The old PID is still polled away below before
+# `kickstart` runs — self-exit doesn't change that kickstart skips launchd's respawn throttle,
+# so firing it while the old process is still draining would still land it on that process.
+#
+# FALLBACK: if the POST doesn't get a response (server hung, port dead, already crashed), this
+# target falls back to `launchctl kill` — the OLD mechanism — rather than sitting there forever.
+# That fallback hits the real SIGTERM/SIGINT handler in server/index.ts, which now uses the
+# SHORT `SIGNAL_DRAIN_GRACE_MS` window (server/lib/shutdown.ts) precisely because THIS path is
+# the one still bounded by launchd's real 60s cap — a hung server is already in a degraded state,
+# and this fallback exists so it stays reloadable rather than a `make reload` that can no longer
+# reach it silently hanging forever.
+#
+# The stdio MCP child is left alive by default — it's a thin HTTP client of the job queue, so
+# stale handler code in it is harmless, and Claude Code marks a killed stdio server failed
+# without respawning it. RESTART_MCP=1 make reload after a tool input/output schema change,
+# because the SDK's Zod validation silently strips an unknown field until the client reconnects.
 #
 # Before any of that: refuses if the tracked plist differs from the one launchd actually has
-# loaded, checked TWO ways — a file compare AND, separately, launchd's own live ExitTimeOut
-# (the one value in this file that this reload's own timing correctness depends on).
-# `launchctl kill` only signals the already-running job definition — it never re-reads a
-# changed plist, only `launchctl bootstrap` (`make install-agent`) does. Neither check is
-# theoretical: raising ExitTimeOut from 20 (launchd's default) to 1860 in the tracked file did
-# nothing on its own — `launchctl print gui/<uid>/com.jkrumm.sideclaw-server` kept reporting
-# `exit timeout = 5` until `make install-agent` ran. A `make reload` in that gap would have set
-# a 30+ min drain in-process while launchd's still-5s timer stayed live under it — the drain
-# change entirely inert, silently. The FILE compare alone cannot catch this: `install-agent`'s
-# `cp` runs before its `bootstrap`, so if bootstrap then fails (`launchctl bootstrap` errors on
-# an already-loaded label — the normal case, since this service is loaded across restarts) the
-# installed FILE is already in sync with the tracked one even though launchd's LIVE definition
-# never moved — exactly the drift this file-only guard existed to catch, reachable through its
-# own blind spot. `install-agent` now boots the current label out before re-bootstrapping (see
-# below) so this should no longer happen, but the live check stays as the check that actually
-# matters — comparing `plutil -convert json` output (not raw XML) so cosmetic/comment-only
-# plist edits don't false-positive on the file half.
+# loaded, checked TWO ways — a file compare AND, separately, launchd's own live ExitTimeOut.
+# `launchctl kill` (used only by the fallback above now, not the normal path) only signals the
+# already-running job definition — it never re-reads a changed plist, only `launchctl bootstrap`
+# (`make install-agent`) does. Neither check is theoretical: raising ExitTimeOut from 20
+# (launchd's default) to 1860 in the tracked file did nothing on its own — `launchctl print
+# gui/<uid>/com.jkrumm.sideclaw-server` kept reporting `exit timeout = 5` until `make
+# install-agent` ran (a measurement from before the follow-up measurement above established
+# that even a successfully-loaded ExitTimeOut is capped at 60 regardless). The FILE compare
+# alone cannot catch a stale live value: `install-agent`'s `cp` runs before its `bootstrap`, so
+# if bootstrap then fails (`launchctl bootstrap` errors on an already-loaded label — the normal
+# case, since this service is loaded across restarts) the installed FILE is already in sync with
+# the tracked one even though launchd's LIVE definition never moved — exactly the drift this
+# file-only guard existed to catch, reachable through its own blind spot. `install-agent` now
+# boots the current label out before re-bootstrapping (see below) so this should no longer
+# happen, but the live check stays as the check that actually matters — comparing `plutil
+# -convert json` output (not raw XML) so cosmetic/comment-only plist edits don't false-positive
+# on the file half.
 #
 # FORCE=1 is not a faster version of "wait" — waiting is the normal path; measured 2026-09-08,
 # 96% of real jobs outlive a short window, so FORCE=1 reliably discards in-flight work
-# (recovered on the next boot exactly like a crash — see the reconciliation note above). It
-# sends SIGINT, never SIGKILL: SIGKILL is not catchable, so the SIGTERM/SIGINT handler in
-# server/index.ts (server/lib/shutdown.ts's `createShutdownController`) would never run, and
-# without it `terminateActiveSessions()` never fires — a `claude -p` worker has no process
-# group detachment and no parent-death signal, so it survives as an orphan that keeps
-# writing/committing in its worktree after the reload believed it was gone. A SIGINT that
-# arrives while a SIGTERM drain is already in progress (e.g. `FORCE=1 make reload` run against
-# an already-draining server) ESCALATES that drain to an immediate abort rather than being
-# dropped — every worker is still terminated on the way out, exactly once. A killed dispatch
-# leaves a worktree behind, which the boot sweep bundles to
+# (recovered on the next boot exactly like a crash — see the reconciliation note above). It asks
+# for the SAME forced abort the old SIGINT did (`POST /api/shutdown?force=1`, or the fallback's
+# real SIGINT if the endpoint doesn't answer), never SIGKILL: SIGKILL is not catchable, so
+# neither the HTTP trigger nor the SIGTERM/SIGINT handler in server/index.ts
+# (server/lib/shutdown.ts's `createShutdownController`) would ever run, and without it
+# `terminateActiveSessions()` never fires — a `claude -p` worker has no process group detachment
+# and no parent-death signal, so it survives as an orphan that keeps writing/committing in its
+# worktree after the reload believed it was gone. A forced abort that arrives while an unforced
+# drain is already in progress (e.g. `FORCE=1 make reload` run against an already-draining
+# server, or the fallback's SIGINT arriving mid-HTTP-drain) ESCALATES that drain to an immediate
+# abort rather than being dropped — every worker is still terminated on the way out, exactly
+# once. A killed dispatch leaves a worktree behind, which the boot sweep bundles to
 # ~/.local/state/sideclaw/salvage/ before removing.
 #
-# The PID poll below has to outlast the drain, not the old 25s: kickstart skips launchd's
-# respawn throttle, so firing it while the old process is still draining lands it on that
-# process. The true worst case is launchd's own ExitTimeOut (2700s / 45 min in the plist) —
-# whichever fires first, the app's own SHUTDOWN_GRACE_MS+SHUTDOWN_FLUSH_MS (40 min + 3s) or
-# launchd's harder timer, the old PID is gone by ExitTimeOut. The ceiling here (5520
-# half-seconds = 2760s) adds a minute of slack past that. SHUTDOWN_GRACE_MS, SHUTDOWN_FLUSH_MS,
-# ExitTimeOut in the plist, and this ceiling are four faces of one number — move them together.
+# The PID poll below has to outlast the drain: kickstart skips launchd's respawn throttle, so
+# firing it while the old process is still draining lands it on that process. The true worst
+# case is now HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS (server/lib/shutdown.ts, ~40 min + 3s =
+# 2403s) on the normal self-exit path — launchd's ExitTimeOut no longer bounds it at all, since
+# nothing signals the process. The ceiling here (5520 half-seconds = 2760s) already carried
+# comfortable slack past that number (it used to also need to outlast the plist's old 2700s
+# ExitTimeOut, which is why it's this large) — tests/shutdown-window.test.ts pins it against
+# HTTP_DRAIN_GRACE_MS+SHUTDOWN_FLUSH_MS now instead.
 reload: build
 	@tracked="com.jkrumm.sideclaw-server.plist"; \
 	installed="$$HOME/Library/LaunchAgents/com.jkrumm.sideclaw-server.plist"; \
@@ -88,8 +108,14 @@ reload: build
 	  echo "(MCP children left alive — RESTART_MCP=1 to restart them after a tool-schema change)"; \
 	fi
 	@old=$$(launchctl print gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null | awk '/^[[:space:]]*pid = /{print $$3; exit}'); \
-	sig=$${FORCE:+SIGINT}; sig=$${sig:-SIGTERM}; \
-	launchctl kill $$sig gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null || true; \
+	shutdown_url="http://127.0.0.1:7705/api/shutdown$${FORCE:+?force=1}"; \
+	if curl -sf --max-time 3 -X POST -H "X-Sideclaw-Shutdown: 1" "$$shutdown_url" >/dev/null 2>&1; then \
+	  echo "  asked sideclaw to shut down itself (POST /api/shutdown$${FORCE:+?force=1})"; \
+	else \
+	  echo "  /api/shutdown did not respond — server may be hung; falling back to launchctl kill"; \
+	  sig=$${FORCE:+SIGINT}; sig=$${sig:-SIGTERM}; \
+	  launchctl kill $$sig gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null || true; \
+	fi; \
 	i=0; while [ -n "$$old" ] && kill -0 "$$old" 2>/dev/null && [ $$i -lt 5520 ]; do \
 	  if [ $$i -gt 0 ] && [ $$((i % 240)) -eq 0 ]; then echo "  still draining ($$((i / 2))s) — a job is finishing; ^C is safe, the drain continues"; fi; \
 	  sleep 0.5; i=$$((i+1)); \
@@ -113,13 +139,15 @@ reload: build
 #
 # The OLD PID is captured and POLLED AWAY before `cp` + `bootstrap` run — `launchctl bootout` is
 # a request, not a guaranteed-blocking wait, and if a job is running the old process can still
-# be mid-drain (up to SHUTDOWN_GRACE_MS) holding :7705 when `bootstrap` spawns the new instance
-# via RunAtLoad. Racing the two means the new process's `app.listen()` fails to bind and it
-# crash-loops — while every one of `bootout`/`cp`/`bootstrap` still exits 0, since none of them
-# fail merely because a DIFFERENT process couldn't bind a port. Without the poll (and the health
-# check at the end), this target reported "installed and started" regardless. Same ceiling as
-# `reload`'s own poll (5520 half-seconds — see the comment on that target); the two are pinned
-# together by tests/deployment-plist.test.ts's Makefile sibling.
+# be mid-drain (up to SIGNAL_DRAIN_GRACE_MS — this target signals the old process directly via
+# `bootout`/`launchctl kill`, it never goes through POST /api/shutdown, so it's bounded by the
+# short signal-side window, not HTTP_DRAIN_GRACE_MS) holding :7705 when `bootstrap` spawns the
+# new instance via RunAtLoad. Racing the two means the new process's `app.listen()` fails to bind
+# and it crash-loops — while every one of `bootout`/`cp`/`bootstrap` still exits 0, since none of
+# them fail merely because a DIFFERENT process couldn't bind a port. Without the poll (and the
+# health check at the end), this target reported "installed and started" regardless. Same ceiling
+# as `reload`'s own poll (5520 half-seconds — see the comment on that target); the two are pinned
+# together by tests/shutdown-window.test.ts's Makefile poll-ceiling check.
 #
 # Same job-in-flight guard as `reload`, for the same reason a plist fix is often urgent (e.g.
 # the ExitTimeOut drift `reload`'s own comment describes) — FORCE=1 here means what it means

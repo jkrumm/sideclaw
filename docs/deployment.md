@@ -20,7 +20,43 @@ open while `ls /tmp/sideclaw.log` returned "No such file"). The paths live in
 verbatim over the live one, so changing the live plist by hand is silently
 reverted on the next install. Change the tracked file.
 
-## Drain window sizing — why `SHUTDOWN_GRACE_MS` is 40 min, not a measured percentile
+## Two shutdown paths, two windows — and why an earlier version of this section was wrong
+
+An earlier revision of this file (and of `server/lib/shutdown.ts`'s comments) sized ONE drain
+window, `SHUTDOWN_GRACE_MS`, and applied it uniformly to every shutdown trigger — SIGTERM from
+`make reload`, SIGINT from `FORCE=1`, a real reboot, all of it. **That was wrong.** Measured on
+this host 2026-09-08: raising the tracked plist's `ExitTimeOut` to 2700 (45 min) changed
+nothing — `launchctl print gui/<uid>/com.jkrumm.sideclaw-server` still reported `exit timeout =
+60`, and a control probe at 120 confirmed the same 60s ceiling. launchd hard-caps `ExitTimeOut`
+at 60 seconds on this machine, full stop, regardless of what the plist says. Every `make reload`
+that ran under the old code was never actually protected by the 40-minute drain it believed it
+had — a real SIGTERM was SIGKILLed around the 60s mark the entire time, mid-`review` or
+mid-`dispatch implement`, exactly the failure this mechanism exists to prevent. The drift guard
+below (comparing the tracked plist against launchd's own live value) is what surfaced this: it
+was built to catch a stale ExitTimeOut, and in the course of verifying it, surfaced that even a
+*correctly loaded* ExitTimeOut is capped by launchd itself.
+
+The fix is not a bigger number — no plist value raises that cap — it's changing which trigger
+governs which window:
+
+- **HTTP-initiated** (`POST /api/shutdown`, `server/routes/shutdown.ts` — what `make reload`
+  calls now): the process asks itself to exit. launchd's `ExitTimeOut` only starts counting when
+  launchd sends the signal and waits for the exit; a SELF-initiated exit never starts that clock
+  at all. This path genuinely gets the long window, `HTTP_DRAIN_GRACE_MS` (~40 min, derivation
+  below) — the number the old `SHUTDOWN_GRACE_MS` always claimed to be, now actually true for
+  the path it governs.
+- **Signal-initiated** (a real SIGTERM/SIGINT — reboot, logout, `launchctl kill`, launchd
+  itself, or `make reload`'s own fallback for when the HTTP endpoint doesn't answer): here
+  launchd genuinely is the one waiting, so this path gets the short window,
+  `SIGNAL_DRAIN_GRACE_MS` (45s — see below), sized against the measured 60s cap instead of
+  against any job's actual duration.
+
+Both constants live in `server/lib/shutdown.ts`; both are exercised by the SAME
+`createShutdownController` state machine (`server/index.ts` passes a different `graceMs` per
+trigger) — the drain/abort/escalation logic itself did not need to change, only how long each
+trigger is allowed to wait.
+
+### Sizing `HTTP_DRAIN_GRACE_MS` — why 40 min, not a measured percentile
 
 Measured 2026-09-08 over 91 real jobs from three days of `~/Library/Logs/sideclaw.jsonl`
 (`job.start` joined to `job.done`/`job.fail` by `jobId`, duration = `finished_at - started_at`):
@@ -34,11 +70,11 @@ Measured 2026-09-08 over 91 real jobs from three days of `~/Library/Logs/sidecla
 | dispatch | 2 | 98 s | — | 98 s |
 | all | 91 | 78 s | 421 s | 685 s |
 
-96% of all 91 jobs ran longer than the old `SHUTDOWN_GRACE_MS` (20 s, `server/index.ts`) — the
+96% of all 91 jobs ran longer than the old `HTTP_DRAIN_GRACE_MS` (20 s, `server/index.ts`) — the
 drain had never once carried a real job to completion; SIGTERM always fell through to "grace
 period over, exiting with jobs still running".
 
-`SHUTDOWN_GRACE_MS` is deliberately **not** read off this table — `review`'s n=9 is too thin to
+`HTTP_DRAIN_GRACE_MS` is deliberately **not** read off this table — `review`'s n=9 is too thin to
 size a deadline from, and treating a single observed max as a safe ceiling is precisely the
 estimation error a drain window exists to guard against. It's built from `dispatch`'s
 `implement` tier instead (`TIERS.implement.timeoutMs`, `server/jobs/handlers/dispatch.ts`,
@@ -115,36 +151,52 @@ re-run — never silently discarded, never misreported as a real failure on
 changed. Doubling every reload's worst-case wait to cover a chain this ordinarily reachable is a
 worse trade than that.
 
-**Four numbers move together** — raising the base or the margin means updating all of them, or
-the ones left behind become the new bottleneck:
+**The old "four numbers move together" coupling — `ExitTimeOut` > `SHUTDOWN_GRACE_MS` +
+`SHUTDOWN_FLUSH_MS`, with the Makefile poll ceiling outlasting `ExitTimeOut` on top — no longer
+exists**, and that is not an oversight: it described a relationship this file now knows to be
+false (launchd doesn't honor a raised `ExitTimeOut` past 60s regardless of the plist, so nothing
+was ever actually "exceeding" it in the way the table implied). What replaces it is two smaller,
+independently-true facts:
 
 | Constant | Where | Value | Role |
 |-|-|-|-|
-| `SHUTDOWN_GRACE_MS` | `server/lib/shutdown.ts` | 40 min (2400 s) | app-level drain deadline |
-| `SHUTDOWN_FLUSH_MS` | `server/lib/shutdown.ts` | 3 s | HTTP response flush after the drain decision |
-| `ExitTimeOut` | `com.jkrumm.sideclaw-server.plist` | 45 min (2700 s) | launchd's own hard kill — must exceed GRACE+FLUSH (2403 s) with real margin, or launchd SIGKILLs mid-drain regardless of what the app-level timer intends |
-| poll ceiling | `Makefile`'s `reload` target | 46 min (5520 half-second ticks / 2760 s) | how long `make reload` waits for the old PID to exit before `kickstart`ing — must exceed `ExitTimeOut`, the true worst case, or the kickstart can land on a process launchd hasn't force-killed yet |
+| `HTTP_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | 40 min (2400 s) | drain deadline for a self-initiated exit (`POST /api/shutdown`) — unbounded by launchd, since nothing signals the process on this path |
+| `SIGNAL_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | 45 s | drain deadline for a real SIGTERM — must stay under `LAUNCHD_HARD_EXIT_TIMEOUT_MS` with real margin, or launchd SIGKILLs mid-drain regardless of what this number says |
+| `SHUTDOWN_FLUSH_MS` | `server/lib/shutdown.ts` | 3 s | HTTP response flush after the drain decision, stacked on top of whichever grace window applies |
+| `LAUNCHD_HARD_EXIT_TIMEOUT_MS` | `server/lib/shutdown.ts` | 60 s | launchd's actual, measured ceiling — not a value this codebase controls, only observes |
+| `ExitTimeOut` | `com.jkrumm.sideclaw-server.plist` | 60 s | set to exactly the measured cap, not a value implying more headroom than launchd grants |
+| poll ceiling | `Makefile`'s `reload`/`install-agent` targets | 46 min (5520 half-second ticks / 2760 s) | how long `make reload` waits for the old PID to exit before `kickstart`ing — now must exceed `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS` (2403 s), the true worst case on the normal self-exit path, not `ExitTimeOut` (which no longer bounds that path at all) |
 
-Two guards pin this in `bun test` rather than at the next reboot:
-`tests/deployment-plist.test.ts` (`ExitTimeOut > SHUTDOWN_GRACE_MS + SHUTDOWN_FLUSH_MS`) and
-`tests/shutdown-dispatch-coupling.test.ts` (the 30-min base literal in `shutdown.ts` still
-matches `TIERS.implement.timeoutMs` in `dispatch.ts` — the two are independent literals on
-purpose, kept in step by a test rather than a runtime import, so `shutdown.ts` stays free of
-`dispatch.ts`'s import graph).
+Three guards pin this in `bun test` rather than at the next reboot — all in
+`tests/shutdown-window.test.ts` (replacing the old `tests/deployment-plist.test.ts` and
+`tests/makefile-poll-ceiling.test.ts`, which pinned the coupling above that no longer holds):
+`SIGNAL_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS < LAUNCHD_HARD_EXIT_TIMEOUT_MS` with real margin, the
+plist's `ExitTimeOut` equals `LAUNCHD_HARD_EXIT_TIMEOUT_MS` exactly, and the Makefile poll
+ceiling outlasts `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS`. A fourth,
+`tests/shutdown-dispatch-coupling.test.ts`, is unchanged in spirit: the 30-min base literal in
+`shutdown.ts` still matches `TIERS.implement.timeoutMs` in `dispatch.ts` — the two are
+independent literals on purpose, kept in step by a test rather than a runtime import, so
+`shutdown.ts` stays free of `dispatch.ts`'s import graph. `tests/shutdown-route.test.ts` covers
+`POST /api/shutdown` itself (triggers the right `force`, responds before the drain settles,
+degrades to 503 if no controller is registered).
 
 ### A plist edit needs `make install-agent`, not `make reload`
 
-`launchctl kill` (what `make reload` uses to signal the running process) operates on the job
+`launchctl kill` (what `make reload` falls back to when `POST /api/shutdown` doesn't answer —
+see below; the normal path no longer signals the process at all) operates on the job
 definition launchd already has **loaded in memory** — it does not re-read
 `com.jkrumm.sideclaw-server.plist` from disk. Only `launchctl bootstrap` (`make install-agent`)
 loads a changed plist. Measured live on this machine (2026-09-08): after raising the tracked
 plist's `ExitTimeOut` from 20 (launchd's implicit default) to 1860, `launchctl print
 gui/$(id -u)/com.jkrumm.sideclaw-server` kept reporting `exit timeout = 5` — a value from a
-plist generation *before* the 1860 edit — because no `make install-agent` had run yet. Running
-`make reload` in that window would have raised `SHUTDOWN_GRACE_MS` to double digits of minutes
-in-process while launchd's own timer stayed at 5 seconds underneath it: the app would start a
-long drain, and launchd would SIGKILL it 5 seconds in regardless, silently discarding the drain
-change entirely.
+plist generation *before* the 1860 edit — because no `make install-agent` had run yet (a
+measurement made before the later one, above, established that even a successfully-loaded
+`ExitTimeOut` tops out at 60 regardless). Running the OLD `make reload` in that window would
+have raised its in-process drain to double digits of minutes while launchd's own timer stayed at
+5 seconds underneath it: the app would start a long drain, and launchd would SIGKILL it 5
+seconds in regardless, silently discarding the drain change entirely — the exact class of
+failure the HTTP-initiated path now sidesteps by not depending on launchd's timer in the first
+place.
 
 That measurement was `install-agent` simply never having been run yet. A second, subtler way to
 reach the same broken state is `install-agent` failing PARTWAY through: `cp` runs before
@@ -163,39 +215,46 @@ through some other path.
 
 ### `install-agent` waits for the old process, and fails loudly if the new one never comes up
 
-`launchctl bootout` (what `install-agent` used to rely on alone to clear the old job definition
-before re-bootstrapping) is a REQUEST, not a guaranteed-blocking wait for the process to
-actually exit. If a job is running when someone runs `make install-agent`, the old process can
-still be mid-drain — holding `:7705` for up to `SHUTDOWN_GRACE_MS` — while `cp` + `bootstrap`
-immediately follow and spawn a NEW instance via `RunAtLoad`. That new instance's own
+`launchctl bootout` (what `install-agent` relies on to clear the old job definition before
+re-bootstrapping — unlike `reload`, `install-agent` was deliberately left on the signal path,
+see below) is a REQUEST, not a guaranteed-blocking wait for the process to actually exit. It is
+also, like every real signal, now subject to the measured 60s `ExitTimeOut` cap — `install-agent`
+still only gets `SIGNAL_DRAIN_GRACE_MS` worth of drain, not `HTTP_DRAIN_GRACE_MS`, since it never
+goes through `POST /api/shutdown`. If a job is running when someone runs `make install-agent`,
+the old process can still be mid-drain — holding `:7705` for up to that window — while `cp` +
+`bootstrap` immediately follow and spawn a NEW instance via `RunAtLoad`. That new instance's own
 `app.listen()` fails to bind the still-held port and it crash-loops, while `install-agent`
 reported success regardless: none of `bootout`/`cp`/`bootstrap` fail merely because a DIFFERENT
 process couldn't bind a port, and the target's last line was an unconditional `echo`.
 
 `install-agent` now carries the same PID-capture-and-poll `reload` already had (same ceiling —
-5520 half-second ticks, pinned against both `reload`'s own loop and `ExitTimeOut` by
-`tests/makefile-poll-ceiling.test.ts`) between the `bootout` and the `cp`/`bootstrap` that
-follow, and the same job-in-flight guard `reload` has (refuses by default while a job is
-running; `FORCE=1` sends SIGINT — the catchable forced-abort signal, never SIGKILL, for the same
-reason `reload`'s `FORCE=1` does — before `bootout`, then proceeds without waiting). The target
-now also polls the new instance's `/health` after `bootstrap` and exits non-zero with a pointer
-to the log if it never comes up, instead of the previous unconditional "installed and started."
+5520 half-second ticks, pinned against `reload`'s own loop and, separately, against
+`HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS` by `tests/shutdown-window.test.ts`) between the
+`bootout` and the `cp`/`bootstrap` that follow, and the same job-in-flight guard `reload` has
+(refuses by default while a job is running; `FORCE=1` sends SIGINT — the catchable forced-abort
+signal, never SIGKILL, for the same reason `reload`'s `FORCE=1` does — before `bootout`, then
+proceeds without waiting). The target now also polls the new instance's `/health` after
+`bootstrap` and exits non-zero with a pointer to the log if it never comes up, instead of the
+previous unconditional "installed and started."
 
-### FORCE=1 sends SIGINT, never SIGKILL
+### FORCE=1: SIGINT (or its HTTP equivalent), never SIGKILL
 
-`FORCE=1 make reload` exists to discard in-flight jobs rather than wait out a 40 min drain.
-Discarding jobs does not require an unabortable process kill: SIGKILL is not catchable, so it
-would skip `server/lib/shutdown.ts`'s `createShutdownController` handler entirely, and with it
-`terminateActiveSessions()` — the `claude -p` worker subprocesses have no process group
-detachment and no parent-death signal, so they'd survive as orphans that keep
-writing/committing in their worktree (and, for an `implement` dispatch, could still push a
-branch or open a PR) after the reload believed it had stopped them. `FORCE=1` sends SIGINT
-instead, which hits the *same* handler with a zero-length grace period: draining is skipped
-(that's the whole point of FORCE) but every worker is still terminated before the process exits.
-A SIGINT that arrives while a SIGTERM drain is already running (an operator watching a normal
-`make reload` escalate with `FORCE=1 make reload` against the same still-draining process)
-escalates that drain to an immediate abort instead of being dropped by an already-shutting-down
-latch — every worker is still terminated exactly once. A killed `implement` dispatch's worktree
+`FORCE=1 make reload` exists to discard in-flight jobs rather than wait out a drain. Discarding
+jobs does not require an unabortable process kill: SIGKILL is not catchable, so it would skip
+both `POST /api/shutdown`'s trigger and `server/lib/shutdown.ts`'s `createShutdownController`
+handler entirely, and with it `terminateActiveSessions()` — the `claude -p` worker subprocesses
+have no process group detachment and no parent-death signal, so they'd survive as orphans that
+keep writing/committing in their worktree (and, for an `implement` dispatch, could still push a
+branch or open a PR) after the reload believed it had stopped them. `FORCE=1` asks for the same
+forced abort the controller has always had — `POST /api/shutdown?force=1` on the normal path, or
+a real SIGINT via `launchctl kill` on the fallback/`install-agent` path — which hits the *same*
+handler with a zero-length grace period: draining is skipped (that's the whole point of FORCE)
+but every worker is still terminated before the process exits. A forced abort that arrives while
+an unforced drain is already running (an operator watching a normal `make reload` escalate with
+`FORCE=1 make reload` against the same still-draining process, or the fallback's SIGINT landing
+mid-HTTP-drain) escalates that drain to an immediate abort instead of being dropped by an
+already-shutting-down latch — every worker is still terminated exactly once. A killed `implement`
+dispatch's worktree
 is bundled to `~/.local/state/sideclaw/salvage/` by the boot sweep before removal, same as a
 real crash, and its job row is left `running` for the same boot's ordinary crash-recovery to
 reconcile (see `execute()` in `server/jobs/store.ts`) rather than written `failed` — the whole

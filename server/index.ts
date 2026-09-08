@@ -11,6 +11,7 @@ import { diagramsRoutes } from "./routes/diagrams";
 import { kioskRoute } from "./routes/kiosk";
 import { agentsRoutes } from "./routes/agents";
 import { routingRoutes } from "./routes/routing";
+import { shutdownRoutes } from "./routes/shutdown";
 import { sweepStaleWorktrees } from "./jobs/handlers/dispatch-git.ts";
 import { jobsRoutes } from "./routes/jobs";
 import {
@@ -25,7 +26,14 @@ import { pushOverviewToArgo } from "./lib/argo-push.ts";
 import { activeSessionCount, terminateActiveSessions } from "./mcp/session-runner.ts";
 import { setProcessKind } from "./lib/process-context.ts";
 import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
-import { createShutdownController, SHUTDOWN_GRACE_MS } from "./lib/shutdown.ts";
+import {
+  createShutdownController,
+  httpShutdownParams,
+  registerShutdownTrigger,
+  SIGNAL_DRAIN_GRACE_MS,
+  type ShutdownMode,
+  type ShutdownOrigin,
+} from "./lib/shutdown.ts";
 
 // Must run before any job handler launches a session — session-runner.ts reads this per
 // call (see process-context.ts) to tag its logs `source: "app"` instead of the "mcp" default,
@@ -83,7 +91,8 @@ const app = new Elysia()
   .use(kioskRoute)
   .use(jobsRoutes)
   .use(agentsRoutes)
-  .use(routingRoutes);
+  .use(routingRoutes)
+  .use(shutdownRoutes);
 
 // The filesystem half of startup recovery, and it has to finish before initJobStore below
 // re-promotes a surviving `pending` job — sweepStaleWorktrees()'s own safety argument is
@@ -135,25 +144,40 @@ logger.info(
     : `sideclaw running on ${HOSTNAME}:${PORT}`,
 );
 
-// Graceful stop on SIGTERM (`make reload` → `launchctl kill SIGTERM`, or launchd itself) and
-// forced stop on SIGINT (`FORCE=1 make reload` → `launchctl kill SIGINT`, or a SIGINT that
-// arrives mid-drain to escalate it — see createShutdownController's doc comment). Worker
-// sessions have no checkpoint — a `claude -p` run is atomic from the job's point of view — so a
-// drain buys a job time to actually finish, not just "seconds from finishing". Whatever is
-// still running after the grace period is SIGTERMed and exits with the process; a drain-killed
-// job's row is left `running` for the next boot's ordinary crash-recovery to reconcile
-// (store.ts `execute()`/`recover()`) rather than written `failed` here. KeepAlive brings the
-// server straight back. `SHUTDOWN_GRACE_MS`/`SHUTDOWN_FLUSH_MS`, their sizing rationale, and the
-// drain state machine itself live in lib/shutdown.ts (kept out of this module so they're
-// importable — and unit-testable with fake deps/clock — without pulling in this file's own
-// `app.listen()` side effect).
+// One drain state machine, two triggers, each with its own window (see lib/shutdown.ts's
+// two-window note for the "why"):
 //
-// SIGINT, not SIGKILL, carries "abandon now": SIGKILL is not catchable, so it would skip this
-// very handler and `terminateActiveSessions()` would never run — the `claude -p` children have
-// no process group detachment and no parent-death signal, so they'd become orphans that keep
-// writing/committing in their worktree after the reload believed it had stopped them. SIGINT is
-// not otherwise wired in this process (no readline/TTY prompt to interrupt), so reusing it here
-// doesn't shadow anything.
+//   - HTTP-initiated: `POST /api/shutdown` (server/routes/shutdown.ts, wired below via
+//     registerShutdownTrigger) is what `make reload` actually calls now. The process asks
+//     itself to exit, so launchd's ExitTimeOut never engages — this path gets the long
+//     `HTTP_DRAIN_GRACE_MS` window.
+//   - Signal-initiated: a real SIGTERM (reboot, logout, launchd itself, or `make reload`'s own
+//     fallback when the HTTP endpoint doesn't answer) or SIGINT (a real forced-abort signal).
+//     Here launchd IS waiting, hard-capped at 60s regardless of the plist, so a real signal gets
+//     the short `SIGNAL_DRAIN_GRACE_MS` window instead. `POST /api/shutdown?force=1`'s
+//     in-process equivalent is NOT a real signal — it's `origin: "http"`, `mode: "forced"` (see
+//     below and lib/shutdown.ts's `ShutdownOrigin`/`ShutdownMode` types) — it only shares
+//     `mode: "forced"`'s immediate-abort behavior with a real SIGINT, never its origin, so the
+//     shutdown log and the escalation logic can each tell which one actually happened.
+//
+// Worker sessions have no checkpoint — a `claude -p` run is atomic from the job's point of view
+// — so a drain buys a job time to actually finish, not just "seconds from finishing". Whatever
+// is still running after the grace period is terminated and exits with the process; a
+// drain-killed job's row is left `running` for the next boot's ordinary crash-recovery to
+// reconcile (store.ts `execute()`/`recover()`) rather than written `failed` here. KeepAlive
+// brings the server straight back. The two grace constants, `SHUTDOWN_FLUSH_MS`, their sizing
+// rationale, and the drain state machine itself live in lib/shutdown.ts (kept out of this
+// module so they're importable — and unit-testable with fake deps/clock — without pulling in
+// this file's own `app.listen()` side effect).
+//
+// A forced request (`mode: "forced"` — `force=1`/`force=true` over HTTP, or a real SIGINT), not
+// the graceful default, carries "abandon now": on the real-signal path, SIGKILL is not
+// catchable, so it would skip this very handler and `terminateActiveSessions()` would never run
+// — the `claude -p` children have no process group detachment and no parent-death signal, so
+// they'd become orphans that keep writing/committing in their worktree after the reload believed
+// it had stopped them. SIGINT hits the same handler instead, just with a zero-length grace
+// period. SIGINT is not otherwise wired in this process (no readline/TTY prompt to interrupt), so
+// reusing it here doesn't shadow anything.
 const shutdownController = createShutdownController({
   terminateActiveSessions,
   activeSessionCount,
@@ -178,8 +202,8 @@ const shutdownController = createShutdownController({
 // would sit until its own next 500ms tick to notice `isActive()` had already gone false and
 // clear itself — one harmless but avoidable empty tick.
 let drainPoll: ReturnType<typeof setInterval> | null = null;
-function onSignal(signal: "SIGTERM" | "SIGINT", graceMs: number): void {
-  shutdownController.begin(signal, graceMs);
+function onSignal(origin: ShutdownOrigin, mode: ShutdownMode, graceMs: number): void {
+  shutdownController.begin(origin, mode, graceMs);
   if (shutdownController.isActive()) {
     if (drainPoll === null) {
       drainPoll = setInterval(() => {
@@ -196,7 +220,22 @@ function onSignal(signal: "SIGTERM" | "SIGINT", graceMs: number): void {
   }
 }
 
-process.on("SIGTERM", () => onSignal("SIGTERM", SHUTDOWN_GRACE_MS));
-process.on("SIGINT", () => onSignal("SIGINT", 0));
+process.on("SIGTERM", () => onSignal("signal", "graceful", SIGNAL_DRAIN_GRACE_MS));
+process.on("SIGINT", () => onSignal("signal", "forced", 0));
+
+// The HTTP half of the same drain: POST /api/shutdown (server/routes/shutdown.ts) calls this
+// through server/lib/shutdown.ts's registration slot rather than importing anything from this
+// module directly — see that file's "HTTP-triggered self-shutdown" section for why a route
+// can't just hold `onSignal`/`shutdownController` itself. `running` is read BEFORE `onSignal`
+// runs so the response reports the queue depth at the moment the request arrived, not after the
+// (synchronous, but still control-flow-shifting) drain decision. The `force` → `{ origin, mode,
+// graceMs }` mapping itself lives in `httpShutdownParams` (lib/shutdown.ts), not inline here, so
+// it's unit-testable independent of this file's module-scope side effects.
+registerShutdownTrigger((force) => {
+  const { running } = queueStats();
+  const { origin, mode, graceMs } = httpShutdownParams(force);
+  onSignal(origin, mode, graceMs);
+  return { running };
+});
 
 export type App = typeof app;

@@ -48,28 +48,26 @@
   <key>RunAtLoad</key>
   <true/>
 
-  <!-- Above SHUTDOWN_GRACE_MS + SHUTDOWN_FLUSH_MS (server/lib/shutdown.ts: 40 min drain + 3 s
-       flush = 2403 s), with real margin — ~5 min, not a hairline one. launchd's default
-       ExitTimeOut is 20 s: with a 40-min drain and no override, launchd SIGKILLs the process
-       mid-drain, which looks exactly like the silent-exit failure this file's forensic
-       comments already describe for other causes (see docs/deployment.md § Drain window
-       sizing, 2026-09-08 — SHUTDOWN_GRACE_MS covers the dominant single-attempt worst case
-       deliberately, not the full double-timeout-fallback chain; that section has the math).
-       ORDER MATTERS: this key must exist and exceed the drain window, or the drain change is
-       inert.
+  <!-- Hard-capped by launchd at 60s regardless of what's written here — measured on this host
+       2026-09-08: raising this value to 2700 changed nothing (`launchctl print
+       gui/<uid>/com.jkrumm.sideclaw-server` still reported `exit timeout = 60`), and a control
+       probe at 120 confirmed the same ceiling. So 60 is not a chosen drain budget — it's
+       launchd's actual measured maximum, and this key now says exactly that rather than a
+       number that implied more headroom than launchd will ever grant. A signal-initiated
+       shutdown (reboot, logout, `launchctl kill`, launchd itself) SIGKILLs whatever is still
+       running here no matter what this key claims.
 
-       EDITING THIS FILE IS NOT ENOUGH: `make reload` only signals the already-loaded job
-       definition (`launchctl kill`) — it never re-reads the plist. `launchctl print
-       gui/<uid>/com.jkrumm.sideclaw-server` kept showing `exit timeout = 5` after this key
-       was raised to 1860, until `make install-agent` (`launchctl bootstrap`) actually loaded
-       it — and `launchctl bootstrap` silently no-ops against an already-loaded label unless
-       `install-agent` boots the current label out first (measured live on this machine
-       2026-09-08: this file already said 2400 while `launchctl print` still reported `exit
-       timeout = 5`). `make reload` now refuses to proceed both when the tracked file and the
-       installed copy diverge AND when this key disagrees with launchd's own live value — see
-       the Makefile and docs/deployment.md § Drain window sizing. -->
+       The reload path no longer depends on this timer at all: `make reload` asks the server to
+       exit ITSELF via `POST /api/shutdown` (server/routes/shutdown.ts), and a process that
+       exits on its own never starts launchd's ExitTimeOut clock in the first place — only a
+       signal launchd sent itself does. That self-initiated path drains for up to
+       `HTTP_DRAIN_GRACE_MS` (server/lib/shutdown.ts, ~40 min). This key is the safety net for
+       the OTHER path — a real SIGTERM/SIGINT, which server/lib/shutdown.ts bounds to the short
+       `SIGNAL_DRAIN_GRACE_MS` window specifically because this cap is real. See
+       docs/deployment.md § Two shutdown paths, two windows for the full story of both paths,
+       and tests/shutdown-window.test.ts for what pins this value against the code. -->
   <key>ExitTimeOut</key>
-  <integer>2700</integer>
+  <integer>60</integer>
 
   <!-- ~/Library/Logs, not /tmp. macOS's periodic cleanup sweeps /tmp files
        untouched for 3+ days, and a KeepAlive agent opens its stdio ONCE at
