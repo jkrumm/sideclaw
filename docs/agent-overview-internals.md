@@ -58,17 +58,21 @@ request.
   legacy fixed 110-char clamp untouched.
 - The server binds **`127.0.0.1` only** (`server/index.ts`), so this endpoint
   is reachable from this machine alone — it carries no auth of its own, and
-  the tailnet door is Caddy's `sideclaw.mini.jkrumm.com` block, never a
-  direct grant on 7705.
+  there is **no tailnet door**: `~/.config/caddy-tailnet.ports` explicitly
+  `exclude sideclaw`, precisely because that missing auth would let any
+  tailnet node `POST /api/jobs` with `dispatch implement` otherwise. Don't
+  restore a `sideclaw.mini.jkrumm.com` block.
 - **`humanQueue`** (top-level in the snapshot): every pending
   `ask-human.sh` request (`~/.local/state/human-queue/*.req` with no `.res`,
   `readHumanQueue` in `agents.ts`), as `{ id, askedAt, question, cmd }`,
   newest first. `renderText` shows it as a `needs you (human queue: N)` block
   right under the header. Deterministic data — it is **never** part of the
   `overview` LLM prompt (`buildAgentFacts` reads only `projects`).
-- **Snapshot cache, 20 s** (`cachedBuildSnapshot`, `server/lib/overview-payload.ts`):
+- **Snapshot cache, 45 s** (`cachedBuildSnapshot`, `server/lib/overview-payload.ts`):
   the herdr pane, Hermes and the Argo push all poll within seconds of each
-  other and share one build.
+  other and share one build. 45 s, not 20 — the measured poll interval is
+  ~31 s, so the old TTL expired before the next caller arrived and the cache
+  never hit.
 - **Argo push** (`server/lib/argo-push.ts`): after every completed `overview`
   job and every 10 min, `POST ${ARGO_URL:-https://argo.jkrumm.com/api}/agents/overview`
   with the same JSON `GET /api/overview` returns (plus `machine: "mini"`,

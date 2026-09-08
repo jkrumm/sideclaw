@@ -14,10 +14,13 @@ import { appLogger as logger } from "../logger.ts";
 
 /** Snapshot cache: the herdr pane (`watch -n 30`), Hermes and the Argo push all read the
  *  same thing within seconds of each other, and one snapshot costs three CLI calls plus a
- *  transcript tail per agent plus a git status per project. 20 s is under the pane's own
- *  refresh interval, so nobody sees a staler view than before. The promise (not the value)
- *  is cached so concurrent first callers share one build instead of racing. */
-const SNAPSHOT_CACHE_MS = 20_000;
+ *  transcript tail per agent plus a git status per project. Measured over 4 days, consumers'
+ *  real poll interval is ~31 s, not 30 — 20 s missed the cache window on nearly every request
+ *  (2652/2720 `/api/overview.txt` and 2805/2826 `/api/agents.txt` calls took >500 ms, ~5500
+ *  full rebuilds at p50 1.5 s). 45 s clears that gap and still stays under the 10-minute Argo
+ *  push timer. The promise (not the value) is cached so concurrent first callers share one
+ *  build instead of racing. */
+const SNAPSHOT_CACHE_MS = 45_000;
 
 let cachedSnapshot: { at: number; promise: Promise<AgentsSnapshot> } | null = null;
 
