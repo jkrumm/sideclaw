@@ -68,6 +68,17 @@ const app = new Elysia()
   .use(agentsRoutes)
   .use(routingRoutes);
 
+// The filesystem half of startup recovery, and it has to finish before initJobStore below
+// re-promotes a surviving `pending` job — sweepStaleWorktrees()'s own safety argument is
+// "no episode of this process is in flight yet", which the previous unawaited fire-and-forget
+// no longer guaranteed once job promotion could win the race. A dispatch episode killed with
+// the process never runs its teardown, and what it leaves behind is not confined to
+// sideclaw's own state dir — the worktree is registered, and its branch created, inside the
+// LIVE repo.
+await sweepStaleWorktrees().catch((err: unknown) => {
+  logger.warn({ event: "dispatch.worktree_sweep_failed", error: String(err) }, "sweep failed");
+});
+
 // Wire the async job system: register the executor and run startup recovery
 // (in-flight jobs from a previous process → re-queued once or interrupted; re-promote
 // pending). A completed `overview` job pushes the merged overview to Argo — the hook
@@ -83,14 +94,6 @@ initJobStore({
 // overview job runs (a quiet fleet is a fact worth pushing too).
 const ARGO_PUSH_INTERVAL_MS = 10 * 60 * 1000;
 setInterval(() => void pushOverviewToArgo("timer"), ARGO_PUSH_INTERVAL_MS);
-
-// The filesystem half of that same recovery. A dispatch episode killed with the process
-// never runs its teardown, and what it leaves behind is not confined to sideclaw's own state
-// dir — the worktree is registered, and its branch created, inside the LIVE repo. Not
-// awaited: a slow git call must not delay the listener, and there is nothing to wait for.
-void sweepStaleWorktrees().catch((err: unknown) => {
-  logger.warn({ event: "dispatch.worktree_sweep_failed", error: String(err) }, "sweep failed");
-});
 
 if (!isDev) {
   app.use(staticPlugin({ assets: "dist/assets", prefix: "/assets" })).get("*", ({ set }) => {

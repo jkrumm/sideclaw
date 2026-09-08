@@ -12,13 +12,21 @@ build:
 # excalidraw are marked interrupted). SIGTERM rather than `kickstart -k`: the server drains
 # running jobs for up to 20 s (server/index.ts) and exits; KeepAlive restarts it. The old
 # PID is polled away first so the kickstart that skips launchd's respawn throttle never
-# lands on the process that is still draining.
+# lands on the process that is still draining. The stdio MCP child is left alive by default —
+# it's a thin HTTP client of the job queue, so stale handler code in it is harmless, and Claude
+# Code marks a killed stdio server failed without respawning it. RESTART_MCP=1 make reload
+# after a tool input/output schema change, because the SDK's Zod validation silently strips an
+# unknown field until the client reconnects.
 reload: build
 	@if [ -z "$(FORCE)" ]; then \
 	  n=$$(curl -sf --max-time 3 http://127.0.0.1:7705/api/jobs/health 2>/dev/null | jq -r '.running // 0' 2>/dev/null || echo 0); \
 	  if [ "$${n:-0}" != "0" ]; then echo "refusing to reload: $$n job(s) running — wait, or FORCE=1 make reload"; exit 1; fi; \
 	fi
-	@pkill -f "sideclaw/server/mcp.ts" 2>/dev/null || true
+	@if [ -n "$(RESTART_MCP)" ]; then \
+	  pkill -f "sideclaw/server/mcp.ts" 2>/dev/null || true; \
+	else \
+	  echo "(MCP children left alive — RESTART_MCP=1 to restart them after a tool-schema change)"; \
+	fi
 	@old=$$(launchctl print gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null | awk '/^[[:space:]]*pid = /{print $$3; exit}'); \
 	launchctl kill SIGTERM gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null || true; \
 	i=0; while [ -n "$$old" ] && kill -0 "$$old" 2>/dev/null && [ $$i -lt 50 ]; do sleep 0.5; i=$$((i+1)); done; \
