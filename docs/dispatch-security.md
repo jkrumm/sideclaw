@@ -174,13 +174,76 @@ Consumed by Hermes via `hermes-agent`'s bounded `scripts/hermes-cc.sh` client,
 but it is a general capability: any Claude Code session can hand a scoped
 episode to another repo.
 
+## Worktree salvage (the crash-recovery kind — not the verdict-serialization one above)
+
+- **The loss shape.** The worker session finishes editing files; only AFTER
+  that does the handler commit (`commitPendingWork`) and push (`pushBranch`).
+  A SIGKILL mid-episode — the ordinary crash shape, since launchd restarts on
+  crash and `make reload` kickstarts deliberately — leaves those edits
+  uncommitted in the worktree, and the next boot's `sweepStaleWorktrees`
+  deleted them with `worktree remove --force` and nothing but a `warn` log
+  line. `salvageWorktree` (`dispatch-git.ts`) closes that: it bundles
+  whatever a worktree carries that isn't durable elsewhere, right before the
+  discard that would otherwise erase it.
+- **Two integration points, one function.** `sweepStaleWorktrees` calls it
+  for every leftover it finds at boot — every leftover there is by
+  definition from an abnormal exit, since nothing at boot ever reaches a
+  worktree it tore down cleanly. `runDispatch`'s own `catch` calls it for the
+  synchronous shape of the same loss: an unexpected throw after the session
+  already wrote files, which the `finally` a moment later would otherwise
+  discard with no record. A **deliberate** outcome — a successful push, or a
+  refused diff the verdict already explains as "discarded" — returns
+  normally rather than throwing, so neither path re-salvages it; only a
+  throw means the worktree's fate was never resolved.
+- **What counts as worth saving**, cheaply and without knowing the worktree's
+  `base`: `orphanCommitCount` counts commits on the branch reachable from no
+  OTHER ref in the repo (`<branch> --not --exclude=refs/heads/<branch>
+  --branches --remotes`) — a fresh, never-committed-to worktree scores 0
+  because its base is already reachable from the repo's own branches, and an
+  ALREADY-PUSHED implement branch also scores 0, because a successful `git
+  push` updates the local `refs/remotes/origin/<branch>` tracking ref as a
+  side effect, which then counts as "elsewhere". Only genuinely unpublished
+  commits count. Uncommitted edits are the other half: `git stash create`
+  captures them as a plain commit object without touching the stash ref
+  list, so nothing about the worktree's own teardown changes; `git add -A`
+  runs first since `stash create` (unlike `stash push`) has no
+  `--include-untracked`, and a new file the episode wrote is exactly the
+  kind of edit worth keeping. Neither signal present → no file is written; a
+  clean worktree must not grow this directory.
+- **One bundle, both halves.** `git bundle create <path> <branch>
+  [<stash-commit>]` takes the branch tip and the stash commit as two
+  positive refs, so a single `.bundle` file recovers commits and dirty edits
+  together.
+- **Never blocks teardown.** `salvageWorktree` is best-effort end to end —
+  every failure is caught, logged (`dispatch.worktree_salvage_failed`) and returns
+  `null` — because the worktree must be torn down whether or not the salvage
+  attempt succeeded. Neither call site guards teardown on salvage's outcome.
+- **Where it lands.** `~/.local/state/sideclaw/salvage/`, never `/tmp` — same
+  reasoning as the logs (`.claude/rules/logs.md`): macOS sweeps untouched
+  `/tmp` files after 3+ days, which is exactly the wrong lifetime for the one
+  copy of a crashed episode's work. Filename is the branch name with `/`
+  turned into `-`, so it is self-describing without needing a separate job
+  id — and when the caller has a real job id (`runDispatch`'s `jobKey`
+  prefers `job.id` over a fresh `randomUUID()` when one is available), the
+  branch name already carries it, so the boot sweep recovers a bundle
+  labeled with the job that produced it with no extra bookkeeping.
+  `dispatch.worktree_salvaged` logs the path and byte count; a job-context salvage
+  also appends the path to the thrown error's message, so it reaches the
+  job's `error` field instead of needing a log grep.
+- **Bounded growth.** Pruned after every write, same shape as `store.ts`'s
+  `PRUNE_TTL_MS`/`MAX_TERMINAL_ROWS`: age first (14 days), then a hard cap on
+  file count (100, oldest first). A rescue mechanism that nobody is watching
+  must not grow forever.
+
 ## Tests — `bun test` (`tests/`)
 
 Every bound listed above is a regression test, across four files:
 `dispatch-git-pure` (secret scanner, `slugify`, `parseGithubRemote`),
 `dispatch-worktree` (worktree lifecycle, the refusal ladder, the push, the
-settings strip), `dispatch-prompt` (the nonce fence, the salvage rule, tier
-profiles, the worker schema) and `session-args` (the worker's CLI flag
+settings strip, and worktree salvage — clean → no file, dirty/unpushed →
+bundle, already-pushed → no file, a failing salvage never blocking teardown),
+`dispatch-prompt` (the nonce fence, the verdict-serialization salvage rule,
+tier profiles, the worker schema) and `session-args` (the worker's CLI flag
 vector). Shape follows `hermes-agent/tests/*.py`: attack shapes blocked,
 **real material allowed**, fuzzed.
 

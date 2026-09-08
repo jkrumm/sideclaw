@@ -6,6 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { mcpProgressCallback, runSession, zodValidator } from "../session-runner.ts";
 import { describeRoute, routeFor } from "../../lib/routing.ts";
 import { logger } from "../logger.ts";
+import { loadSkillFile } from "../../lib/worker-io.ts";
 
 // ── Output schema — single source of truth ────────────────────────────────────
 
@@ -156,10 +157,7 @@ function buildHyperdxMcpConfig(config: HyperdxConfig): Record<string, unknown> {
 
 async function loadSkillPrompt(investigation: string, environment: string): Promise<string> {
   const skillPath = join(import.meta.dir, "../../skills/otel.md");
-  if (!existsSync(skillPath)) {
-    throw new Error(`otel skill prompt not found at ${skillPath}`);
-  }
-  const template = await Bun.file(skillPath).text();
+  const template = await loadSkillFile(skillPath, "otel");
   return template
     .replace("{{INVESTIGATION}}", investigation)
     .replace("{{ENVIRONMENT}}", environment);

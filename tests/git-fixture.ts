@@ -54,6 +54,8 @@ export class Fixture {
     readonly origin: string,
     /** This fixture's private SIDECLAW_WORKTREE_ROOT. */
     readonly worktrees: string,
+    /** This fixture's private SIDECLAW_SALVAGE_ROOT. */
+    readonly salvage: string,
   ) {}
 
   /** Write a file (creating parents) and return its repo-relative path. */
@@ -119,6 +121,7 @@ export async function makeFixture(): Promise<Fixture> {
   const origin = join(root, "origin.git");
   const repo = join(root, "repo");
   const worktrees = join(root, "worktrees");
+  const salvage = join(root, "salvage");
   mkdirSync(origin);
   mkdirSync(repo);
 
@@ -128,7 +131,7 @@ export async function makeFixture(): Promise<Fixture> {
   await git(["config", "user.email", "test@example.invalid"], repo);
   await git(["config", "commit.gpgsign", "false"], repo);
 
-  const fx = new Fixture(root, repo, origin, worktrees);
+  const fx = new Fixture(root, repo, origin, worktrees, salvage);
   fx.write("README.md", "# fixture\n");
   fx.write(
     "src/app.ts",
@@ -139,5 +142,6 @@ export async function makeFixture(): Promise<Fixture> {
   await git(["push", "-q", "-u", "origin", "master"], repo);
 
   process.env.SIDECLAW_WORKTREE_ROOT = worktrees;
+  process.env.SIDECLAW_SALVAGE_ROOT = salvage;
   return fx;
 }

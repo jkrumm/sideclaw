@@ -36,6 +36,7 @@ import {
   removeWorktree,
   resolveRepoIdentity,
   restoreStrippedSettings,
+  salvageWorktree,
   stripProjectSettings,
   summarizeDiff,
   sweepStaleWorktrees,
@@ -346,6 +347,127 @@ describe("sweepStaleWorktrees", () => {
 
     rmSync(fx.worktrees, { recursive: true, force: true });
     expect(await sweep()).toBe(0);
+  });
+});
+
+// ── Salvage ───────────────────────────────────────────────────────────────────
+//
+// The mechanism that stands between a SIGKILL mid-episode and quietly losing whatever it was
+// doing: `salvageWorktree` bundles a worktree's dirty tree and/or unpushed commits before it
+// is discarded. `sweepStaleWorktrees` calls it for every crash leftover; `runDispatch`'s own
+// catch calls it for the synchronous shape of the same loss (an unexpected throw after the
+// session already wrote files) — not exercised here, since that needs a live worker session,
+// but it goes through this exact function.
+
+describe("salvageWorktree", () => {
+  test("a clean worktree produces no file", async () => {
+    const wt = await createWorktree(fx.repo, key(), "clean", "master");
+    const result = await salvageWorktree(fx.repo, wt.path, wt.branch);
+    expect(result).toBeNull();
+    expect(existsSync(fx.salvage)).toBe(false);
+    await removeWorktree(fx.repo, wt);
+  });
+
+  test("uncommitted edits produce a non-empty bundle", async () => {
+    const wt = await createWorktree(fx.repo, key(), "dirty", "master");
+    fx.write("src/scratch.ts", "export const scratch = 1;\n", wt.path);
+
+    const result = await salvageWorktree(fx.repo, wt.path, wt.branch);
+    if (!result) throw new Error("expected a salvage result");
+
+    expect(existsSync(result.path)).toBe(true);
+    expect(result.bytes).toBeGreaterThan(0);
+    expect(statSync(result.path).size).toBe(result.bytes);
+    expect(result.path.startsWith(fx.salvage)).toBe(true);
+    await removeWorktree(fx.repo, wt);
+  });
+
+  test("committed-but-unpushed work also produces a bundle", async () => {
+    const wt = await createWorktree(fx.repo, key(), "unpushed", "master");
+    fx.write("src/committed.ts", "export const c = 1;\n", wt.path);
+    await commitPendingWork(wt, "chore: work the episode never pushed");
+
+    const result = await salvageWorktree(fx.repo, wt.path, wt.branch);
+    if (!result) throw new Error("expected a salvage result");
+
+    expect(result.bytes).toBeGreaterThan(0);
+    await removeWorktree(fx.repo, wt);
+  });
+
+  test("a branch that was already pushed is not re-salvaged", async () => {
+    const wt = await createWorktree(fx.repo, key(), "pushed", "master");
+    fx.write("src/shipped.ts", "export const shipped = 1;\n", wt.path);
+    await commitPendingWork(wt, "chore: already on origin");
+    await pushBranch(wt, ID);
+
+    const result = await salvageWorktree(fx.repo, wt.path, wt.branch);
+
+    // The commit is durable on origin already (git's automatic tracking-ref update after a
+    // push), so there is nothing this worktree alone is holding — bundling it would just be
+    // noise on every ordinary successful implement run.
+    expect(result).toBeNull();
+    await removeWorktree(fx.repo, wt);
+  });
+
+  test("a failing salvage still returns null and never throws", async () => {
+    const wt = await createWorktree(fx.repo, key(), "unwritable", "master");
+    fx.write("src/scratch.ts", "export const scratch = 1;\n", wt.path);
+
+    mkdirSync(fx.salvage, { recursive: true });
+    chmodSync(fx.salvage, 0o500);
+    try {
+      const result = await salvageWorktree(fx.repo, wt.path, wt.branch);
+      expect(result).toBeNull();
+    } finally {
+      chmodSync(fx.salvage, 0o700);
+    }
+    await removeWorktree(fx.repo, wt);
+  });
+
+  test("missing worktree path is a no-op, not a throw", async () => {
+    const result = await salvageWorktree(fx.repo, join(fx.worktrees, "nowhere"), "dispatch/gone");
+    expect(result).toBeNull();
+  });
+});
+
+describe("sweepStaleWorktrees salvages before it discards", () => {
+  test("a crashed CLEAN worktree leaves no salvage file", async () => {
+    const wt = await createWorktree(fx.repo, key(), "crashed-clean", "master");
+    expect(await sweep()).toBe(1);
+    expect(existsSync(fx.salvage)).toBe(false);
+    expect(existsSync(wt.path)).toBe(false);
+  });
+
+  test("a crashed DIRTY worktree is bundled, then torn down anyway", async () => {
+    const wt = await createWorktree(fx.repo, key(), "crashed-dirty", "master");
+    fx.write("src/scratch.ts", "export const scratch = 1;\n", wt.path);
+    // No removeWorktree — this is what a SIGKILL mid-episode leaves behind.
+
+    expect(await sweep()).toBe(1);
+
+    const bundle = join(fx.salvage, `${wt.branch.replace(/\//g, "-")}.bundle`);
+    expect(existsSync(bundle)).toBe(true);
+    expect(statSync(bundle).size).toBeGreaterThan(0);
+    // The teardown guarantee holds regardless: salvage never blocks it.
+    expect(existsSync(wt.path)).toBe(false);
+    expect(await fx.linkedWorktrees()).toEqual([]);
+    expect(await fx.localBranches()).not.toContain(wt.branch);
+  });
+
+  test("a failing salvage never prevents the teardown", async () => {
+    const wt = await createWorktree(fx.repo, key(), "crashed-unsalvageable", "master");
+    fx.write("src/scratch.ts", "export const scratch = 1;\n", wt.path);
+
+    mkdirSync(fx.salvage, { recursive: true });
+    chmodSync(fx.salvage, 0o500);
+    try {
+      expect(await sweep()).toBe(1);
+    } finally {
+      chmodSync(fx.salvage, 0o700);
+    }
+    expect(existsSync(wt.path)).toBe(false);
+    expect(await fx.linkedWorktrees()).toEqual([]);
+    expect(await fx.localBranches()).not.toContain(wt.branch);
   });
 });
 

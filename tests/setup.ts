@@ -16,6 +16,11 @@ process.env.LOG_LEVEL ??= "silent";
 // their own temp dir; this is the backstop for a test that forgets.
 process.env.SIDECLAW_WORKTREE_ROOT ??= mkdtempSync(join(tmpdir(), "sideclaw-test-worktrees-"));
 
+// Same reasoning, for the salvage bundles a discarded worktree can produce: a test process
+// must never write into the real ~/.local/state/sideclaw/salvage/. Individual fixtures narrow
+// this further to their own temp dir; this is the backstop for a test that forgets.
+process.env.SIDECLAW_SALVAGE_ROOT ??= mkdtempSync(join(tmpdir(), "sideclaw-test-salvage-"));
+
 // The job store opens its sqlite file at import, and the agents/overview suites import it
 // transitively — without this every test run reads (and prunes) the live server's queue.
 process.env.SIDECLAW_JOBS_DB ??= join(

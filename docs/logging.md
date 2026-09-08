@@ -14,8 +14,11 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `source`     | string   | `"app"` (HTTP server) \| `"mcp"` (MCP process)       |
 | `event`      | string?  | Structured event type — see list below               |
 | `tool`       | string?  | MCP tool name: `"check"`                             |
+| `jobId`      | string?  | Async job id (`jobs/store.ts`) the session ran inside, when it ran inside one — see `session.*` events |
 | `project`    | string?  | Absolute cwd of target repo                          |
 | `model`      | string?  | Claude model used in session                         |
+| `backend`    | string?  | Worker auth path: `"iu"` \| `"max"` — see `backend.select`/`backend.fallback` |
+| `timeoutMs`  | number?  | Configured session timeout, on the `session.*` failure events |
 | `durationMs` | number?  | Execution duration in ms                             |
 | `costUsd`    | number?  | Session cost from claude envelope                    |
 | `turns`      | number?  | `num_turns` from claude envelope                     |
@@ -34,11 +37,11 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `mcp.startup`              | mcp     | MCP server ready                                                                                                                                      |
 | `mcp.tool.start`           | mcp     | Tool invocation began                                                                                                                                 |
 | `mcp.tool.end`             | mcp     | Tool invocation completed (carries `passed`, `durationMs`)                                                                                            |
-| `session.spawn`            | mcp     | `claude -p` subprocess started                                                                                                                        |
-| `session.end`              | mcp     | Session completed successfully (carries `costUsd`, `turns`, `durationMs`)                                                                             |
-| `session.timeout`          | mcp     | Session hit timeout                                                                                                                                   |
-| `session.error`            | mcp     | Session returned `is_error` or produced no output                                                                                                     |
-| `session.recovered_output` | mcp/app | `result` field was empty; JSON recovered from the last assistant text (worker ended on a tool call)                                                   |
+| `session.spawn`            | mcp/app | `claude -p` subprocess started                                                                                                                        |
+| `session.end`              | mcp/app | Session completed successfully (carries `costUsd`, `turns`, `durationMs`)                                                                             |
+| `session.timeout`          | mcp/app | Session hit timeout (carries `tool`, `model`, `backend`, `jobId`, `timeoutMs`)                                                                        |
+| `session.error`            | mcp/app | Session returned `is_error` or produced no output (carries `tool`, `model`, `backend`, `jobId`)                                                       |
+| `session.recovered_output` | mcp/app | `result` field was empty; JSON recovered from the last assistant text (worker ended on a tool call; carries `tool`, `model`, `backend`, `jobId`)      |
 | `github.cache.hit`         | app     | Octokit request served from cache (carries `kind: "soft" \| "304"`, `url`)                                                                            |
 | `github.cache.miss`        | app     | Octokit response stored to cache (carries `url`, `status`)                                                                                            |
 | `job.create`               | app     | Async job submitted (carries `jobId`, `tool`)                                                                                                         |
@@ -48,14 +51,17 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `job.recover`              | app     | Startup reconciliation (carries `interrupted`, `requeued`)                                                                                            |
 | `mcp.tool.submit`          | mcp     | Thin MCP tool submitted a job to the HTTP server (carries `tool`, `jobId`, `status`)                                                                  |
 | `quota.read`               | mcp     | Max subscription quota read, file-cache or live API (carries `quotaSource: "file"\|"api"\|"unknown"`, `fiveHourPct`, `sevenDayPct` — never the token) |
-| `backend.select`           | mcp     | Worker auth backend resolved for a session launch (carries `tool`, `model`, `backend`, `reason`; `fiveHourPct`/`sevenDayPct` when `reason: "quota"`)  |
-| `backend.fallback`         | mcp     | Reactive once-only retry from `max` onto `iu` after a quota-flavored failure (carries `tool`, `model`, `backend: "iu"`, `reason: "rate-limited"`)     |
-| `backend.fallback` (`iu-unavailable`) | mcp/app | Reactive once-only retry from `iu` onto `max` after an IU transport failure or missing IU credentials (carries `tool`, `model` — the fallback model, e.g. Haiku for check — `backend: "max"`)  |
-| `session.stderr`           | mcp/app | Worker stderr; **warn** when the session failed (timeout, non-zero exit, `is_error`), debug otherwise (carries `tool`, `model`, `backend`, `exitCode`, `stderr` ≤4 KB) |
+| `backend.select`           | mcp/app | Worker auth backend resolved for a session launch (carries `tool`, `model`, `backend`, `jobId`, `timeoutMs`, `reason`; `fiveHourPct`/`sevenDayPct` when `reason: "quota"`)  |
+| `backend.fallback`         | mcp/app | Reactive once-only retry from `max` onto `iu` after a quota-flavored failure (carries `tool`, `model`, `backend: "iu"`, `jobId`, `reason: "rate-limited"`)     |
+| `backend.fallback` (`iu-unavailable`) | mcp/app | Reactive once-only retry from `iu` onto `max` after an IU transport failure or missing IU credentials (carries `tool`, `model` — the fallback model, e.g. Haiku for check — `backend: "max"`, `jobId`)  |
+| `session.stderr`           | mcp/app | Worker stderr; **warn** when the session failed (timeout, non-zero exit, `is_error`), debug otherwise (carries `tool`, `model`, `backend`, `jobId`, `timeoutMs`, `exitCode`, `stderr` ≤4 KB) |
+| `session.retry`            | mcp/app | Transient transport error before any output — retrying (carries `tool`, `model`, `jobId`, `attempt`, `error`)                                            |
 | `check.retry`              | app     | `check` output was prose, not schema JSON — one JSON-only retry (carries `project`, `error`)                                                              |
 | `job.requeue`              | app     | Boot recovery re-queued an interrupted check/overview/narrative/review once (carries `jobId`, `tool`, `attempts`)                                        |
 | `app.argo_push`            | app     | Overview pushed to Argo (carries `status`: `ok` \| `no-secret` \| `http-error` \| `network-error` \| `build-error`, `trigger`: `job` \| `timer`, `httpStatus`) |
 | `app.shutdown`             | app     | SIGTERM received / grace period result (carries `running`, `workers`, `killedWorkers`)                                                                   |
+| `dispatch.worktree_salvaged`        | app     | A discarded dispatch worktree's dirty tree and/or unpushed commits were bundled before teardown (carries `branch`, `path`, `bytes`, `orphanCommits`, `dirty`) — see `docs/dispatch-security.md` § Worktree salvage |
+| `dispatch.worktree_salvage_failed`  | app     | Worktree salvage attempt failed or produced nothing usable; teardown proceeds regardless (carries `branch`, `error`)                                     |
 
 ## Query patterns
 

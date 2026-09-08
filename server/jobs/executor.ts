@@ -13,17 +13,17 @@ import { runNarrative } from "./handlers/narrative.ts";
 export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<unknown> {
   switch (job.tool) {
     case "check":
-      return runCheck(job.params, onProgress);
+      return runCheck(job.params, onProgress, job.id);
     case "review":
-      return runReview(job.params, onProgress);
+      return runReview(job.params, onProgress, job.id);
     case "excalidraw_diagram":
-      return runExcalidrawDiagram(job.params, onProgress);
+      return runExcalidrawDiagram(job.params, onProgress, job.id);
     case "dispatch":
-      return runDispatch(job.params, onProgress);
+      return runDispatch(job.params, onProgress, job.id);
     case "overview":
-      return runOverview(job.params, onProgress);
+      return runOverview(job.params, onProgress, job.id);
     case "narrative":
-      return runNarrative(job.params, onProgress);
+      return runNarrative(job.params, onProgress, job.id);
     default: {
       const exhaustive: never = job.tool;
       throw new Error(`unknown job tool: ${String(exhaustive)}`);

@@ -3,7 +3,9 @@ import { homedir } from "os";
 import { dirname, join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { logger } from "./logger.ts";
+import { logger as mcpLogger } from "./logger.ts";
+import { appLogger } from "../logger.ts";
+import { processKind } from "../lib/process-context.ts";
 import { getIuConfig } from "../lib/iu-openai.ts";
 import { readMaxQuota, type MaxQuota } from "../lib/quota.ts";
 import {
@@ -31,6 +33,22 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
 // `writeSessionEnv`) so usage-tracker classifies worker spend correctly (IU vs Max).
 
 export type { Backend } from "../lib/routing.ts";
+
+/**
+ * Pick the logger for the process actually running this call, not the one that happened to
+ * import this module first.
+ *
+ * `runSession` is shared: job handlers (check/review/dispatch/overview/narrative) call it from
+ * inside the always-on HTTP server process, while `otel`'s tool handler calls it directly from
+ * the MCP stdio process — a module-level `import { logger } from "./logger.ts"` tagged every
+ * line `source: "mcp"` regardless of which one actually ran. A post-mortem on 8 `session.timeout`
+ * entries had to join them against `jobs.db` by timestamp instead of filtering on `source`,
+ * which is the bug this resolves. See `process-context.ts` for why this must be read per call
+ * rather than captured once at module load.
+ */
+function runnerLogger(): typeof appLogger {
+  return processKind() === "app" ? appLogger : mcpLogger;
+}
 
 /** Global kill switch for BOTH fallback directions (`max`→`iu` on quota, `iu`→`max`
  *  on an IU transport failure): "iu" (default) keeps them on, "none" pins every
@@ -179,6 +197,14 @@ export interface SessionOptions<T = unknown> {
    * them. Optional but every job handler should set it.
    */
   tool?: string;
+  /**
+   * The async job this session runs inside, if any (`job.id` from `jobs/store.ts`). Carried
+   * through purely for log correlation — every error-path log below includes it alongside
+   * `tool`/`model`/`backend` so a failure line is self-describing instead of needing a
+   * timestamp join against `jobs.db`. Absent for a session that isn't job-backed (e.g. `otel`,
+   * which runs synchronously inside the MCP tool call).
+   */
+  jobId?: string;
   /** Called every 15s while the subprocess runs. Use to send MCP progress notifications and reset client timeout. */
   onProgress?: (progress: number, total: number, message: string) => void;
   /**
@@ -752,6 +778,7 @@ async function runSessionAttempt<T = unknown>(
     extraDisallowedTools,
     extraEnv,
     tool,
+    jobId,
     validate,
     onActivity,
   } = opts;
@@ -768,20 +795,23 @@ async function runSessionAttempt<T = unknown>(
     ? { backend: forced.backend, reason: "quota" }
     : await resolveBackend(route);
   const backend: Backend = resolved.backend;
+  // Shared identity for every log line below that reports a session failure. A post-mortem
+  // on 8 `session.timeout` entries came back with `model: null, backend: null, tool: null` and
+  // had to be joined against jobs.db by timestamp to find out which job each one belonged to —
+  // this is what makes each line self-describing instead.
+  const errCtx = { tool, model, backend, jobId, timeoutMs };
   if (forced) {
-    logger.warn(
-      { event: "backend.fallback", tool, model, backend, reason: forced.reason },
+    runnerLogger().warn(
+      { event: "backend.fallback", ...errCtx, reason: forced.reason },
       forced.reason === "rate-limited"
         ? "falling back to iu after a max-quota-flavored failure"
         : "falling back to max — IU produced no output (transport failure, no credentials, or a silent timeout)",
     );
   } else {
-    logger.info(
+    runnerLogger().info(
       {
         event: "backend.select",
-        tool,
-        model,
-        backend,
+        ...errCtx,
         reason: resolved.reason,
         ...(resolved.reason === "quota" && resolved.quota
           ? { fiveHourPct: resolved.quota.fiveHourPct, sevenDayPct: resolved.quota.sevenDayPct }
@@ -817,8 +847,8 @@ async function runSessionAttempt<T = unknown>(
       iuKey = cfg.key;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error(
-        { event: "session.iu_config_error", project: cwd, error: message },
+      runnerLogger().error(
+        { event: "session.iu_config_error", project: cwd, ...errCtx, error: message },
         "IU config unavailable",
       );
       emitAttribution("error", { reason: "iu_config_error" });
@@ -917,7 +947,7 @@ async function runSessionAttempt<T = unknown>(
   if (extraEnv) Object.assign(env, extraEnv);
 
   const startMs = performance.now();
-  logger.info(
+  runnerLogger().info(
     {
       event: "session.spawn",
       project: cwd,
@@ -959,12 +989,18 @@ async function runSessionAttempt<T = unknown>(
   let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
   const timeoutHandle = setTimeout(() => {
     timedOut = true;
-    logger.error({ event: "session.timeout", project: cwd }, "session timed out — SIGTERM");
+    runnerLogger().error(
+      { event: "session.timeout", project: cwd, ...errCtx },
+      "session timed out — SIGTERM",
+    );
     proc.kill("SIGTERM");
     sigkillTimer = setTimeout(() => {
       sigkillTimer = null;
       if (proc.exitCode === null) {
-        logger.error({ event: "session.timeout", project: cwd }, "session still alive — SIGKILL");
+        runnerLogger().error(
+          { event: "session.timeout", project: cwd, ...errCtx },
+          "session still alive — SIGKILL",
+        );
         proc.kill("SIGKILL");
       }
     }, 5000);
@@ -1097,18 +1133,16 @@ async function runSessionAttempt<T = unknown>(
     const failed = timedOut || exitCode !== 0 || !envelope || envelope.is_error === true;
     const fields = {
       event: "session.stderr",
-      tool,
       project: cwd,
-      model,
-      backend,
+      ...errCtx,
       exitCode,
       stderr: stderrTrimmed.slice(0, failed ? 4000 : 1000),
     };
-    if (failed) logger.warn(fields, "session stderr (failed worker)");
-    else logger.debug(fields, "session stderr");
+    if (failed) runnerLogger().warn(fields, "session stderr (failed worker)");
+    else runnerLogger().debug(fields, "session stderr");
   }
 
-  logger.debug({ exitCode, timedOut, turns, lastAction }, "session stream done");
+  runnerLogger().debug({ exitCode, timedOut, turns, lastAction }, "session stream done");
 
   const durationMs = Math.round(performance.now() - startMs);
 
@@ -1128,12 +1162,15 @@ async function runSessionAttempt<T = unknown>(
   }
 
   if (!envelope) {
-    logger.error({ event: "session.error", project: cwd }, "no result event in stream");
+    runnerLogger().error(
+      { event: "session.error", project: cwd, ...errCtx },
+      "no result event in stream",
+    );
     emitAttribution("error", { durationMs, turns, reason: "no_envelope" });
     return { ok: false, error: "Session ended without a result event", backend, model };
   }
 
-  logger.debug(
+  runnerLogger().debug(
     {
       type: envelope.type,
       subtype: envelope.subtype,
@@ -1147,8 +1184,8 @@ async function runSessionAttempt<T = unknown>(
 
   if (envelope.is_error) {
     const errMsg = envelope.errors?.join("; ") ?? String(envelope.result ?? "Unknown error");
-    logger.error(
-      { event: "session.error", project: cwd, subtype: envelope.subtype, error: errMsg },
+    runnerLogger().error(
+      { event: "session.error", project: cwd, ...errCtx, subtype: envelope.subtype, error: errMsg },
       "session is_error",
     );
     emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
@@ -1158,7 +1195,7 @@ async function runSessionAttempt<T = unknown>(
   // total_cost_usd is populated normally on both the IU native Anthropic transport
   // and the Max/OAuth path.
   const logSessionEnd = () =>
-    logger.info(
+    runnerLogger().info(
       {
         event: "session.end",
         project: cwd,
@@ -1178,8 +1215,8 @@ async function runSessionAttempt<T = unknown>(
     if (validate) {
       const v = validate(value);
       if (!v.ok) {
-        logger.error(
-          { event: "session.invalid_output", project: cwd, error: v.error },
+        runnerLogger().error(
+          { event: "session.invalid_output", project: cwd, ...errCtx, error: v.error },
           "session output failed validation",
         );
         emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
@@ -1211,7 +1248,7 @@ async function runSessionAttempt<T = unknown>(
     if (data !== undefined) {
       return finalize(data);
     }
-    logger.error({ raw: raw.slice(0, 500) }, "result JSON parse failed");
+    runnerLogger().error({ raw: raw.slice(0, 500), ...errCtx }, "result JSON parse failed");
     emitAttribution("error", {
       durationMs,
       turns: envelope.num_turns ?? turns,
@@ -1234,15 +1271,18 @@ async function runSessionAttempt<T = unknown>(
   if (lastAssistantText) {
     const recovered = extractJson<T>(lastAssistantText);
     if (recovered !== undefined) {
-      logger.warn(
-        { event: "session.recovered_output", project: cwd },
+      runnerLogger().warn(
+        { event: "session.recovered_output", project: cwd, ...errCtx },
         "recovered output from last assistant text (empty result field)",
       );
       return finalize(recovered);
     }
   }
 
-  logger.error({ event: "session.error", project: cwd }, "session no usable output");
+  runnerLogger().error(
+    { event: "session.error", project: cwd, ...errCtx },
+    "session no usable output",
+  );
   emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns, reason: "no_output" });
   return {
     ok: false,
@@ -1389,8 +1429,16 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     if (plan.kind === "return") {
       return { ...result, attempts: attempt, retried: attempt > 1 };
     }
-    logger.warn(
-      { event: "session.retry", project: opts.cwd, attempt, error: result.error },
+    runnerLogger().warn(
+      {
+        event: "session.retry",
+        project: opts.cwd,
+        tool: opts.tool,
+        model: route.model,
+        jobId: opts.jobId,
+        attempt,
+        error: result.error,
+      },
       "session failed with a transient transport error before producing output — retrying",
     );
     await Bun.sleep(retryBackoffMs(attempt));

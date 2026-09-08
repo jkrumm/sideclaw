@@ -6,6 +6,7 @@ import { routeFor } from "../../lib/routing.ts";
 import { appLogger as logger } from "../../logger.ts";
 import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
+import { JSON_ONLY_RETRY, loadSkillFile, unwrap } from "../../lib/worker-io.ts";
 
 // ── Input schema (single source for MCP inputSchema + execution validation) ───
 
@@ -100,24 +101,10 @@ function explicitCommandsPrompt(commands: string[]): string {
 async function loadSkillPrompt(commands: string[] | undefined): Promise<string> {
   if (commands && commands.length > 0) return explicitCommandsPrompt(commands);
   const skillPath = join(import.meta.dir, "../../skills/check.md");
-  if (!existsSync(skillPath)) {
-    throw new Error(`check skill prompt not found at ${skillPath}`);
-  }
   // Discovery path: drop the (now-unused) explicit-commands placeholder.
-  const template = await Bun.file(skillPath).text();
+  const template = await loadSkillFile(skillPath, "check");
   return template.replace("{{COMMANDS}}\n", "").replace("{{COMMANDS}}", "");
 }
-
-// Same one-shot salvage narrative/review have: the cheap tier occasionally answers the
-// output contract in prose ("All 3 steps passed!") with no structured_output, which
-// surfaces as `noOutput` after minutes of validators actually ran.
-const JSON_ONLY_RETRY = `
-
-────────────────────────────────────────────────────────
-RETRY — your previous response was REJECTED because it was not valid JSON matching the schema.
-Return ONLY the JSON object specified above. Your entire message must be a single JSON object
-(optionally wrapped in one \`\`\`json fence) — no preamble, no markdown headings, no commentary
-before or after. Emit it as your final message and stop.`;
 
 // ── Core ───────────────────────────────────────────────────────────────────────
 
@@ -125,6 +112,7 @@ before or after. Emit it as your final message and stop.`;
 export async function runCheck(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
+  jobId?: string,
 ): Promise<CheckOutput> {
   const { cwd, commands } = parseParams(CHECK_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
@@ -136,6 +124,7 @@ export async function runCheck(
       cwd,
       prompt: p,
       tool: "check",
+      jobId,
       jsonSchema: CHECK_JSON_SCHEMA,
       route: routeFor("check"),
       // Fast path needs only one Bash turn per command + the JSON turn — cap tight so
@@ -162,8 +151,5 @@ export async function runCheck(
     result = await runWorker(prompt + JSON_ONLY_RETRY);
   }
 
-  if (!result.ok || !result.data) {
-    throw new Error(result.error ?? "check produced no result");
-  }
-  return result.data;
+  return unwrap(result, "check");
 }

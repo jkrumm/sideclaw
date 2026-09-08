@@ -7,6 +7,7 @@ import {
   readFileSync,
   rmSync,
   lstatSync,
+  statSync,
 } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -737,6 +738,163 @@ async function discardWorktree(cwd: string, path: string, branch: string): Promi
   if (branch) await git(["branch", "-D", branch], cwd);
 }
 
+// ── Salvage ────────────────────────────────────────────────────────────────────
+//
+// A killed process loses the ordinary way today: the worker session finishes editing files,
+// and only AFTER that does the handler commit (`commitPendingWork`) and push (`pushBranch`).
+// A SIGKILL mid-episode leaves those edits sitting uncommitted in the worktree, and the next
+// boot's `sweepStaleWorktrees` deletes them with `worktree remove --force` — silently, a
+// `warn` log line and nothing else. `runDispatch`'s own `catch` hits the same shape
+// synchronously: an unexpected throw after the session already wrote files, discarded by the
+// `finally` a moment later with no record of what was lost. Both call `salvageWorktree` right
+// before the discard they cannot prevent.
+
+/** Salvage bundles live outside every repo, alongside the worktree root but never inside it —
+ *  same reasoning as `worktreeRoot()`: read per call so the test suite can point it at a temp
+ *  dir without touching the real one. `~/.local/state/sideclaw/salvage/`, never `/tmp` — macOS
+ *  sweeps untouched `/tmp` files after 3+ days (`.claude/rules/logs.md`), which is exactly the
+ *  wrong lifetime for the one copy of a crashed episode's work. */
+function salvageRoot(): string {
+  return (
+    process.env.SIDECLAW_SALVAGE_ROOT ?? join(homedir(), ".local", "state", "sideclaw", "salvage")
+  );
+}
+
+/** Retention, mirroring `store.ts`'s `PRUNE_TTL_MS`/`MAX_TERMINAL_ROWS`: age first, then a
+ *  hard cap on file count (oldest first). A salvage bundle is a rescue mechanism for a human
+ *  to notice and act on, not an archive — this directory must not grow forever on a host that
+ *  nobody is watching. */
+const SALVAGE_TTL_MS = 14 * 24 * 60 * 60 * 1000;
+const MAX_SALVAGE_FILES = 100;
+
+/** Best-effort GC, run after every successful salvage write. Never throws — a pruning bug
+ *  must not be the thing that makes a salvage attempt look like it failed. */
+function pruneSalvageDir(): void {
+  try {
+    const root = salvageRoot();
+    if (!existsSync(root)) return;
+    const cutoff = Date.now() - SALVAGE_TTL_MS;
+    const entries = readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => join(root, e.name))
+      .map((p) => ({ path: p, mtimeMs: statSync(p).mtimeMs }));
+    const kept: typeof entries = [];
+    for (const e of entries) {
+      if (e.mtimeMs < cutoff) {
+        rmSync(e.path, { force: true });
+      } else {
+        kept.push(e);
+      }
+    }
+    kept.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const stale of kept.slice(MAX_SALVAGE_FILES)) {
+      rmSync(stale.path, { force: true });
+    }
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * Commits on `branch` reachable from nowhere else in the repo — i.e. not yet pushed and not
+ * otherwise durable. `branch` must be excluded from its own negative set via `--exclude`:
+ * without it, `--branches` always includes `branch` itself, and `<branch> --not --branches`
+ * is trivially empty for every branch, always. Read in `main`, which shares `.git` with every
+ * linked worktree, so the branch and every candidate "elsewhere" ref are both visible from
+ * there without touching the worktree checkout itself.
+ */
+async function orphanCommitCount(main: string, branch: string): Promise<number> {
+  const refs = await git(
+    ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"],
+    main,
+  );
+  if (!refs.ok) return 0;
+  const elsewhere = refs.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && l !== `refs/heads/${branch}`);
+  const args = [
+    "rev-list",
+    "--count",
+    branch,
+    ...(elsewhere.length ? ["--not", ...elsewhere] : []),
+  ];
+  const r = await git(args, main);
+  if (!r.ok) return 0;
+  return Number.parseInt(r.stdout.trim(), 10) || 0;
+}
+
+/**
+ * Bundle whatever a worktree carries that would otherwise vanish with it, before it is torn
+ * down. Best effort end to end: every failure is caught and logged, and returns null — the
+ * caller's teardown must proceed either way, salvage or no salvage.
+ *
+ * Two things can be lost: commits the episode made but never pushed (`orphanCommitCount`),
+ * and edits it never committed at all. `git stash create` captures the latter as a plain
+ * commit object without touching the stash ref list, so nothing about the worktree's normal
+ * teardown changes; `git add -A` runs first because `stash create` — unlike `stash push` — has
+ * no `--include-untracked`, and a new file the episode wrote is exactly the kind of edit worth
+ * keeping. `git bundle create` then takes the branch tip and that stash commit as two positive
+ * refs, which is what makes one bundle recover both halves in one shot.
+ *
+ * Returns null (no file written) when there is nothing to save. A clean worktree — the
+ * ordinary case for a read tier that never wrote anything, and for any tier torn down after a
+ * clean run — must not grow this directory.
+ */
+export async function salvageWorktree(
+  main: string,
+  path: string,
+  branch: string,
+): Promise<{ path: string; bytes: number } | null> {
+  try {
+    if (!existsSync(path)) return null;
+    const orphaned = await orphanCommitCount(main, branch);
+
+    await git(["add", "-A"], path, 30_000);
+    const stashed = await git(["stash", "create"], path, 30_000);
+    const dirtyCommit = stashed.ok ? stashed.stdout.trim() : "";
+
+    if (orphaned === 0 && !dirtyCommit) return null;
+
+    const root = salvageRoot();
+    mkdirSync(root, { recursive: true });
+    const bundlePath = join(root, `${branch.replace(/\//g, "-")}.bundle`);
+    const refs = dirtyCommit ? [branch, dirtyCommit] : [branch];
+    const bundled = await git(["bundle", "create", bundlePath, ...refs], main, 60_000);
+    if (!bundled.ok || !existsSync(bundlePath)) {
+      logger.warn(
+        {
+          event: "dispatch.worktree_salvage_failed",
+          branch,
+          error: bundled.stderr.trim().slice(0, 300),
+        },
+        "could not bundle a discarded worktree's work — proceeding with teardown",
+      );
+      return null;
+    }
+    const bytes = statSync(bundlePath).size;
+    logger.warn(
+      {
+        event: "dispatch.worktree_salvaged",
+        branch,
+        path: bundlePath,
+        bytes,
+        orphanCommits: orphaned,
+        dirty: !!dirtyCommit,
+      },
+      "salvaged a discarded worktree's work before teardown",
+    );
+    pruneSalvageDir();
+    return { path: bundlePath, bytes };
+  } catch (err) {
+    logger.warn(
+      { event: "dispatch.worktree_salvage_failed", branch, error: String(err) },
+      "could not salvage a discarded worktree — proceeding with teardown",
+    );
+    return null;
+  }
+}
+
 /**
  * Delete every worktree a previous process left behind. Call once at HTTP server boot.
  *
@@ -767,6 +925,9 @@ export async function sweepStaleWorktrees(): Promise<number> {
     const path = join(root, entry.name);
     const { main, branch } = describeLeftover(path);
     if (main) {
+      // Every leftover here is, by definition, from an abnormal exit — nothing at boot ever
+      // reaches a worktree it tore down cleanly. Salvage before the discard it cannot prevent.
+      await salvageWorktree(main, path, branch);
       await discardWorktree(main, path, branch);
     } else if (existsSync(path)) {
       rmSync(path, { recursive: true, force: true });

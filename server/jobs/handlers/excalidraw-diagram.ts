@@ -8,6 +8,7 @@ import { logger } from "../../mcp/logger.ts";
 import { hydrateExcalidrawSkeleton } from "../../lib/excalidraw-hydrate.ts";
 import type { ProgressSink } from "../store.ts";
 import { parseParams } from "./util.ts";
+import { loadSkillFile, unwrap } from "../../lib/worker-io.ts";
 
 // ── Input schema ──────────────────────────────────────────────────────────────
 
@@ -84,10 +85,7 @@ type WorkerOutput = z.infer<typeof WORKER_OUTPUT>;
 
 async function loadSkillPrompt(): Promise<string> {
   const skillPath = join(import.meta.dir, "../../skills/excalidraw-diagram.md");
-  if (!existsSync(skillPath)) {
-    throw new Error(`excalidraw-diagram skill prompt not found at ${skillPath}`);
-  }
-  return Bun.file(skillPath).text();
+  return loadSkillFile(skillPath, "excalidraw-diagram");
 }
 
 function buildPrompt(skill: string, userPrompt: string, existing: string | null): string {
@@ -113,6 +111,7 @@ function buildPrompt(skill: string, userPrompt: string, existing: string | null)
 export async function runExcalidrawDiagram(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
+  jobId?: string,
 ): Promise<ExcalidrawDiagramOutput> {
   const params = parseParams(EXCALIDRAW_DIAGRAM_INPUT, rawParams);
   const { prompt: userPrompt, outputPath } = params;
@@ -151,6 +150,7 @@ export async function runExcalidrawDiagram(
     cwd: parentDir,
     prompt,
     tool: "excalidraw-diagram",
+    jobId,
     route: routeFor("excalidraw"),
     jsonSchema: WORKER_JSON_SCHEMA,
     maxTurns: 40,
@@ -161,11 +161,7 @@ export async function runExcalidrawDiagram(
     onActivity: onProgress,
   });
 
-  if (!result.ok || !result.data) {
-    throw new Error(result.error ?? "excalidraw_diagram worker produced no result");
-  }
-
-  const { elements, rationale } = result.data;
+  const { elements, rationale } = unwrap(result, "excalidraw_diagram worker");
   const hydrated = await hydrateExcalidrawSkeleton({ skeleton: elements });
   const bytes = JSON.stringify(hydrated.file, null, 2);
   await writeFile(outputPath, bytes, "utf-8");
