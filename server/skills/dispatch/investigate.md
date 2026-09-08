@@ -22,6 +22,15 @@ turns beats a slightly better-sourced one in twenty-five. If you genuinely canno
 emit the verdict you have with `confidence: "low"` — that is a useful result, and running
 out of turns is not.
 
+## Naming a secret, ref, or host in your verdict
+
+If the answer involves a 1Password reference, an environment key, or a tailnet host, name
+it as the **bare item/key name and its vault, as separate words** — e.g. "the item
+db-password in vault mini" — never a literal `op://vault/item/field` URI, a resolved
+secret value, or a raw tailnet IP. The scan every verdict passes through before it leaves
+this machine is a fail-closed backstop, not a courtesy check: phrasing a correct answer so
+it trips that backstop throws the answer away, it does not just reformat it.
+
 ## Output shape
 
 Return ONLY a JSON object with this exact structure (no explanation, no markdown, just

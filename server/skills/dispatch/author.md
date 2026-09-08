@@ -35,6 +35,16 @@ legitimate and useful outcome: set `nextAction` to `none` or `human`, explain wh
 `verdict`, and leave `issueTitle`/`issueBody` empty strings. An issue filed to look
 productive is worse than no issue, because someone has to triage it.
 
+## Naming a secret, ref, or host in your verdict or issue
+
+If the answer involves a 1Password reference, an environment key, or a tailnet host — in
+`verdict` or in the issue you write — name it as the **bare item/key name and its vault, as
+separate words** — e.g. "the item db-password in vault mini" — never a literal
+`op://vault/item/field` URI, a resolved secret value, or a raw tailnet IP. The same
+fail-closed scanner runs on the issue body before it is published: a match there refuses to
+file it at all, so phrasing a correct finding in a form that trips the scanner costs you the
+issue, not just its wording.
+
 ## Output shape
 
 Return ONLY a JSON object with this exact structure (no explanation, no markdown, just
