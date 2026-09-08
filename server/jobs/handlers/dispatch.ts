@@ -23,9 +23,11 @@ import {
   resolveRepoIdentity,
   restoreStrippedSettings,
   salvageWorktree,
+  scanForSecrets,
   slugify,
   stripProjectSettings,
   summarizeDiff,
+  writeWithheldVerdict,
   type DispatchWorktree,
   type RepoIdentity,
 } from "./dispatch-git.ts";
@@ -93,6 +95,17 @@ export const DISPATCH_INPUT = z.object({
     .describe(
       "Optional model override, e.g. 'claude-opus-5[1m]'. Defaults to the sonnet worker " +
         "tier; only override on explicit request, it spends Max quota.",
+    ),
+  sensitive: z
+    .boolean()
+    .default(false)
+    .describe(
+      "Set true when `cwd` is a secret-bearing repo (e.g. dotfiles-private, homelab-private). " +
+        "Only valid with tier 'investigate' — any other tier is refused before a worktree is " +
+        "created, since a filed issue or pushed branch has no safe artifact path there. The " +
+        "returned verdict is scanned before it leaves the machine; a match withholds " +
+        "summary/verdict/evidence behind a notice and keeps the full text in a local, " +
+        "owner-only file instead.",
     ),
 });
 
@@ -388,6 +401,137 @@ export function artifactText(
   return { title: t, body: b };
 }
 
+// ── Sensitive dispatch — verdict scan on the way out ────────────────────────────
+//
+// `sensitive` opens `investigate` for secret-bearing repos (dotfiles-private,
+// homelab-private) on the condition that the verdict is scanned before it leaves the
+// machine. `readOnly: true` removes Edit/Write but NOT Bash, and the brief that seeded the
+// episode is attacker-influenced text — so the read-only permission profile alone was never
+// the boundary here; this scan is.
+
+/** Refuse a `sensitive` episode outright unless it is `investigate`. A writable episode
+ *  (`implement`) or one that files a durable artifact (`author`) has no safe path in a
+ *  secret-bearing repo: a pushed branch or a filed issue is exactly the kind of durable,
+ *  possibly-world-readable artifact `assertNoSecrets` already refuses to publish, and there
+ *  is no equivalent "withhold and keep locally" move for something that already left via
+ *  GitHub. Refuses rather than silently downgrading the tier — a caller that asked for
+ *  `implement` and got `investigate` back would read the (very different) result as an
+ *  answer to the request it made. */
+export function assertSensitiveTierAllowed(tier: DispatchTier, sensitive: boolean): void {
+  if (sensitive && tier !== "investigate") {
+    throw new Error(
+      `sensitive dispatch refused: tier '${tier}' has no safe artifact path in a ` +
+        `secret-bearing repo — a filed issue or a pushed branch is a durable, possibly ` +
+        `public artifact with no local-withhold equivalent. Use tier 'investigate'.`,
+    );
+  }
+}
+
+/** `sensitive` episodes must never reach a GitHub call path. `assertSensitiveTierAllowed`
+ *  already refuses any non-investigate tier before a worktree exists, so in normal operation
+ *  this never fires — it exists so a future change to `TIERS` or the switch in `runDispatch`
+ *  cannot silently reopen `resolveRepoIdentity`/`openIssue`/`openPullRequest` for a sensitive
+ *  episode without a loud, checked failure. */
+function assertNoGithubForSensitive(sensitive: boolean, where: string): void {
+  if (sensitive) {
+    throw new Error(`internal: a sensitive dispatch must never reach ${where}`);
+  }
+}
+
+/** Every free-text field of the verdict that reaches the caller. `confidence` and
+ *  `nextAction` are fixed enum values, not text the worker composes, so they are not part of
+ *  the scan surface. By the time this runs, any `artifactNote` the handler appended is
+ *  already folded into `verdict` (see the return statement in `runDispatch`), so it needs no
+ *  separate entry here. */
+function sensitiveScanText(output: DispatchOutput): string {
+  return [
+    output.summary,
+    output.verdict,
+    output.recommendation,
+    ...output.evidence.flatMap((e) => [e.file, e.detail]),
+  ]
+    .filter((s) => s.length > 0)
+    .join("\n");
+}
+
+/** The FULL, unmodified verdict, rendered for `writeWithheldVerdict`. */
+function verdictMarkdown(output: DispatchOutput, jobId: string, hits: string[]): string {
+  const evidence = output.evidence.length
+    ? output.evidence.map((e) => `- **${e.file}**: ${e.detail}`).join("\n")
+    : "(none)";
+  return [
+    `# Withheld dispatch verdict — job ${jobId}`,
+    "",
+    `Matched pattern(s): ${hits.join(", ")}`,
+    "",
+    "## Summary",
+    output.summary,
+    "",
+    "## Verdict",
+    output.verdict,
+    "",
+    "## Confidence",
+    output.confidence,
+    "",
+    "## Evidence",
+    evidence,
+    "",
+    "## Recommendation",
+    output.recommendation,
+    "",
+    "## Next action",
+    output.nextAction,
+    "",
+  ].join("\n");
+}
+
+/**
+ * Scan a `sensitive` episode's verdict before it reaches the caller. A clean verdict (the
+ * common case) is returned byte-identical — no allocation beyond the scan itself. A match
+ * withholds the verdict behind a notice and keeps the full text local.
+ *
+ * Deliberately NOT the scanner's usual refuse-don't-redact stance (`assertNoSecrets` in
+ * dispatch-git.ts, guarding issue/PR bodies). A refusal there loses nothing recoverable — the
+ * source material is still there to re-dispatch against. A refusal here would destroy the
+ * only artifact of a read-only investigation the caller asked for, and there is no narrower
+ * re-run that recovers the same finding. So the full text is never lost, only kept off the
+ * wire: `writeWithheldVerdict` persists it to an owner-only file and this function returns a
+ * sanitized stand-in naming exactly where.
+ */
+export function applySensitiveScan(
+  output: DispatchOutput,
+  ctx: { sensitive: boolean; jobId: string; project: string },
+): DispatchOutput {
+  if (!ctx.sensitive) return output;
+  const hits = scanForSecrets(sensitiveScanText(output));
+  if (hits.length === 0) return output;
+
+  const path = writeWithheldVerdict(ctx.jobId, verdictMarkdown(output, ctx.jobId, hits));
+  logger.warn(
+    {
+      event: "dispatch.verdict_withheld",
+      tool: "dispatch",
+      project: ctx.project,
+      jobId: ctx.jobId,
+      matched: hits,
+      path,
+    },
+    "sensitive dispatch verdict matched the secret scanner — withheld, full text kept locally",
+  );
+
+  const notice =
+    `Verdict withheld: matched ${hits.join(", ")}. The full, unmodified text was saved ` +
+    `locally at ${path} (owner-only, mode 0600) — it never left this machine.`;
+  return {
+    ...output,
+    summary: excerpt(notice, 200),
+    verdict: excerpt(notice, 4000),
+    recommendation: excerpt(`Review the withheld file directly: ${path}`, 2000),
+    evidence: [],
+    nextAction: "human",
+  };
+}
+
 // ── Core ───────────────────────────────────────────────────────────────────────
 
 /** Run one dispatch episode and return its verdict. Throws on failure — the store turns a
@@ -397,11 +541,14 @@ export async function runDispatch(
   onProgress?: ProgressSink,
   jobId?: string,
 ): Promise<DispatchOutput> {
-  const { cwd, brief, tier, context, model } = parseParams(DISPATCH_INPUT, rawParams);
+  const { cwd, brief, tier, context, model, sensitive } = parseParams(DISPATCH_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
   if (!existsSync(join(cwd, ".git"))) {
     throw new Error(`Not a git repository (no .git): ${cwd}`);
   }
+  // Checked before anything else — no worktree, no session, no GitHub identity lookup — so a
+  // refused combination costs nothing beyond validating the input.
+  assertSensitiveTierAllowed(tier, sensitive);
 
   const startMs = performance.now();
   const profile = TIERS[tier];
@@ -430,6 +577,7 @@ export async function runDispatch(
   // GitHub, and the worktree has to be cut from the authoritative default branch.
   let identity: RepoIdentity | undefined;
   if (tier !== "investigate") {
+    assertNoGithubForSensitive(sensitive, "resolveRepoIdentity");
     identity = await resolveRepoIdentity(cwd);
   }
 
@@ -532,13 +680,21 @@ export async function runDispatch(
     // to a serialization failure is strictly worse than handing back a flagged salvage
     // wrapper that carries the raw text.
     if (!result.ok || !result.data) {
-      return await salvage(
-        result,
-        firstRawText,
-        { cwd, tier, brief, startMs },
-        worktree,
-        identity,
-        note,
+      // Scanned like the success path, and for a stronger reason: the salvage wrapper carries
+      // up to 3000 chars of RAW, never-validated worker text. A serialization failure inside a
+      // secret-bearing repo is exactly when that text is most likely to be an unstructured
+      // dump, so leaving this branch unscanned would have made `sensitive` a guarantee that
+      // held only while the worker behaved.
+      return applySensitiveScan(
+        await salvage(
+          result,
+          firstRawText,
+          { cwd, tier, brief, startMs },
+          worktree,
+          identity,
+          note,
+        ),
+        { sensitive, jobId: jobKey, project: cwd },
       );
     }
 
@@ -565,6 +721,7 @@ export async function runDispatch(
         // tier above, and if that ever stops being true the episode must fail loudly here
         // instead of silently returning a verdict whose issue was never filed.
         if (!identity) throw new Error("internal: repo identity missing for the author tier");
+        assertNoGithubForSensitive(sensitive, "openIssue");
         note("filing issue");
         try {
           artifactUrl = await openIssue(identity, {
@@ -587,6 +744,7 @@ export async function runDispatch(
         if (!identity || !worktree) {
           throw new Error("internal: repo identity or worktree missing for the implement tier");
         }
+        assertNoGithubForSensitive(sensitive, "openPullRequest");
         const outcome = await depositBranch(worktree, identity, data, brief, note);
         artifactUrl = outcome.artifactUrl;
         branch = outcome.branch;
@@ -612,12 +770,13 @@ export async function runDispatch(
       },
       "dispatch done",
     );
-    return {
+    const finalOutput: DispatchOutput = {
       ...data,
       ...(artifactUrl ? { artifactUrl } : {}),
       ...(branch ? { branch } : {}),
       ...(artifactNote ? { verdict: data.verdict + artifactNote } : {}),
     };
+    return applySensitiveScan(finalOutput, { sensitive, jobId: jobKey, project: cwd });
   } catch (err) {
     // A throw here (unlike a deliberate refusal or a fully-salvaged serialization failure,
     // neither of which throws) means the episode's fate was never resolved — the same "died

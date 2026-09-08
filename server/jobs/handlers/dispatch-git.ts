@@ -8,6 +8,7 @@ import {
   rmSync,
   lstatSync,
   statSync,
+  writeFileSync,
 } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
@@ -110,6 +111,14 @@ function assertNoSecrets(text: string, what: string): void {
   }
 }
 
+/** Base of every sideclaw state directory that must outlive a process restart and must never
+ *  live in `/tmp` (macOS sweeps untouched `/tmp` files after 3+ days — the same reasoning as
+ *  the logs). Worktrees, salvage bundles and verdicts withheld by the sensitive-dispatch
+ *  secret scan (`writeWithheldVerdict`, below) all live under this one root. */
+function sideclawStateRoot(): string {
+  return join(homedir(), ".local", "state", "sideclaw");
+}
+
 /**
  * Worktrees live outside every repo, under sideclaw's own state dir. Inside the repo they
  * would show up in the live checkout's `git status` as an untracked directory, which is
@@ -122,10 +131,7 @@ function assertNoSecrets(text: string, what: string): void {
  * worktree. The env var is never set in production.
  */
 function worktreeRoot(): string {
-  return (
-    process.env.SIDECLAW_WORKTREE_ROOT ??
-    join(homedir(), ".local", "state", "sideclaw", "worktrees")
-  );
+  return process.env.SIDECLAW_WORKTREE_ROOT ?? join(sideclawStateRoot(), "worktrees");
 }
 
 /**
@@ -755,9 +761,43 @@ async function discardWorktree(cwd: string, path: string, branch: string): Promi
  *  sweeps untouched `/tmp` files after 3+ days (`.claude/rules/logs.md`), which is exactly the
  *  wrong lifetime for the one copy of a crashed episode's work. */
 function salvageRoot(): string {
+  return process.env.SIDECLAW_SALVAGE_ROOT ?? join(sideclawStateRoot(), "salvage");
+}
+
+/**
+ * Verdicts withheld by the sensitive-dispatch secret scan (see `dispatch.ts`'s
+ * `applySensitiveScan`) — same base as worktrees/salvage, its own env override for the test
+ * suite, never `/tmp` for the same reason as both.
+ */
+export function privateVerdictsRoot(): string {
   return (
-    process.env.SIDECLAW_SALVAGE_ROOT ?? join(homedir(), ".local", "state", "sideclaw", "salvage")
+    process.env.SIDECLAW_PRIVATE_VERDICTS_ROOT ?? join(sideclawStateRoot(), "private-verdicts")
   );
+}
+
+/**
+ * Persist the FULL, unmodified verdict for a `sensitive` dispatch episode whose output
+ * matched the secret scanner, before the sanitized stand-in replaces it in what the caller
+ * receives.
+ *
+ * This is the one place sideclaw deliberately writes text that may carry a live credential to
+ * disk, so filesystem permissions are the actual boundary here, not a convention: the
+ * directory is created `0700` and the file `0600` — owner-only, every time, since `mkdirSync`
+ * only applies `mode` to directories it creates and this call always creates a fresh,
+ * uniquely-named file (one per job id).
+ *
+ * Refusing here — the scanner's usual stance for an issue/PR body — was considered and
+ * rejected: this is the only artifact of a read-only investigation the caller asked for, and
+ * throwing it away recovers nothing. An issue/PR refusal loses nothing recoverable (re-running
+ * with a narrower brief is cheap); a withheld investigate verdict has no narrower re-run that
+ * doesn't just repeat the same finding. So the full text is kept, just not put on the wire.
+ */
+export function writeWithheldVerdict(jobId: string, markdown: string): string {
+  const root = privateVerdictsRoot();
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const path = join(root, `${jobId}.md`);
+  writeFileSync(path, markdown, { mode: 0o600 });
+  return path;
 }
 
 /** Retention, mirroring `store.ts`'s `PRUNE_TTL_MS`/`MAX_TERMINAL_ROWS`: age first, then a

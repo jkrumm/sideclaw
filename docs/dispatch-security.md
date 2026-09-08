@@ -12,6 +12,64 @@ issue), `implement` (write → verdict + branch + **draft** PR). Prompts are
 `skills/dispatch/_common.md` + one tier file; the shared injection-hardening
 preamble lives in `_common.md` precisely so three copies cannot drift apart.
 
+## Sensitive dispatch — opening secret-bearing repos at `investigate` only
+
+`dotfiles-private` and `homelab-private` carry live credentials and were
+previously denied to `dispatch` outright, which meant no agent could answer a
+Tailscale-ACL or secrets-refs question by actually reading the repo. The
+`sensitive: true` input opens exactly one door: `investigate` in those repos,
+on the condition that the verdict is scanned before it leaves the machine —
+the scanner reused is the same `scanForSecrets`/`SECRET_PATTERNS` that already
+guard issue bodies, PR bodies and `implement`'s added diff lines
+(`dispatch-git.ts`), now also applied to the object the handler returns to
+the caller.
+
+- **The tier coupling is enforced, not advisory.** `assertSensitiveTierAllowed`
+  (`dispatch.ts`) refuses `sensitive: true` with any tier but `investigate`
+  BEFORE a worktree is created — a writable or issue-filing episode in a
+  secret-bearing repo has no safe artifact path, so this refuses rather than
+  silently downgrading the tier the caller asked for.
+- **The GitHub call paths are a checked invariant, not an incidental one.**
+  `assertNoGithubForSensitive` guards `resolveRepoIdentity`, `openIssue` and
+  the `implement` branch's `openPullRequest` path — all three are already
+  unreachable for `investigate` today, but the guard exists so a future
+  change to `TIERS` or the tier switch in `runDispatch` cannot silently
+  reopen one of them for a sensitive episode without a loud failure.
+- **Both return paths are scanned — the validated verdict and the salvage
+  wrapper.** `applySensitiveScan` scans the concatenation of every free-text
+  field the worker composes — `summary`, `verdict`, `recommendation`, and each
+  `evidence[]` entry's `file`/`detail` (an `artifactNote` the handler might
+  append is already folded into `verdict` by the time this runs, so it needs
+  no separate entry; `confidence`/`nextAction` are fixed enum values, not
+  worker-composed text). A clean verdict — the common case — returns
+  byte-identical. It also wraps `salvage()`'s early return, which is the
+  stronger case: that wrapper embeds up to 3000 chars of **raw,
+  never-validated** worker text, and a serialization failure inside a
+  secret-bearing repo is precisely when that text is an unstructured dump.
+  Scanning only the happy path would have made `sensitive` a guarantee that
+  held while the worker behaved and lapsed when it did not.
+- **A match withholds, never redacts.** `summary`/`verdict` are replaced with
+  a notice naming the matched pattern(s) and the absolute path of the
+  withheld file; `evidence` is emptied; `confidence` is preserved;
+  `nextAction` is forced to `"human"`. The full, unmodified verdict is
+  written to `~/.local/state/sideclaw/private-verdicts/<jobId>.md`
+  (`writeWithheldVerdict`, `dispatch-git.ts`) — directory `0700`, file
+  `0600`, same state root as worktrees and salvage bundles
+  (`sideclawStateRoot`), each with its own env override for the test suite.
+  Logged at `warn` (`dispatch.verdict_withheld`).
+- **This is deliberately not the scanner's usual refuse-don't-redact stance.**
+  `assertNoSecrets` refuses to publish an issue/PR body that matches, and
+  that refusal loses nothing recoverable — the source material is still
+  there to re-dispatch against. A refusal here would instead destroy the
+  only artifact of a read-only investigation the caller asked for, with no
+  narrower re-run that recovers the same finding. So the full text is never
+  lost, only kept off the wire.
+- **`readOnly: true` is not the whole boundary.** It removes Edit/Write but
+  not `Bash`, and the brief that seeds the episode is attacker-influenced
+  text — so for a sensitive episode this scan is the actual boundary, not a
+  courtesy check on top of the permission profile. Restricting `Bash` itself
+  is a separate, larger decision, out of scope here.
+
 ## Worktree isolation
 
 - **EVERY tier runs in its own worktree**, torn down in the same `finally`. For
@@ -243,8 +301,9 @@ Every bound listed above is a regression test, across four files:
 settings strip, and worktree salvage — clean → no file, dirty/unpushed →
 bundle, already-pushed → no file, a failing salvage never blocking teardown),
 `dispatch-prompt` (the nonce fence, the verdict-serialization salvage rule,
-tier profiles, the worker schema) and `session-args` (the worker's CLI flag
-vector). Shape follows `hermes-agent/tests/*.py`: attack shapes blocked,
+tier profiles, the worker schema, the `sensitive` tier refusal and its
+verdict-withholding scan) and `session-args` (the worker's CLI flag vector).
+Shape follows `hermes-agent/tests/*.py`: attack shapes blocked,
 **real material allowed**, fuzzed.
 
 The second half is not padding — a scanner that refuses ordinary prose

@@ -272,6 +272,17 @@ context. One episode, one verdict, no steering (mid-run redirection is
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
 + GitHub issue), `implement` (write → verdict + branch + **draft** PR).
 
+**`sensitive: true`** opens `investigate` for secret-bearing repos
+(`dotfiles-private`, `homelab-private`) — refused outright at any other tier,
+before a worktree exists, since a filed issue or pushed branch has no safe
+artifact path there. The verdict is scanned (`assertSensitiveTierAllowed` +
+`applySensitiveScan`, `dispatch.ts`) before it leaves the machine; a match
+withholds `summary`/`verdict`/`evidence` behind a notice and keeps the full
+text in an owner-only `~/.local/state/sideclaw/private-verdicts/<jobId>.md`
+(mode `0600`) instead. `readOnly: true` removes Edit/Write but **not**
+`Bash`, and the brief is attacker-influenced — this scan is the actual
+boundary for a sensitive episode, not the permission profile.
+
 **Invariants** (full rationale + the mutation-verified test suite in
 `docs/dispatch-security.md`):
 - Every tier runs in its own worktree, torn down in a `finally`; read tiers

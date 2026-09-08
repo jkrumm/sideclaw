@@ -21,6 +21,12 @@ process.env.SIDECLAW_WORKTREE_ROOT ??= mkdtempSync(join(tmpdir(), "sideclaw-test
 // this further to their own temp dir; this is the backstop for a test that forgets.
 process.env.SIDECLAW_SALVAGE_ROOT ??= mkdtempSync(join(tmpdir(), "sideclaw-test-salvage-"));
 
+// Same reasoning, for verdicts a `sensitive` dispatch withholds: a test process must never
+// write into the real ~/.local/state/sideclaw/private-verdicts/.
+process.env.SIDECLAW_PRIVATE_VERDICTS_ROOT ??= mkdtempSync(
+  join(tmpdir(), "sideclaw-test-private-verdicts-"),
+);
+
 // The job store opens its sqlite file at import, and the agents/overview suites import it
 // transitively — without this every test run reads (and prunes) the live server's queue.
 process.env.SIDECLAW_JOBS_DB ??= join(
