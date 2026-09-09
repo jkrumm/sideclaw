@@ -183,10 +183,67 @@ const PR_FIELDS = {
   prBody: z.string().max(60000).describe('PR body (markdown), or "" if nothing was changed.'),
 };
 
+// A consumer (today: warden, in another repo) pins this number and treats a mismatch as a
+// loud refusal rather than a best-effort parse — the failure this exists to design out is a
+// consumer silently ignoring a verdict whose shape moved under it. Bump it in this file
+// whenever a field's meaning or presence on DISPATCH_OUTPUT changes.
+export const DISPATCH_SCHEMA_VERSION = 1;
+
+/** Machine-readable classification of how this episode ended — the eleven ways `runDispatch`
+ *  can return, so a consumer never has to substring-match `artifactNote`'s prose to tell them
+ *  apart. Two ordering rules a consumer should know: `withheld` overwrites whatever this would
+ *  otherwise have been (the real verdict was scanned out, so no tier-specific outcome is
+ *  trustworthy either), and `salvaged` never coexists with a tier outcome — a salvaged run
+ *  never reached the tier-specific logic that would have set one.
+ *
+ *  - verdict_only   investigate: always — no artifact tier exists for it.
+ *  - issue_declined author: the episode concluded nothing was worth tracking, no issue filed.
+ *  - issue_failed   author: `openIssue` threw (secret-scan refusal, missing token scope).
+ *  - issue_filed    author: filed OK, `artifactUrl` set.
+ *  - no_changes     implement: the episode changed nothing (0 commits).
+ *  - diff_refused   implement: branch discarded — too large, a workflow diff, or a secret match.
+ *  - branch_no_pr   implement: pushed, but the worker authored no PR text.
+ *  - pr_failed      implement: pushed, but opening the pull request threw.
+ *  - pr_opened      implement: full success — `artifactUrl` + `branch` both set.
+ *  - salvaged       any tier: a serialization failure retried into a degraded verdict.
+ *  - withheld       any tier: the secret scanner matched and replaced the verdict text.
+ */
+export const DISPATCH_OUTCOMES = [
+  "verdict_only",
+  "issue_declined",
+  "issue_failed",
+  "issue_filed",
+  "no_changes",
+  "diff_refused",
+  "branch_no_pr",
+  "pr_failed",
+  "pr_opened",
+  "salvaged",
+  "withheld",
+] as const;
+
+export type DispatchOutcome = (typeof DISPATCH_OUTCOMES)[number];
+
 export const DISPATCH_OUTPUT = z.strictObject({
   ...VERDICT_FIELDS,
   ...ISSUE_FIELDS,
   ...PR_FIELDS,
+  // Set by the HANDLER, never by the worker — required on every return path, including
+  // salvage and withheld. See the DISPATCH_OUTCOMES doc comment above for the values and the
+  // two ordering rules.
+  outcome: z
+    .enum(DISPATCH_OUTCOMES)
+    .describe(
+      "Typed classification of how the episode ended — see the DISPATCH_OUTCOMES doc comment " +
+        "in dispatch.ts for what each value means. withheld and salvaged both override " +
+        "whatever a tier-specific outcome would otherwise have been.",
+    ),
+  schemaVersion: z
+    .literal(DISPATCH_SCHEMA_VERSION)
+    .describe(
+      "Version of this output shape. Pin this number; a mismatch means the shape moved under " +
+        "you and should be a loud refusal, not a best-effort parse.",
+    ),
   issueTitle: ISSUE_FIELDS.issueTitle.optional(),
   issueBody: ISSUE_FIELDS.issueBody.optional(),
   prTitle: PR_FIELDS.prTitle.optional(),
@@ -540,6 +597,10 @@ export function applySensitiveScan(
     recommendation: excerpt(`Review the withheld file directly: ${path}`, 2000),
     evidence: [],
     nextAction: "human",
+    // Wins over whatever the tier-specific (or salvaged) outcome was: the real verdict just
+    // got scanned out, so telling the caller it was e.g. `pr_opened` would be a lie about
+    // what actually reached them.
+    outcome: "withheld",
   };
 }
 
@@ -724,6 +785,11 @@ export async function runDispatch(
     let artifactUrl: string | undefined;
     let branch: string | undefined;
     let artifactNote = "";
+    // Default covers `investigate`, which sets nothing else — the switch below overwrites it
+    // for `author`/`implement`. Initialized rather than left to the switch's exhaustiveness
+    // check alone, so a future tier added to DispatchTier without a matching case here fails
+    // typecheck on the field, not on a "used before assigned" surprise.
+    let outcome: DispatchOutcome = "verdict_only";
 
     // A switch with an exhaustiveness check, not a pair of ifs: TIERS and WORKER_OUTPUT are
     // both `Record<DispatchTier, …>` and force a compile error when a tier is added, and the
@@ -737,6 +803,7 @@ export async function runDispatch(
         if (!text) {
           artifactNote =
             " No issue was filed: the episode concluded there was nothing worth tracking.";
+          outcome = "issue_declined";
           break;
         }
         // Re-asserted rather than assumed: `identity` is resolved for every non-investigate
@@ -750,6 +817,7 @@ export async function runDispatch(
             title: text.title,
             body: text.body + provenance(brief),
           });
+          outcome = "issue_filed";
         } catch (err) {
           // A refused publish (secret scan) or a missing token permission must not turn a
           // completed investigation into a failed job — the verdict is still worth having,
@@ -759,6 +827,7 @@ export async function runDispatch(
             "issue could not be filed",
           );
           artifactNote = ` No issue was filed: ${err instanceof Error ? err.message : String(err)}`;
+          outcome = "issue_failed";
         }
         break;
       }
@@ -767,10 +836,11 @@ export async function runDispatch(
           throw new Error("internal: repo identity or worktree missing for the implement tier");
         }
         assertNoGithubForSensitive(effectiveSensitive, "openPullRequest");
-        const outcome = await depositBranch(worktree, identity, data, brief, note);
-        artifactUrl = outcome.artifactUrl;
-        branch = outcome.branch;
-        artifactNote = outcome.note;
+        const deposit = await depositBranch(worktree, identity, data, brief, note);
+        artifactUrl = deposit.artifactUrl;
+        branch = deposit.branch;
+        artifactNote = deposit.note;
+        outcome = deposit.outcome;
         break;
       }
       default:
@@ -783,6 +853,7 @@ export async function runDispatch(
         tool: "dispatch",
         project: cwd,
         tier,
+        outcome,
         confidence: data.confidence,
         nextAction: data.nextAction,
         evidence: data.evidence.length,
@@ -794,6 +865,8 @@ export async function runDispatch(
     );
     const finalOutput: DispatchOutput = {
       ...data,
+      outcome,
+      schemaVersion: DISPATCH_SCHEMA_VERSION,
       ...(artifactUrl ? { artifactUrl } : {}),
       ...(branch ? { branch } : {}),
       ...(artifactNote ? { verdict: data.verdict + artifactNote } : {}),
@@ -831,20 +904,23 @@ export async function runDispatch(
 /** Commit, bound-check, push and open the draft PR. Returns what actually landed — a tier
  *  that legitimately changed nothing, and one whose diff was refused, are both successful
  *  runs with no artifact, and each says why in the verdict. */
-async function depositBranch(
+export async function depositBranch(
   worktree: DispatchWorktree,
   identity: RepoIdentity,
   data: DispatchOutput,
   brief: string,
   note: (s: string) => void,
-): Promise<{ artifactUrl?: string; branch?: string; note: string }> {
+): Promise<{ artifactUrl?: string; branch?: string; outcome: DispatchOutcome; note: string }> {
   const text = artifactText(data.prTitle, data.prBody);
   const subject = text?.title ?? `chore: dispatched change on ${worktree.branch}`;
 
   note("committing");
   await commitPendingWork(worktree, `${subject}\n\n${data.verdict}`);
   if ((await commitCount(worktree)) === 0) {
-    return { note: " No branch was pushed: the episode changed nothing." };
+    return {
+      outcome: "no_changes",
+      note: " No branch was pushed: the episode changed nothing.",
+    };
   }
 
   const diff = await summarizeDiff(worktree);
@@ -860,6 +936,7 @@ async function depositBranch(
       "dispatch diff refused",
     );
     return {
+      outcome: "diff_refused",
       note:
         ` The branch was DISCARDED and nothing was pushed: ${refusal}. The change is gone — ` +
         `re-dispatch with a narrower brief if it is still wanted.`,
@@ -875,6 +952,7 @@ async function depositBranch(
     // it; opening a PR with an invented title would misrepresent what the episode concluded.
     return {
       branch: worktree.branch,
+      outcome: "branch_no_pr",
       note:
         ` The branch was pushed but NO pull request was opened: the episode did not author ` +
         `one. Review the branch directly.`,
@@ -888,7 +966,7 @@ async function depositBranch(
       body: text.body + provenance(brief),
       head: worktree.branch,
     });
-    return { artifactUrl, branch: worktree.branch, note: "" };
+    return { artifactUrl, branch: worktree.branch, outcome: "pr_opened", note: "" };
   } catch (err) {
     // The branch is already on the remote at this point, and the worktree is about to be
     // torn down — so letting this throw would fail the job with no `branch` field and leave
@@ -902,6 +980,7 @@ async function depositBranch(
     );
     return {
       branch: worktree.branch,
+      outcome: "pr_failed",
       note:
         ` The branch was pushed but the pull request could NOT be opened: ` +
         `${err instanceof Error ? err.message : String(err)} Review the branch directly, or ` +
@@ -917,7 +996,7 @@ async function depositBranch(
  *  there is nothing truthful to put in one, and a PR body invented by the handler would
  *  claim a rationale nobody produced. A pushed `dispatch/…` branch costs nothing and is one
  *  command to delete, whereas discarding it throws away the entire run. */
-async function salvage(
+export async function salvage(
   result: SessionResult<DispatchOutput>,
   firstRawText: string | undefined,
   meta: { cwd: string; tier: DispatchTier; brief: string; startMs: number },
@@ -976,6 +1055,8 @@ async function salvage(
 
   return {
     degraded: true,
+    outcome: "salvaged",
+    schemaVersion: DISPATCH_SCHEMA_VERSION,
     ...(branch ? { branch } : {}),
     verdict:
       "The episode ran but did not return a structured verdict, twice. Its raw output is " +

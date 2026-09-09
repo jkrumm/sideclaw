@@ -12,6 +12,7 @@ import { kioskRoute } from "./routes/kiosk";
 import { agentsRoutes } from "./routes/agents";
 import { routingRoutes } from "./routes/routing";
 import { dispatchPolicyRoutes } from "./routes/dispatch-policy";
+import { dispatchSchemaRoutes } from "./routes/dispatch-schema";
 import { shutdownRoutes } from "./routes/shutdown";
 import { sweepStaleWorktrees } from "./jobs/handlers/dispatch-git.ts";
 import { jobsRoutes } from "./routes/jobs";
@@ -96,6 +97,7 @@ const app = new Elysia()
   .use(agentsRoutes)
   .use(routingRoutes)
   .use(dispatchPolicyRoutes)
+  .use(dispatchSchemaRoutes)
   .use(shutdownRoutes);
 
 // The filesystem half of startup recovery, and it has to finish before initJobStore below
