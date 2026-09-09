@@ -106,8 +106,18 @@ export class Fixture {
 
   cleanup(): void {
     rmSync(this.root, { recursive: true, force: true });
+    // `repo` sits under the shared SIDECLAW_DISPATCH_ROOTS test root, not under `this.root` —
+    // see the DISPATCH_ROOT comment above makeFixture.
+    rmSync(this.repo, { recursive: true, force: true });
   }
 }
+
+// `repo` (below) is created directly under this root, not under the fixture's own `root` —
+// server/lib/dispatch-policy.ts only admits a `cwd` that is a DIRECT child of a configured
+// dispatch root, and tests/setup.ts points SIDECLAW_DISPATCH_ROOTS here for exactly that
+// reason. `origin`/`worktrees`/`salvage` stay under the fixture's own root: nothing checks
+// the dispatch policy against them, only against the repo a dispatch actually runs in.
+const DISPATCH_ROOT = process.env.SIDECLAW_DISPATCH_ROOTS?.split(",")[0]?.trim() || tmpdir();
 
 /**
  * Build the fixture. `master` exists in both the checkout and origin, carrying one commit.
@@ -119,11 +129,10 @@ export class Fixture {
 export async function makeFixture(): Promise<Fixture> {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "sideclaw-dispatch-")));
   const origin = join(root, "origin.git");
-  const repo = join(root, "repo");
+  const repo = realpathSync(mkdtempSync(join(DISPATCH_ROOT, "repo-")));
   const worktrees = join(root, "worktrees");
   const salvage = join(root, "salvage");
   mkdirSync(origin);
-  mkdirSync(repo);
 
   await git(["init", "--bare", "-b", "master", "--quiet", "."], origin);
   await git(["init", "-b", "master", "--quiet", "."], repo);

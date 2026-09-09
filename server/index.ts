@@ -11,6 +11,7 @@ import { diagramsRoutes } from "./routes/diagrams";
 import { kioskRoute } from "./routes/kiosk";
 import { agentsRoutes } from "./routes/agents";
 import { routingRoutes } from "./routes/routing";
+import { dispatchPolicyRoutes } from "./routes/dispatch-policy";
 import { shutdownRoutes } from "./routes/shutdown";
 import { sweepStaleWorktrees } from "./jobs/handlers/dispatch-git.ts";
 import { jobsRoutes } from "./routes/jobs";
@@ -26,6 +27,7 @@ import { pushOverviewToArgo } from "./lib/argo-push.ts";
 import { activeSessionCount, terminateActiveSessions } from "./mcp/session-runner.ts";
 import { setProcessKind } from "./lib/process-context.ts";
 import { logRoutingOverrides, logStaleQuotaEnvVars } from "./lib/routing.ts";
+import { logDispatchPolicy } from "./lib/dispatch-policy.ts";
 import {
   createShutdownController,
   httpShutdownParams,
@@ -42,6 +44,7 @@ import {
 setProcessKind("app");
 logRoutingOverrides(logger);
 logStaleQuotaEnvVars(logger);
+logDispatchPolicy(logger);
 
 const isDev = !existsSync("dist/index.html");
 const indexHtml = isDev ? null : readFileSync("dist/index.html", "utf-8");
@@ -92,6 +95,7 @@ const app = new Elysia()
   .use(jobsRoutes)
   .use(agentsRoutes)
   .use(routingRoutes)
+  .use(dispatchPolicyRoutes)
   .use(shutdownRoutes);
 
 // The filesystem half of startup recovery, and it has to finish before initJobStore below

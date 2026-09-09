@@ -1,7 +1,7 @@
 // Preloaded before every test module (bunfig.toml → [test].preload), so both of these are
 // in place before dispatch-git.ts is imported by anything.
 
-import { mkdtempSync } from "fs";
+import { mkdtempSync, realpathSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
@@ -25,6 +25,19 @@ process.env.SIDECLAW_SALVAGE_ROOT ??= mkdtempSync(join(tmpdir(), "sideclaw-test-
 // write into the real ~/.local/state/sideclaw/private-verdicts/.
 process.env.SIDECLAW_PRIVATE_VERDICTS_ROOT ??= mkdtempSync(
   join(tmpdir(), "sideclaw-test-private-verdicts-"),
+);
+
+// server/lib/dispatch-policy.ts builds its POLICY singleton once at module load (mirroring
+// routing.ts's TABLE), so this has to land before that module is ever imported — this file's
+// preload guarantee, same as the roots above. A fixture's `repo` (tests/git-fixture.ts) lives
+// directly under this root so a test that calls `runDispatch` against it resolves as a real
+// dispatch target instead of being refused for sitting outside every configured root — real
+// repos on this machine live under PERSONAL_REPOS_PATH/WORK_REPOS_PATH, never under $TMPDIR.
+// realpath'd because resolveDispatchTarget canonicalizes an existing `cwd`, and on macOS
+// $TMPDIR resolves through a /var -> /private/var symlink that would otherwise make every
+// fixture repo look like it sits outside this very root.
+process.env.SIDECLAW_DISPATCH_ROOTS ??= realpathSync(
+  mkdtempSync(join(tmpdir(), "sideclaw-test-dispatch-root-")),
 );
 
 // The job store opens its sqlite file at import, and the agents/overview suites import it

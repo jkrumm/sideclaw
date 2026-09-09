@@ -272,10 +272,13 @@ context. One episode, one verdict, no steering (mid-run redirection is
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
 + GitHub issue), `implement` (write → verdict + branch + **draft** PR).
 
-**`sensitive: true`** opens `investigate` for secret-bearing repos
-(`dotfiles-private`, `homelab-private`) — refused outright at any other tier,
-before a worktree exists, since a filed issue or pushed branch has no safe
-artifact path there. The verdict is scanned (`assertSensitiveTierAllowed` +
+**`sensitive`** opens `investigate` for secret-bearing repos (`dotfiles-private`,
+`homelab-private`) — refused outright at any other tier, before a worktree
+exists, since a filed issue or pushed branch has no safe artifact path there.
+sideclaw derives sensitivity itself from the repo policy below and ORs it with
+whatever the caller still declares — a caller may opt a policy-neutral repo
+into the scan, but can no longer opt a policy-marked one out of it by omitting
+the field. The verdict is scanned (`assertSensitiveTierAllowed` +
 `applySensitiveScan`, `dispatch.ts`) before it leaves the machine; a match
 withholds `summary`/`verdict`/`evidence` behind a notice and keeps the full
 text in an owner-only `~/.local/state/sideclaw/private-verdicts/<jobId>.md`
@@ -285,6 +288,17 @@ boundary for a sensitive episode, not the permission profile.
 
 **Invariants** (full rationale + the mutation-verified test suite in
 `docs/dispatch-security.md`):
+- **Repo policy** (`server/lib/dispatch-policy.ts`, `GET /api/dispatch-policy`)
+  gates every submission before it costs anything: `cwd` must resolve to a
+  repo directly under a configured root, at or under that repo's tier
+  ceiling. `sideclaw`/`warden` are pinned to `investigate` and cannot be
+  overridden by env; `SIDECLAW_DISPATCH_CEILINGS`/`_SENSITIVE` can only
+  narrow, never widen, any other repo's rule (marking a repo sensitive
+  clamps its ceiling with it). **`SIDECLAW_DISPATCH_ROOTS` is the exception
+  — it REPLACES the roots rather than narrowing them**, so a new tree there
+  is dispatch-reachable at the permissive default. Checked in both
+  `server/routes/jobs.ts` (at submit) and `runDispatch` (belt and suspenders
+  for a direct caller) — it is a policy boundary on repo/tier, not a sandbox.
 - Every tier runs in its own worktree, torn down in a `finally`; read tiers
   even in a repo with no working origin, since it's a detached copy of HEAD.
 - Read tiers also materialize untracked/gitignored files (bounded, symlinks

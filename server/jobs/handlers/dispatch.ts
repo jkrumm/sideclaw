@@ -7,6 +7,11 @@ import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
 import { routeFor } from "../../lib/routing.ts";
+import {
+  DEFAULT_DISPATCH_TIER,
+  DISPATCH_TIERS,
+  resolveDispatchTarget,
+} from "../../lib/dispatch-policy.ts";
 import { dataBlock, endOfData, fencePreamble, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { loadSkillFile } from "../../lib/worker-io.ts";
 import {
@@ -59,9 +64,13 @@ export const DISPATCH_INPUT = z.object({
   cwd: z
     .string()
     .describe(
-      "Absolute path to the git repo root the episode runs inside. Must exist. The " +
-        "session picks up this repo's CLAUDE.md, .claude/rules/ and .claude/skills/ — " +
-        "that context is the point of dispatching rather than answering in place.",
+      "Absolute path to the git repo root the episode runs inside. Must exist, and must be " +
+        "a repo directly under a configured dispatch root — the repo policy also caps which " +
+        "tier is allowed there, so a submission outside a root or above a repo's ceiling is " +
+        "refused with 'dispatch refused: ...' rather than run. GET /api/dispatch-policy is " +
+        "the effective table. The session picks up this repo's CLAUDE.md, .claude/rules/ and " +
+        ".claude/skills/ — that context is the point of dispatching rather than answering in " +
+        "place.",
     ),
   brief: z
     .string()
@@ -73,8 +82,8 @@ export const DISPATCH_INPUT = z.object({
         "red at 14:20, why' beats 'check X'.",
     ),
   tier: z
-    .enum(["investigate", "author", "implement"])
-    .default("investigate")
+    .enum(DISPATCH_TIERS)
+    .default(DEFAULT_DISPATCH_TIER)
     .describe(
       "Permission profile. 'investigate' = read-only, returns a verdict. 'author' = " +
         "read-only, additionally files a GitHub issue. 'implement' = writes code in an " +
@@ -110,7 +119,9 @@ export const DISPATCH_INPUT = z.object({
 });
 
 export type DispatchParams = z.infer<typeof DISPATCH_INPUT>;
-export type DispatchTier = DispatchParams["tier"];
+// Re-exported, not redeclared — server/lib/dispatch-policy.ts owns the list, and this file's
+// zod enum is built from it above. Existing importers of DispatchTier from here are unchanged.
+export type { DispatchTier } from "../../lib/dispatch-policy.ts";
 
 // ── Output schema — single source of truth ────────────────────────────────────
 //
@@ -542,13 +553,24 @@ export async function runDispatch(
   jobId?: string,
 ): Promise<DispatchOutput> {
   const { cwd, brief, tier, context, model, sensitive } = parseParams(DISPATCH_INPUT, rawParams);
+  // Checked before the filesystem checks below — the repo policy (server/lib/dispatch-policy.ts)
+  // is the boundary on which repo and which tier this handler may run at all, so a refused
+  // combination costs nothing beyond validating the input and reveals nothing about the local
+  // tree. server/routes/jobs.ts runs the same check at submit; this copy stays because a
+  // direct call (the MCP client, a future submitter) must not be able to skip it.
+  const decision = resolveDispatchTarget({ cwd, tier });
+  if (!decision.ok) throw new Error(`dispatch refused: ${decision.reason}`);
+  // The policy's own sensitivity call for this repo, ORed with whatever the caller still
+  // declares — a caller MAY opt a repo the policy does not mark into the scan, but can never
+  // opt one the policy does mark OUT of it by simply omitting the field.
+  const effectiveSensitive = decision.sensitive || sensitive;
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
   if (!existsSync(join(cwd, ".git"))) {
     throw new Error(`Not a git repository (no .git): ${cwd}`);
   }
   // Checked before anything else — no worktree, no session, no GitHub identity lookup — so a
   // refused combination costs nothing beyond validating the input.
-  assertSensitiveTierAllowed(tier, sensitive);
+  assertSensitiveTierAllowed(tier, effectiveSensitive);
 
   const startMs = performance.now();
   const profile = TIERS[tier];
@@ -577,7 +599,7 @@ export async function runDispatch(
   // GitHub, and the worktree has to be cut from the authoritative default branch.
   let identity: RepoIdentity | undefined;
   if (tier !== "investigate") {
-    assertNoGithubForSensitive(sensitive, "resolveRepoIdentity");
+    assertNoGithubForSensitive(effectiveSensitive, "resolveRepoIdentity");
     identity = await resolveRepoIdentity(cwd);
   }
 
@@ -694,7 +716,7 @@ export async function runDispatch(
           identity,
           note,
         ),
-        { sensitive, jobId: jobKey, project: cwd },
+        { sensitive: effectiveSensitive, jobId: jobKey, project: cwd },
       );
     }
 
@@ -721,7 +743,7 @@ export async function runDispatch(
         // tier above, and if that ever stops being true the episode must fail loudly here
         // instead of silently returning a verdict whose issue was never filed.
         if (!identity) throw new Error("internal: repo identity missing for the author tier");
-        assertNoGithubForSensitive(sensitive, "openIssue");
+        assertNoGithubForSensitive(effectiveSensitive, "openIssue");
         note("filing issue");
         try {
           artifactUrl = await openIssue(identity, {
@@ -744,7 +766,7 @@ export async function runDispatch(
         if (!identity || !worktree) {
           throw new Error("internal: repo identity or worktree missing for the implement tier");
         }
-        assertNoGithubForSensitive(sensitive, "openPullRequest");
+        assertNoGithubForSensitive(effectiveSensitive, "openPullRequest");
         const outcome = await depositBranch(worktree, identity, data, brief, note);
         artifactUrl = outcome.artifactUrl;
         branch = outcome.branch;
@@ -776,7 +798,11 @@ export async function runDispatch(
       ...(branch ? { branch } : {}),
       ...(artifactNote ? { verdict: data.verdict + artifactNote } : {}),
     };
-    return applySensitiveScan(finalOutput, { sensitive, jobId: jobKey, project: cwd });
+    return applySensitiveScan(finalOutput, {
+      sensitive: effectiveSensitive,
+      jobId: jobKey,
+      project: cwd,
+    });
   } catch (err) {
     // A throw here (unlike a deliberate refusal or a fully-salvaged serialization failure,
     // neither of which throws) means the episode's fate was never resolved — the same "died
