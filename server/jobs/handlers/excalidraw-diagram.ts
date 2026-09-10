@@ -112,6 +112,7 @@ export async function runExcalidrawDiagram(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
   jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
 ): Promise<ExcalidrawDiagramOutput> {
   const params = parseParams(EXCALIDRAW_DIAGRAM_INPUT, rawParams);
   const { prompt: userPrompt, outputPath } = params;
@@ -151,6 +152,7 @@ export async function runExcalidrawDiagram(
     prompt,
     tool: "excalidraw-diagram",
     jobId,
+    isCancelled,
     route: routeFor("excalidraw"),
     jsonSchema: WORKER_JSON_SCHEMA,
     maxTurns: 40,

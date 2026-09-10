@@ -612,6 +612,7 @@ export async function runDispatch(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
   jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
 ): Promise<DispatchOutput> {
   const { cwd, brief, tier, context, model, sensitive } = parseParams(DISPATCH_INPUT, rawParams);
   // Checked before the filesystem checks below — the repo policy (server/lib/dispatch-policy.ts)
@@ -704,6 +705,7 @@ export async function runDispatch(
         prompt: p,
         tool: "dispatch",
         jobId,
+        isCancelled,
         route: routeFor("dispatch"),
         model,
         jsonSchema: z.toJSONSchema(WORKER_OUTPUT[tier]),

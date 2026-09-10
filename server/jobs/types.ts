@@ -34,13 +34,17 @@ export function isJobTool(value: string): value is JobTool {
 /**
  * Job lifecycle:
  *   pending → running → done | failed
+ *   pending → cancelled              (POST /api/jobs/:id/cancel: never ran)
+ *   running → cancelled              (POST /api/jobs/:id/cancel: worker SIGTERMed)
  *   running → pending                (restart recovery: check/overview/narrative/review, once)
  *   running → interrupted            (restart recovery: everything else, or a 2nd interruption)
  *
  * `pending` jobs are admitted but waiting for a concurrency slot. `interrupted`
  * is terminal and means the HTTP server restarted while the job was in flight —
  * the worker subprocess died with it, so the result is unrecoverable. See
- * `recoveryStatusFor` in store.ts for which tools get the one re-run.
+ * `recoveryStatusFor` in store.ts for which tools get the one re-run. `cancelled`
+ * is terminal and means a caller explicitly asked for it via `cancelJob` — it is
+ * never counted as a failure (`failedLastHour` in `jobHealth()` only counts `failed`).
  *
  * A `running` row whose worker was killed by a SIGTERM/SIGINT drain (`server/lib/shutdown.ts`)
  * is deliberately left at `running` rather than transitioned to `failed` — `execute()`'s catch
@@ -48,12 +52,18 @@ export function isJobTool(value: string): value is JobTool {
  * SIGTERMed (tracked via `markDrainKilled`, not merely "draining is true"), so the row reaches
  * the next boot exactly as if the process had crashed, and goes through the same
  * `pending`/`interrupted` reconciliation above instead of being counted as a real failure. A
- * genuinely unrelated failure landing in the same drain window still gets written `failed`.
+ * genuinely unrelated failure landing in the same drain window still gets written `failed`. A
+ * single-job cancel (`cancelJob`'s persisted `cancelRequestedAt`, distinct from `drainKilledIds`
+ * — see `JobRecord.cancelRequestedAt`) gets the analogous treatment: the same SIGTERM'd
+ * subprocess throwing is recognized as a deliberate cancel, not a real failure, and lands
+ * `cancelled` instead of `failed`. Persisted (not just in-process) so a server restart between
+ * the SIGTERM and `execute()`'s catch still lands the row `cancelled` on the next boot
+ * (`recover()`) instead of silently resuming a job an operator asked to stop.
  */
-export type JobStatus = "pending" | "running" | "done" | "failed" | "interrupted";
+export type JobStatus = "pending" | "running" | "done" | "failed" | "interrupted" | "cancelled";
 
 // Not exported — same reasoning as JOB_TOOLS above: `isTerminal` is the public surface.
-const TERMINAL_STATUSES: readonly JobStatus[] = ["done", "failed", "interrupted"];
+const TERMINAL_STATUSES: readonly JobStatus[] = ["done", "failed", "interrupted", "cancelled"];
 
 export function isTerminal(status: JobStatus): boolean {
   return (TERMINAL_STATUSES as readonly string[]).includes(status);
@@ -91,6 +101,16 @@ export interface JobRecord {
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
+  /**
+   * Set by `cancelJob` (`server/jobs/store.ts`) the instant a `POST /api/jobs/:id/cancel` is
+   * accepted for a `running` job, BEFORE the SIGTERM (`terminateSessionsForJob`) — persisted so
+   * the intent survives a server restart in the gap between that signal and `execute()`'s catch
+   * observing the killed worker's promise reject. `recover()` checks this on every `running` row
+   * at boot and lands it `cancelled` directly, bypassing `REQUEUE_ON_RECOVER`'s ordinary
+   * re-queue entirely — a cancel must never be silently resumed. Null otherwise; never cleared
+   * once set (even if the job wins the race and finishes normally — see `execute()`'s success
+   * path), so it stays a true historical record of "cancellation was asked for this job". */
+  cancelRequestedAt: number | null;
 }
 
 /** Public-facing view returned to MCP callers — adds derived elapsed + idle time. */
@@ -112,6 +132,13 @@ export interface JobView {
    * signal — the session may be stuck rather than working.
    */
   idleMs: number | null;
+  /**
+   * True once `cancelJob` has accepted a cancel for this job (derived from
+   * `JobRecord.cancelRequestedAt`, never a separate in-process flag) — set as soon as the
+   * request lands, whether or not the `cancelled` transition has landed yet. `undefined`
+   * (omitted) when no cancel was ever requested.
+   */
+  cancelRequested?: boolean;
 }
 
 export function toJobView(job: JobRecord): JobView {
@@ -133,5 +160,6 @@ export function toJobView(job: JobRecord): JobView {
     finishedAt: job.finishedAt,
     elapsedMs: Math.max(0, end - start),
     idleMs,
+    cancelRequested: job.cancelRequestedAt !== null ? true : undefined,
   };
 }

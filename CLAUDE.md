@@ -155,9 +155,18 @@ cap** (`SIDECLAW_JOB_CONCURRENCY`, default 3) queues excess submissions as
 limits — while draining, that queue backs up too, which `GET
 /api/jobs/health`'s `draining: true` flag distinguishes from a wedged queue.
 
+**`POST /api/jobs/:id/cancel`** cancels one job — `pending` lands `cancelled`
+immediately, `running` gets a best-effort SIGTERM (`terminateSessionsForJob`)
+and lands `cancelled` once the worker exits, never `failed` and never counted
+in `failedLastHour`; there is no MCP tool for this, only the HTTP route. The
+`cancelled` value is a widened enum on `job_status`/`job_wait`'s output schema
+too, so per the MCP-schema-change rule above, an already-connected client needs
+an `/mcp` reconnect (or session restart) before it can poll a cancelled job
+without its Zod validation silently stripping the field.
+
 Job lifecycle events log to `~/Library/Logs/sideclaw.jsonl` (`job.create` /
-`job.start` / `job.done` / `job.fail` / `job.recover` / `job.requeue` /
-`job.shutdown_abandoned`). Inspect the queue:
+`job.start` / `job.done` / `job.fail` / `job.cancelled` / `job.recover` /
+`job.requeue` / `job.shutdown_abandoned`). Inspect the queue:
 `curl -s localhost:7705/api/jobs | jq`.
 **`GET /api/jobs/health`** → `{ ok, running, pending, failedLastHour,
 interruptedLastHour, oldestPendingAgeMs, lastFailure, draining, sinceBootMs,

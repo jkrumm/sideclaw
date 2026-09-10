@@ -4,7 +4,7 @@ import {
   ROUTE_STREAK_LIMIT,
   routeFailureStreaks,
 } from "../mcp/session-runner.ts";
-import { createJob, getJob, jobHealth, listJobs, queueStats } from "../jobs/store.ts";
+import { cancelJob, createJob, getJob, jobHealth, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool } from "../jobs/types.ts";
 import { DEFAULT_DISPATCH_TIER, resolveDispatchTarget } from "../lib/dispatch-policy.ts";
 
@@ -95,4 +95,16 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
       return { ok: false as const, error: "job not found" };
     }
     return { ok: true as const, job };
+  })
+
+  // Cancel one job (warden Wave 5.3's kill surface for a single item, distinct from
+  // POST /api/shutdown's process-wide drain). A different method + suffix on the same `/:id`
+  // segment, so the "static routes before /:id" ordering rule above doesn't apply here.
+  .post("/:id/cancel", ({ params, set }) => {
+    const result = cancelJob(params.id);
+    if (!result.ok) {
+      set.status = result.status;
+      return { ok: false as const, error: result.error };
+    }
+    return { ok: true as const, job: result.job };
   });

@@ -197,6 +197,15 @@ export interface SessionOptions<T = unknown> {
    * which runs synchronously inside the MCP tool call).
    */
   jobId?: string;
+  /**
+   * Reports whether `jobId` has a pending `POST /api/jobs/:id/cancel` request. Injected
+   * dependency, same shape as `ShutdownDeps` in `server/lib/shutdown.ts` — this module must
+   * not import `server/jobs/store.ts` directly (store.ts already imports
+   * `terminateSessionsForJob` from here; the reverse import would be a cycle). The
+   * executor/handler path (`server/jobs/executor.ts` down through each handler's `runSession`
+   * call) supplies `store.ts`'s `isCancelRequested` here. Absent for a session that isn't
+   * job-backed, same as `jobId`. */
+  isCancelled?: (jobId: string) => boolean;
   /** Called every 15s while the subprocess runs. Use to send MCP progress notifications and reset client timeout. */
   onProgress?: (progress: number, total: number, message: string) => void;
   /**
@@ -912,6 +921,21 @@ export function activeSessionCount(): number {
   return activeProcs.size;
 }
 
+/** Test-only: register an already-constructed fake "proc" into `activeProcs` under a given
+ *  jobId, so `terminateSessionsForJob`/`terminateActiveSessions` can be exercised without
+ *  spawning a real `claude -p` subprocess. The caller only needs to satisfy the `exitCode`/
+ *  `kill` shape those two functions actually read — cast at the call site. */
+export function __registerProcForTests(
+  proc: ReturnType<typeof Bun.spawn>,
+  jobId: string | undefined,
+): void {
+  activeProcs.set(proc, jobId);
+}
+
+export function __resetActiveProcsForTests(): void {
+  activeProcs.clear();
+}
+
 /** Kill every active worker subprocess and return the ids of the jobs they belonged to (a
  *  process with no `jobId` — a session run outside the job system — is silently dropped, not
  *  emitted as `undefined`). server/jobs/store.ts's `markDrainKilled` records exactly these ids
@@ -927,6 +951,50 @@ export function terminateActiveSessions(): string[] {
     }
   }
   return jobIds;
+}
+
+/** The per-job counterpart to `terminateActiveSessions()`'s "kill everything" (drain): signals
+ *  only the worker subprocess(es) registered for ONE job (`POST /api/jobs/:id/cancel` →
+ *  `server/jobs/store.ts`'s `cancelJob`). Same two-stage SIGTERM → 5s → SIGKILL escalation as
+ *  the per-attempt timeout above (:1166-1186), but self-contained here since a cancel isn't
+ *  tied to that attempt's own timeout clock. Returns whether anything was actually signalled —
+ *  false if the job's worker had already exited (or the job never reached `running` with a
+ *  registered proc, e.g. it was still queued). */
+export function terminateSessionsForJob(jobId: string): boolean {
+  let signalled = false;
+  for (const [proc, id] of activeProcs) {
+    if (id !== jobId || proc.exitCode !== null) continue;
+    signalled = true;
+    proc.kill("SIGTERM");
+    setTimeout(() => {
+      if (proc.exitCode === null) proc.kill("SIGKILL");
+    }, 5000);
+  }
+  if (!signalled) {
+    // Not necessarily a bug: the job may still be `pending` (no proc yet — `cancelJob` handles
+    // that case without ever calling this), or its worker may have exited in the gap between
+    // `cancelJob` reading `running` and this call. Worth a warn either way — a cancel that
+    // signalled nothing depends entirely on `runSession`'s own cancel check (top-of-loop / after
+    // an attempt) to actually stop the job, rather than the SIGTERM doing it.
+    runnerLogger().warn(
+      { event: "session.cancel_no_proc", jobId },
+      "cancel requested but no live worker subprocess was registered for this job",
+    );
+  }
+  return signalled;
+}
+
+/** Thrown by `runSession`'s retry loop when a `POST /api/jobs/:id/cancel` was observed for this
+ *  job — distinguishable from an ordinary session failure so it is never retried, never falls
+ *  back to another backend, and callers that inspect the error type (none currently do;
+ *  `server/jobs/store.ts`'s `execute()` catch instead consults the job row's persisted
+ *  `cancelRequestedAt`, which is authoritative regardless of how a handler wraps this error) can
+ *  tell the two apart. */
+export class SessionCancelledError extends Error {
+  constructor(jobId: string) {
+    super(`session cancelled by request (job ${jobId})`);
+    this.name = "SessionCancelledError";
+  }
 }
 
 /** A retry that skips `resolveBackend`: the loop already decided where the next
@@ -1731,6 +1799,30 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   return { kind: canRetry ? "retry" : "return" };
 }
 
+/** Generic call signature for `runSessionAttempt` — a plain `let` binding can't otherwise hold
+ *  a generic function's type without losing the generic. */
+interface AttemptRunner {
+  <T>(
+    opts: SessionOptions<T>,
+    turnsRef: { current: number },
+    forced?: ForcedAttempt,
+  ): Promise<SessionResult<T>>;
+}
+
+/** What `runSession`'s loop actually calls to launch one attempt — production always the real
+ *  `runSessionAttempt` (which spawns a real `claude -p`). Test-only indirection so the loop's
+ *  OWN timing (retry backoff, the cancel checks below) can be exercised with a fake attempt that
+ *  returns canned results instantly, instead of needing a real subprocess. */
+let attemptRunner: AttemptRunner = runSessionAttempt;
+
+export function __setAttemptRunnerForTests(fn: AttemptRunner): void {
+  attemptRunner = fn;
+}
+
+export function __resetAttemptRunnerForTests(): void {
+  attemptRunner = runSessionAttempt;
+}
+
 export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<SessionResult<T>> {
   const route = withModel(opts.route, opts.model);
   const fallback = WORKER_FALLBACK === "none" ? null : route.fallback;
@@ -1739,8 +1831,19 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
   let forced: ForcedAttempt | undefined;
   while (true) {
     attempt++;
+    // Checked at the TOP of every iteration — the first attempt and every retry/fallback
+    // alike — not only after a failure below. The gap this closes: a cancel (`POST
+    // /api/jobs/:id/cancel` → `terminateSessionsForJob`) arriving AFTER attempt N's failed
+    // result was already checked (or during the retry backoff sleep at the bottom of this
+    // loop) has no live subprocess to SIGTERM — the previous one already exited and left
+    // `activeProcs`, the next one doesn't exist yet — so only a check right before the next
+    // spawn can catch it. Without this, that attempt launches and can succeed, silently
+    // overriding the cancel.
+    if (opts.jobId !== undefined && opts.isCancelled?.(opts.jobId)) {
+      throw new SessionCancelledError(opts.jobId);
+    }
     const turnsRef = { current: 0 };
-    const result = await runSessionAttempt(opts, turnsRef, forced);
+    const result = await attemptRunner(opts, turnsRef, forced);
     // One route key per attempt, primary or forced fallback alike — each backend/model
     // combination a job actually ran on gets its own streak, so a healthy `max` fallback
     // never gets buried under a struggling `iu` primary's count.
@@ -1750,6 +1853,14 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
       result.model ?? "unknown",
       result.ok,
     );
+    // A cancel requested mid-attempt is what most likely made THIS attempt fail — checked
+    // again immediately so a cancelled run never even computes `planNextAttempt` (and
+    // possibly sleeps for a backoff) before aborting. A race where the attempt actually
+    // succeeded anyway (`result.ok`) is deliberately NOT short-circuited here: `store.ts`'s
+    // `execute()` lets `done` stand in that case, so this only fires for a failure.
+    if (!result.ok && opts.jobId !== undefined && opts.isCancelled?.(opts.jobId)) {
+      throw new SessionCancelledError(opts.jobId);
+    }
     const plan = planNextAttempt({
       result,
       attempt,

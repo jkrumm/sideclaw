@@ -3,7 +3,9 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { appLogger as logger } from "../logger.ts";
+import { terminateSessionsForJob } from "../mcp/session-runner.ts";
 import {
+  isTerminal,
   type JobProgress,
   type JobRecord,
   type JobStatus,
@@ -59,6 +61,7 @@ interface JobRow {
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
+  cancel_requested_at: number | null;
 }
 
 const db = new Database(DB_PATH);
@@ -85,6 +88,18 @@ db.run("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)")
 // persists across restarts within a /tmp lifetime). Ignore if already present.
 try {
   db.run("ALTER TABLE jobs ADD COLUMN progress TEXT");
+} catch {
+  /* column already exists */
+}
+
+// Migration for dbs created before `cancelJob`'s `cancel_requested_at` column existed. Same
+// pattern as `progress` above — ignored if already present. Persisted (not just the in-process
+// `cancelRequested` set below) so a `POST /api/jobs/:id/cancel` survives a server restart
+// between the SIGTERM and `execute()`'s catch observing it: `recover()` checks this column on
+// every `running` row at boot and lands it `cancelled` directly, rather than silently resuming
+// a job an operator asked to stop.
+try {
+  db.run("ALTER TABLE jobs ADD COLUMN cancel_requested_at INTEGER");
 } catch {
   /* column already exists */
 }
@@ -140,23 +155,49 @@ const drainKilledIds = new Set<string>();
 export function markDrainKilled(jobIds: string[]): void {
   for (const id of jobIds) drainKilledIds.add(id);
 }
+
+/** Fast in-process mirror of `running` jobs a caller has asked to cancel (`cancelJob`, below).
+ *  The DB row's `cancel_requested_at` column is the durable, authoritative record (what
+ *  `recover()` reads at boot, and what `toJobView` derives `cancelRequested` from) — this set
+ *  exists only so the two hot paths below never hit sqlite: `execute()`'s catch here (a
+ *  SIGTERM'd worker throwing lands the job `cancelled` instead of `failed` when its id is in
+ *  this set, the single-job analogue of `drainKilledIds` above) and, via `isCancelRequested`
+ *  passed as `SessionOptions.isCancelled` to every `runSession()` call, `session-runner.ts`'s
+ *  retry loop, which checks it before EVERY attempt — a DB read there would mean one per retry
+ *  iteration. Entries are removed once consumed: either by that catch finishing the job
+ *  `cancelled`, or by the success path below when the session wins the race and completes
+ *  anyway (the flag is stale at that point, not a real cancel) — `cancel_requested_at` itself is
+ *  never cleared in either case, staying a true historical record. */
+const cancelRequested = new Set<string>();
+
+/** The predicate handed to `SessionOptions.isCancelled` (`server/mcp/session-runner.ts`) via
+ *  each job handler — session-runner.ts must never import this module directly (this module
+ *  already imports `terminateSessionsForJob` from there; the reverse would be a cycle). */
+export function isCancelRequested(id: string): boolean {
+  return cancelRequested.has(id);
+}
+
 let onDone: ((job: JobRecord) => void) | null = null;
 
-/** Test-only: resets the module-singleton drain state (`draining`, `drainKilledIds`, the
- *  registered `executor`/`onDone`) AND wipes every row from the `jobs` table. Needed because
- *  `tests/setup.ts` points every test file at ONE shared sqlite file and this module is
- *  imported once for the whole `bun test` run — `draining` (and, since it was added,
- *  `drainKilledIds`) is plain module-scope state with no per-test isolation otherwise, and a
- *  test that drives a real job through `execute()` (the only way to test its catch block) both
- *  sets that state AND leaves a row behind that would otherwise break every later test file's
- *  "empty store" assumptions (e.g. `jobHealth against an empty store` in
- *  tests/jobs-health.test.ts). No test currently depends on a job row surviving across test
- *  files, so a full wipe is safe; if one ever does, it should not be using this reset. Never
+/** Test-only: resets the module-singleton drain state (`draining`, `drainKilledIds`,
+ *  `cancelRequested`, `runningIds`, the registered `executor`/`onDone`) AND wipes every row from
+ *  the `jobs` table. Needed because `tests/setup.ts` points every test file at ONE shared
+ *  sqlite file and this module is imported once for the whole `bun test` run — `draining` (and,
+ *  since they were added, `drainKilledIds`/`cancelRequested`/`runningIds`) is plain module-scope
+ *  state with no per-test isolation otherwise, and a test that drives a real job through
+ *  `execute()` (the only way to test its catch block), or that seeds a `running` job whose fake
+ *  executor deliberately never resolves, both sets that state AND leaves a row behind that would
+ *  otherwise break every later test file's "empty store" assumptions (e.g. `jobHealth against an
+ *  empty store` in tests/jobs-health.test.ts, which reads `runningIds.size` via `queueStats()`).
+ *  No test currently depends on a job row (or an in-flight `execute()` promise) surviving across
+ *  test files, so a full wipe is safe; if one ever does, it should not be using this reset. Never
  *  called from production code — there is exactly one process per real drain, and it never
  *  wants its own job table wiped. */
 export function __resetForTests(): void {
   draining = false;
   drainKilledIds.clear();
+  cancelRequested.clear();
+  runningIds.clear();
   executor = null;
   onDone = null;
   db.run("DELETE FROM jobs");
@@ -242,6 +283,7 @@ function rowToRecord(row: JobRow): JobRecord {
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
+    cancelRequestedAt: row.cancel_requested_at,
   };
 }
 
@@ -283,6 +325,53 @@ export function createJob(tool: JobTool, params: Record<string, unknown>): JobVi
 export function getJob(id: string): JobView | null {
   const row = fetchRow(id);
   return row ? toJobView(rowToRecord(row)) : null;
+}
+
+/** Cancel one job by id (`POST /api/jobs/:id/cancel`). Unknown id → 404; already-terminal
+ *  (including a previous cancel) → 409, `cancelled` is never counted toward `failedLastHour`.
+ *
+ *  `pending`: never ran, so it is marked `cancelled` immediately via the normal `finish()` path
+ *  (log event, prune, promote — same as any other terminal transition) and returned terminal.
+ *
+ *  `running`: this only *requests* the cancel — `cancel_requested_at` is persisted on the row
+ *  BEFORE the best-effort SIGTERM (`terminateSessionsForJob`, `server/mcp/session-runner.ts`),
+ *  so the request survives a restart even if it lands in the gap before `execute()`'s catch
+ *  observes the killed worker's rejected promise (`recover()` below lands such a row
+ *  `cancelled` directly on the next boot). A repeat call on an already-requested `running` job
+ *  is a no-op — it must never re-signal or re-arm the SIGKILL escalation timer a second time.
+ *  The response reflects only the request, via the view's `cancelRequested: true` — the row
+ *  itself is still `running` at this instant. */
+export function cancelJob(
+  id: string,
+): { ok: true; job: JobView } | { ok: false; status: 404 | 409; error: string } {
+  const row = fetchRow(id);
+  if (!row) return { ok: false, status: 404, error: "job not found" };
+  const record = rowToRecord(row);
+
+  if (isTerminal(record.status)) {
+    return { ok: false, status: 409, error: `job already ${record.status}` };
+  }
+
+  if (record.status === "pending") {
+    finish(record, "cancelled", { error: "cancelled by request" });
+    const updated = fetchRow(id);
+    return { ok: true, job: toJobView(updated ? rowToRecord(updated) : record) };
+  }
+
+  // running, already requested — no duplicate SIGTERM/SIGKILL timer.
+  if (record.cancelRequestedAt !== null) {
+    return { ok: true, job: { ...toJobView(record), cancelRequested: true } };
+  }
+
+  const now = Date.now();
+  db.run("UPDATE jobs SET cancel_requested_at = ? WHERE id = ?", [now, id]);
+  cancelRequested.add(id);
+  const signalled = terminateSessionsForJob(id);
+  logger.info(
+    { event: "job.cancel_requested", jobId: id, tool: record.tool, signalled },
+    "job cancel requested",
+  );
+  return { ok: true, job: { ...toJobView(record), cancelRequested: true } };
 }
 
 export function listJobs(limit = 50): JobView[] {
@@ -452,8 +541,23 @@ async function execute(job: JobRecord): Promise<void> {
   if (!exec) return;
   try {
     const result = await exec(job, (progress) => updateProgress(job.id, progress));
+    // A cancel may have been requested while this job was running but lost the race against
+    // a session that was already finishing normally (`cancelJob` below) — let `done` stand,
+    // same as any other successful run, and just clear the now-stale flag rather than leave
+    // it around for a job id sqlite will never reuse.
+    cancelRequested.delete(job.id);
     finish(job, "done", { result });
   } catch (err) {
+    // A cancel was requested for this job (`cancelJob`, below → `terminateSessionsForJob`) —
+    // the SIGTERM is what made this throw, whatever message a handler wrapped it in (dispatch's
+    // salvage catch, for one, rewraps every error). Checked first and independent of `draining`:
+    // a deliberate single-job cancel must land `cancelled`, not be swept into either the
+    // drain-abandon branch below (which leaves the row `running` for next boot) or a real
+    // `failed`.
+    if (cancelRequested.delete(job.id)) {
+      finish(job, "cancelled", { error: "cancelled by request" });
+      return;
+    }
     // A drain (SIGTERM/SIGINT, `server/lib/shutdown.ts`) sets `draining` before it does
     // anything else, and `promote()` above refuses every `pending → running` transition for
     // the rest of this process's life once it's set — so a `running` row seen here WHILE
@@ -505,24 +609,33 @@ function updateProgress(id: string, progress: JobProgress): void {
   ]);
 }
 
-/** Pure computation of the `job.done`/`job.fail` log fields. Exported so the join key
- *  (`tool` + `durationMs`, added so a duration-by-tool table no longer needs a three-way
- *  `job.start`/`job.done`/`job.fail` join by hand — see docs/deployment.md § Drain window
- *  sizing) can be tested without going through sqlite or pino. */
+const EVENT_BY_STATUS: Record<
+  Extract<JobStatus, "done" | "failed" | "cancelled">,
+  "job.done" | "job.fail" | "job.cancelled"
+> = {
+  done: "job.done",
+  failed: "job.fail",
+  cancelled: "job.cancelled",
+};
+
+/** Pure computation of the `job.done`/`job.fail`/`job.cancelled` log fields. Exported so the
+ *  join key (`tool` + `durationMs`, added so a duration-by-tool table no longer needs a
+ *  three-way `job.start`/`job.done`/`job.fail` join by hand — see docs/deployment.md § Drain
+ *  window sizing) can be tested without going through sqlite or pino. */
 export function jobFinishLogFields(
   job: Pick<JobRecord, "id" | "tool" | "startedAt" | "createdAt">,
-  status: Extract<JobStatus, "done" | "failed">,
+  status: Extract<JobStatus, "done" | "failed" | "cancelled">,
   outcome: { error?: string },
   now: number,
 ): {
-  event: "job.done" | "job.fail";
+  event: "job.done" | "job.fail" | "job.cancelled";
   jobId: string;
   tool: JobTool;
   durationMs: number;
   error: string | undefined;
 } {
   return {
-    event: status === "done" ? "job.done" : "job.fail",
+    event: EVENT_BY_STATUS[status],
     jobId: job.id,
     tool: job.tool,
     durationMs: now - (job.startedAt ?? job.createdAt),
@@ -536,7 +649,7 @@ export function jobFinishLogFields(
  *  `job.done`/`job.fail` on `jobId` alone, per-tool, by hand). */
 function finish(
   job: JobRecord,
-  status: Extract<JobStatus, "done" | "failed">,
+  status: Extract<JobStatus, "done" | "failed" | "cancelled">,
   outcome: { result?: unknown; error?: string },
 ): void {
   const now = Date.now();
@@ -566,16 +679,38 @@ function finish(
 // ── Recovery & retention ─────────────────────────────────────────────────────
 
 /** On boot, any `running` row is a leftover from a dead process — its worker
- *  subprocess is gone. Idempotent read-only tools (`REQUEUE_ON_RECOVER`) on their
- *  first attempt go back to `pending` and run again (attempts 1 → 2 on promotion);
- *  everything else — a second interruption, or a tool with side effects — is marked
- *  `interrupted`. `pending` rows never started; they are simply promoted. */
+ *  subprocess is gone.
+ *
+ *  A row whose `cancel_requested_at` is set (`cancelJob`) is landed `cancelled` directly,
+ *  BEFORE the ordinary requeue/interrupt logic below ever sees it — an operator asked for this
+ *  job to stop, and the process dying between the SIGTERM and `execute()`'s catch observing it
+ *  must never look like an ordinary crash-recovery candidate. Without this check a
+ *  `REQUEUE_ON_RECOVER` tool (check/overview/narrative/review) would silently resume the exact
+ *  job the cancel was trying to stop.
+ *
+ *  Otherwise: idempotent read-only tools (`REQUEUE_ON_RECOVER`) on their first attempt go back
+ *  to `pending` and run again (attempts 1 → 2 on promotion); everything else — a second
+ *  interruption, or a tool with side effects — is marked `interrupted`. `pending` rows never
+ *  started; they are simply promoted. */
 function recover(): void {
   const now = Date.now();
   const running = db.query<JobRow, []>("SELECT * FROM jobs WHERE status = 'running'").all();
   let interrupted = 0;
   let requeued = 0;
+  let cancelled = 0;
   for (const row of running) {
+    if (row.cancel_requested_at !== null) {
+      db.run(
+        "UPDATE jobs SET status = 'cancelled', error = 'cancelled by request', finished_at = ? WHERE id = ?",
+        [now, row.id],
+      );
+      cancelled++;
+      logger.info(
+        { event: "job.cancelled", jobId: row.id, tool: row.tool },
+        "cancel was requested before this restart — landed cancelled on boot, never resumed",
+      );
+      continue;
+    }
     const next = recoveryStatusFor(row.tool as JobTool, row.attempts);
     if (next === "pending") {
       db.run(
@@ -598,9 +733,9 @@ function recover(): void {
   const pending =
     db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'").get()
       ?.n ?? 0;
-  if (interrupted > 0 || pending > 0) {
+  if (interrupted > 0 || pending > 0 || cancelled > 0) {
     logger.info(
-      { event: "job.recover", interrupted, requeued, pending },
+      { event: "job.recover", interrupted, requeued, cancelled, pending },
       "job recovery on startup",
     );
   }
@@ -609,13 +744,13 @@ function recover(): void {
 function prune(): void {
   const cutoff = Date.now() - PRUNE_TTL_MS;
   db.run(
-    "DELETE FROM jobs WHERE status IN ('done','failed','interrupted') AND finished_at IS NOT NULL AND finished_at < ?",
+    "DELETE FROM jobs WHERE status IN ('done','failed','interrupted','cancelled') AND finished_at IS NOT NULL AND finished_at < ?",
     [cutoff],
   );
   // Hard cap on retained terminal rows (keep newest).
   db.run(
-    `DELETE FROM jobs WHERE status IN ('done','failed','interrupted') AND id NOT IN (
-       SELECT id FROM jobs WHERE status IN ('done','failed','interrupted')
+    `DELETE FROM jobs WHERE status IN ('done','failed','interrupted','cancelled') AND id NOT IN (
+       SELECT id FROM jobs WHERE status IN ('done','failed','interrupted','cancelled')
        ORDER BY finished_at DESC LIMIT ?
      )`,
     [MAX_TERMINAL_ROWS],
@@ -640,5 +775,6 @@ function fallbackRecord(
     createdAt: now,
     startedAt: null,
     finishedAt: null,
+    cancelRequestedAt: null,
   };
 }

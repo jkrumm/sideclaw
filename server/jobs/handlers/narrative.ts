@@ -575,6 +575,7 @@ export async function runNarrative(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
   jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
 ): Promise<NarrativeOutput> {
   const params = parseParams(NARRATIVE_INPUT, rawParams);
   const { cwd, project, previousPage, since } = params;
@@ -623,6 +624,7 @@ export async function runNarrative(
       prompt: p,
       tool: "narrative",
       jobId,
+      isCancelled,
       jsonSchema: NARRATIVE_WORKER_JSON_SCHEMA,
       route,
       maxTurns: 3,

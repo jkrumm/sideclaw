@@ -388,6 +388,7 @@ async function routeExtraAngles(
   diffCmd: string,
   bump?: (label: string) => void,
   jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
 ): Promise<AgentConfig[]> {
   let prompt: string;
   try {
@@ -403,6 +404,7 @@ async function routeExtraAngles(
     prompt,
     tool: "review:router",
     jobId,
+    isCancelled,
     route: routeFor("review_router"),
     jsonSchema: ROUTER_JSON_SCHEMA,
     maxTurns: 8,
@@ -563,6 +565,7 @@ export async function runReview(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
   jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
 ): Promise<ReviewOutput> {
   const { cwd, scope, context, angles } = parseParams(REVIEW_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
@@ -670,7 +673,7 @@ export async function runReview(
   const agents = explicit
     ? resolveRequestedAngles(angles, floorAgents)
     : capAngles(
-        [...floorAgents, ...(await routeExtraAngles(cwd, diffCmd, bump, jobId))],
+        [...floorAgents, ...(await routeExtraAngles(cwd, diffCmd, bump, jobId, isCancelled))],
         MAX_ANGLES,
       );
 
@@ -729,6 +732,7 @@ export async function runReview(
         prompt,
         tool: "review:angle",
         jobId,
+        isCancelled,
         route: routeFor("review"),
         jsonSchema: ANGLE_JSON_SCHEMA,
         maxTurns: 60,
@@ -826,6 +830,7 @@ export async function runReview(
       prompt: synthPrompt,
       tool: "review:synthesis",
       jobId,
+      isCancelled,
       route: routeFor("review"),
       jsonSchema: REVIEW_JSON_SCHEMA,
       maxTurns,

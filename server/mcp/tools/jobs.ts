@@ -36,8 +36,10 @@ const JOB_STATE_OUTPUT = z.object({
   jobId: z.string(),
   tool: z.string(),
   status: z
-    .enum(["pending", "running", "done", "failed", "interrupted"])
-    .describe("pending=queued, running=executing, done/failed/interrupted=terminal."),
+    .enum(["pending", "running", "done", "failed", "interrupted", "cancelled"])
+    .describe(
+      "pending=queued, running=executing, done/failed/interrupted/cancelled=terminal. cancelled means POST /api/jobs/:id/cancel was called — not a failure.",
+    ),
   stillRunning: z
     .boolean()
     .describe(
@@ -67,7 +69,9 @@ const JOB_STATE_OUTPUT = z.object({
   error: z
     .string()
     .nullable()
-    .describe("Failure reason. Present when status is 'failed' or 'interrupted'."),
+    .describe(
+      "Failure reason. Present when status is 'failed' or 'interrupted'; also set to 'cancelled by request' when status is 'cancelled'.",
+    ),
 });
 
 type JobState = z.infer<typeof JOB_STATE_OUTPUT>;
@@ -120,7 +124,7 @@ export function registerJobTools(server: McpServer): void {
       title: "Job Status (one-shot)",
       description: `Return the current state of a background job by id, without waiting. Prefer job_wait when you actually want the result — this is for a quick non-blocking peek (e.g. checking on a long review while doing other work).
 
-OUTPUT: \`status\` (pending/running/done/failed/interrupted) and \`stillRunning\`. While running, \`turns\`/\`lastAction\` show live worker activity and \`idleMs\` is ms since its last event — a large/growing \`idleMs\` is the wedge signal (peek at git status rather than waiting forever). When status is "done", \`result\` holds the tool's structured output; when "failed"/"interrupted", \`error\` explains why.`,
+OUTPUT: \`status\` (pending/running/done/failed/interrupted/cancelled) and \`stillRunning\`. While running, \`turns\`/\`lastAction\` show live worker activity and \`idleMs\` is ms since its last event — a large/growing \`idleMs\` is the wedge signal (peek at git status rather than waiting forever). When status is "done", \`result\` holds the tool's structured output; when "failed"/"interrupted"/"cancelled", \`error\` explains why. There is no MCP tool to cancel a job — that is \`POST /api/jobs/:id/cancel\` over HTTP.`,
       inputSchema: {
         jobId: z.string().describe("The job id returned by check/review."),
       },
@@ -150,7 +154,7 @@ OUTPUT: \`status\` (pending/running/done/failed/interrupted) and \`stillRunning\
 
 BEHAVIOR: polls internally and sends progress heartbeats, so it is safe for long jobs. Waits ~50s per call by default; if the job is still running when the window elapses it returns \`stillRunning: true\` — call job_wait again with the same jobId (loop until stillRunning is false). You may also do other work between calls.
 LONG JOBS: pass an explicit \`maxWaitMs\` to wait in ONE call instead of looping — a review (typically 5-11 min) otherwise costs ~9 round trips. Only do this if this server's \`~/.claude.json\` entry sets a \`timeout\` at least as large; without it the client aborts at 60s and the abort is a hard error, unlike the clean \`stillRunning\` the default returns.
-OUTPUT: when \`status\` is "done", \`result\` holds the tool's structured output; "failed"/"interrupted" set \`error\`.`,
+OUTPUT: when \`status\` is "done", \`result\` holds the tool's structured output; "failed"/"interrupted"/"cancelled" set \`error\`. There is no MCP tool to cancel a job — that is \`POST /api/jobs/:id/cancel\` over HTTP.`,
       inputSchema: {
         jobId: z.string().describe("The job id returned by check/review."),
         maxWaitMs: z

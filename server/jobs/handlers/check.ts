@@ -113,6 +113,7 @@ export async function runCheck(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
   jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
 ): Promise<CheckOutput> {
   const { cwd, commands } = parseParams(CHECK_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
@@ -125,6 +126,7 @@ export async function runCheck(
       prompt: p,
       tool: "check",
       jobId,
+      isCancelled,
       jsonSchema: CHECK_JSON_SCHEMA,
       route: routeFor("check"),
       // Fast path needs only one Bash turn per command + the JSON turn — cap tight so

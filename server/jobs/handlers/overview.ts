@@ -364,6 +364,7 @@ export async function runOverview(
   rawParams: Record<string, unknown>,
   onProgress?: ProgressSink,
   jobId?: string,
+  isCancelled?: (jobId: string) => boolean,
 ): Promise<OverviewOutput> {
   const { model, staleAfterHours: staleOverride } = parseParams(OVERVIEW_INPUT, rawParams);
   const snapshot = await buildSnapshot(staleOverride);
@@ -380,6 +381,7 @@ export async function runOverview(
     prompt,
     tool: "overview",
     jobId,
+    isCancelled,
     jsonSchema: OVERVIEW_WORKER_JSON_SCHEMA,
     route,
     // Classification over a prompt, not an investigation: no discovery, no repo reads.

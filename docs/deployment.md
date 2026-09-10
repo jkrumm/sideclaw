@@ -56,6 +56,11 @@ Both constants live in `server/lib/shutdown.ts`; both are exercised by the SAME
 trigger) — the drain/abort/escalation logic itself did not need to change, only how long each
 trigger is allowed to wait.
 
+A third, narrower kill surface sits alongside these two process-wide ones: `POST
+/api/jobs/:id/cancel` (`server/jobs/store.ts`'s `cancelJob`) SIGTERMs a single job's worker via
+`terminateSessionsForJob` without touching the process or any other job — it lands `cancelled`,
+never `failed`, and shares no code path with `terminateActiveSessions()`'s drain-wide kill above.
+
 ### Sizing `HTTP_DRAIN_GRACE_MS` — why 40 min, not a measured percentile
 
 Measured 2026-09-08 over 91 real jobs from three days of `~/Library/Logs/sideclaw.jsonl`

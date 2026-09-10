@@ -37,9 +37,12 @@ refuses if it detects the tracked plist has drifted from the installed one.
 | `GET /health` | liveness |
 | `GET /api/routing` | effective per-tool model/backend table + applied/refused/implied overrides |
 | `POST /api/jobs` · `GET /api/jobs[/:id]` | submit / list / poll jobs |
+| `POST /api/jobs/:id/cancel` | cancel one job — `pending` lands `cancelled` immediately, `running` gets a best-effort SIGTERM and lands `cancelled` once the worker exits; 404 unknown id, 409 already terminal |
 | `GET /api/jobs/health` | queue health for monitoring (`ok` false on ≥3 failures/h or a >15 min pending job) |
 | `GET /api/agents[.txt]` | deterministic agent snapshot (no LLM), incl. `humanQueue` |
 | `GET /api/overview[.txt]` | snapshot + the latest `overview` job's recommendations; `.txt` takes `?color=1&cols=N` |
+| `GET /api/dispatch-policy` | effective repo allowlist/tier ceilings the `dispatch` job is gated on |
+| `GET /api/dispatch-schema` | JSON schema the `dispatch` job's worker output must validate against, per tier |
 | `POST /api/shutdown[?force=1]` | self-initiated graceful shutdown — what `make reload` calls instead of signaling the process; responds immediately with `{ running }`, drains asynchronously |
 
 Logs: `~/Library/Logs/sideclaw.jsonl` (structured, both processes), `sideclaw.{log,err}` (stdio).
