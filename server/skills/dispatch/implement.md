@@ -49,7 +49,10 @@ branch is discarded and the work is wasted, so stay well inside them:
 4. **Validate.** Run the repo's own checks — its test suite, its linter, its typechecker,
    whatever `CLAUDE.md` or `package.json` names. A change you did not validate is a change
    you are guessing about. If validation fails and you cannot fix it, say so plainly in
-   `verdict` and set `confidence: "low"`; do not describe a failing change as working.
+   `verdict` and set `confidence: "low"`; do not describe a failing change as working. This
+   is not optional even if you skip it: the tooling runs the repo's checks again,
+   mechanically, before it pushes anything — a red check never becomes a pull request, it
+   only becomes a plain branch with no PR for a human to look at.
 5. **Stop when it is done.** Do not keep polishing.
 
 **If the change turns out to be a bad idea** — the brief is based on a false premise, the

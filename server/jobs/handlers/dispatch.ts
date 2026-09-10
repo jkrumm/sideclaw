@@ -2,7 +2,12 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { runSession, zodValidator, type SessionResult } from "../../mcp/session-runner.ts";
+import {
+  runSession,
+  SessionCancelledError,
+  zodValidator,
+  type SessionResult,
+} from "../../mcp/session-runner.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
@@ -14,6 +19,7 @@ import {
 } from "../../lib/dispatch-policy.ts";
 import { dataBlock, endOfData, fencePreamble, newFenceNonce } from "../../lib/prompt-fence.ts";
 import { loadSkillFile } from "../../lib/worker-io.ts";
+import { runCheck, type CheckOutput } from "./check.ts";
 import {
   commitCount,
   commitPendingWork,
@@ -187,9 +193,13 @@ const PR_FIELDS = {
 // loud refusal rather than a best-effort parse — the failure this exists to design out is a
 // consumer silently ignoring a verdict whose shape moved under it. Bump it in this file
 // whenever a field's meaning or presence on DISPATCH_OUTPUT changes.
-export const DISPATCH_SCHEMA_VERSION = 1;
+//
+// Bumped 1 → 2: added the "checks_failed" outcome (see DISPATCH_OUTCOMES below) — the
+// implement tier now runs the repo's own `check` before any push, and a consumer that only
+// knew the old ten outcomes would otherwise silently misclassify this one.
+export const DISPATCH_SCHEMA_VERSION = 2;
 
-/** Machine-readable classification of how this episode ended — the eleven ways `runDispatch`
+/** Machine-readable classification of how this episode ended — the twelve ways `runDispatch`
  *  can return, so a consumer never has to substring-match `artifactNote`'s prose to tell them
  *  apart. Two ordering rules a consumer should know: `withheld` overwrites whatever this would
  *  otherwise have been (the real verdict was scanned out, so no tier-specific outcome is
@@ -202,6 +212,7 @@ export const DISPATCH_SCHEMA_VERSION = 1;
  *  - issue_filed    author: filed OK, `artifactUrl` set.
  *  - no_changes     implement: the episode changed nothing (0 commits).
  *  - diff_refused   implement: branch discarded — too large, a workflow diff, or a secret match.
+ *  - checks_failed  implement: pushed, but the repo's own `check` failed — no PR was opened.
  *  - branch_no_pr   implement: pushed, but the worker authored no PR text.
  *  - pr_failed      implement: pushed, but opening the pull request threw.
  *  - pr_opened      implement: full success — `artifactUrl` + `branch` both set.
@@ -215,6 +226,7 @@ export const DISPATCH_OUTCOMES = [
   "issue_filed",
   "no_changes",
   "diff_refused",
+  "checks_failed",
   "branch_no_pr",
   "pr_failed",
   "pr_opened",
@@ -838,7 +850,10 @@ export async function runDispatch(
           throw new Error("internal: repo identity or worktree missing for the implement tier");
         }
         assertNoGithubForSensitive(effectiveSensitive, "openPullRequest");
-        const deposit = await depositBranch(worktree, identity, data, brief, note);
+        const deposit = await depositBranch(worktree, identity, data, brief, note, {
+          jobId,
+          isCancelled,
+        });
         artifactUrl = deposit.artifactUrl;
         branch = deposit.branch;
         artifactNote = deposit.note;
@@ -872,6 +887,10 @@ export async function runDispatch(
       ...(artifactUrl ? { artifactUrl } : {}),
       ...(branch ? { branch } : {}),
       ...(artifactNote ? { verdict: data.verdict + artifactNote } : {}),
+      // A red check is never a PR, and a consumer must not read this as the worker's own
+      // "no human needed" verdict — forced the same way `applySensitiveScan` forces it for
+      // `withheld`.
+      ...(outcome === "checks_failed" ? { nextAction: "human" as const } : {}),
     };
     return applySensitiveScan(finalOutput, {
       sensitive: effectiveSensitive,
@@ -903,16 +922,36 @@ export async function runDispatch(
   }
 }
 
+/** Failing check steps rendered into `artifactNote`-sized text: step name + its first few
+ *  error lines, bounded to ~1500 chars so a chatty test runner's dump stays a note rather than
+ *  a second log. */
+function renderFailedChecks(steps: CheckOutput["steps"]): string {
+  const rendered = steps
+    .filter((s) => !s.passed)
+    .map((s) => `${s.name}: ${(s.errors ?? []).slice(0, 3).join(" | ") || "(no error detail)"}`)
+    .join("; ");
+  return rendered.length > 1500 ? `${rendered.slice(0, 1500)}…` : rendered;
+}
+
 /** Commit, bound-check, push and open the draft PR. Returns what actually landed — a tier
  *  that legitimately changed nothing, and one whose diff was refused, are both successful
- *  runs with no artifact, and each says why in the verdict. */
+ *  runs with no artifact, and each says why in the verdict.
+ *
+ *  `checkCtx.runCheckFn` defaults to the real `check` tool (a `claude -p` session, accepted
+ *  cost) and is injectable so the outcome tests can stub it without spawning one. */
 export async function depositBranch(
   worktree: DispatchWorktree,
   identity: RepoIdentity,
   data: DispatchOutput,
   brief: string,
   note: (s: string) => void,
+  checkCtx: {
+    jobId?: string;
+    isCancelled?: (jobId: string) => boolean;
+    runCheckFn?: typeof runCheck;
+  } = {},
 ): Promise<{ artifactUrl?: string; branch?: string; outcome: DispatchOutcome; note: string }> {
+  const { jobId, isCancelled, runCheckFn = runCheck } = checkCtx;
   const text = artifactText(data.prTitle, data.prBody);
   const subject = text?.title ?? `chore: dispatched change on ${worktree.branch}`;
 
@@ -942,6 +981,81 @@ export async function depositBranch(
       note:
         ` The branch was DISCARDED and nothing was pushed: ${refusal}. The change is gone — ` +
         `re-dispatch with a narrower brief if it is still wanted.`,
+    };
+  }
+
+  // The repo's own checks, run mechanically in the worktree before any push — a check the
+  // worker was merely TOLD to run is not a check (same argument that makes the commit
+  // `--no-verify` and the secret scan the handler's, not a prompt instruction). An
+  // unserialisable `runCheck` result is treated as a failed check, never as a pass: a tool
+  // failure here may only make the episode MORE cautious, never silently wave a red run
+  // through.
+  //
+  // Deliberately AFTER the diff-refusal ladder above, not before: that ladder is cheap and
+  // mechanical (git plumbing against numbers already in memory), while `check` is a full
+  // model session that reads the worktree's tree. A diff refused for size, a workflow path or
+  // a secret match is about to be discarded either way, so there is nothing to gain — and a
+  // secret-bearing diff to avoid exposing further — by spawning a check session against it
+  // first.
+  note("checking");
+  let checkOutput: CheckOutput;
+  try {
+    checkOutput = await runCheckFn(
+      { cwd: worktree.path },
+      (p) => note(`check: ${p.lastAction}`),
+      jobId,
+      isCancelled,
+    );
+  } catch (err) {
+    // A cancellation is NOT a failed check — it is the outer job ending, and it must
+    // propagate as exactly that. Folding it into `checkOutput.passed = false` would push the
+    // branch below and report `checks_failed`, i.e. treat a job the caller cancelled as one
+    // that ran to completion. `runSession`'s retry loop throws this specific type for a
+    // `POST /api/jobs/:id/cancel` mid-session — never retried, never wrapped, rethrown as-is
+    // so `runDispatch`'s own catch (and ultimately `server/jobs/store.ts`'s `execute()`) sees
+    // the same cancellation shape it would have seen had the OUTER episode session itself
+    // been the one cancelled.
+    if (err instanceof SessionCancelledError) throw err;
+    checkOutput = {
+      passed: false,
+      steps: [
+        {
+          name: "check",
+          passed: false,
+          errors: [err instanceof Error ? err.message : String(err)],
+        },
+      ],
+      summary: "check tool failed to run",
+    };
+  }
+
+  // Belt and suspenders against the race the catch above can't cover: a cancel observed
+  // AFTER `runCheckFn` already returned a real (possibly passing) result. Checked before any
+  // push, same as the throw above — nothing below this point may run once cancellation has
+  // been requested for this job.
+  if (jobId && isCancelled?.(jobId)) {
+    throw new SessionCancelledError(jobId);
+  }
+
+  if (!checkOutput.passed) {
+    note(`pushing ${worktree.branch} (checks failed)`);
+    await pushBranch(worktree, identity);
+    logger.warn(
+      {
+        event: "dispatch.checks_failed",
+        branch: worktree.branch,
+        summary: checkOutput.summary,
+        failedSteps: checkOutput.steps.filter((s) => !s.passed).map((s) => s.name),
+      },
+      "dispatch checks failed before push — branch pushed with no PR",
+    );
+    return {
+      branch: worktree.branch,
+      outcome: "checks_failed",
+      note:
+        ` The branch was pushed but NO pull request was opened: the repo's checks failed ` +
+        `(${checkOutput.summary}). ${renderFailedChecks(checkOutput.steps)} Fix the failures, ` +
+        `then open the PR by hand — the work is not lost.`,
     };
   }
 

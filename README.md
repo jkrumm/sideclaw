@@ -12,12 +12,12 @@ routing table assigns it. Mini-only by design — see the dotfiles global CLAUDE
 
 ```bash
 make install-agent   # one-time: build + install + start the LaunchAgent
-make reload          # after code changes: build, self-initiated drain via POST /api/shutdown (≤40 min), restart — falls back to `launchctl kill` if the endpoint doesn't answer
+make reload          # after code changes: build, self-initiated drain via POST /api/shutdown (≤50 min), restart — falls back to `launchctl kill` if the endpoint doesn't answer
 FORCE=1 make reload  # forced abort now, discarding running jobs (read-only ones are re-queued once on boot)
 make build           # frontend only
 ```
 
-`make reload`'s normal drain is long (~40 min) because it's self-initiated — launchd's own
+`make reload`'s normal drain is long (~50 min) because it's self-initiated — launchd's own
 `ExitTimeOut` (60s, its measured hard cap regardless of the plist) never engages on that path.
 Only a real signal (reboot, logout, or the fallback above) is bound by that 60s cap. Full story:
 `docs/deployment.md` § Two shutdown paths, two windows.
@@ -74,7 +74,7 @@ mechanism: `CLAUDE.md`.
 ## Develop
 
 ```bash
-bun test              # 12 files, no network, no model calls
+bun test              # 26 files, no network, no model calls
 bun run lint          # oxlint
 bun run format:check  # oxfmt
 ```

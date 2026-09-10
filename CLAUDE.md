@@ -30,7 +30,7 @@ Frontend UI (kiosk fullscreen, validating UI changes): `docs/ui-and-caching.md`.
 
 ```bash
 make build           # Build frontend to dist/ (no server start)
-make reload          # After code changes: build + self-initiated drain (POST /api/shutdown, ≤40 min — launchd's real signal-and-wait timer never engages on this path) + restart. Refuses while jobs run — FORCE=1 discards them (force=1 request, or a real SIGINT), escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
+make reload          # After code changes: build + self-initiated drain (POST /api/shutdown, ≤50 min — launchd's real signal-and-wait timer never engages on this path) + restart. Refuses while jobs run — FORCE=1 discards them (force=1 request, or a real SIGINT), escalating an in-progress drain if one is running. Falls back to `launchctl kill` (short window, capped by launchd's measured 60s ExitTimeOut) if the endpoint doesn't answer. Also refuses on tracked/installed plist drift (file AND launchd's live state) — see docs/deployment.md § Two shutdown paths, two windows
 make install-agent   # One-time: build + install + start LaunchAgent
 make uninstall-agent # Remove LaunchAgent
 
@@ -130,7 +130,7 @@ had stopped them). Otherwise `make reload` now asks the server to shut itself
 down (`POST /api/shutdown`, `server/routes/shutdown.ts`) instead of signaling
 it: launchd's `ExitTimeOut` only engages when launchd itself sends the signal
 and waits, so a self-initiated exit never starts that clock and can drain for
-up to `HTTP_DRAIN_GRACE_MS` (~40 min, sized to the dominant single-attempt
+up to `HTTP_DRAIN_GRACE_MS` (~50 min, sized to the dominant single-attempt
 worst case, not the full double-timeout-fallback chain). A real SIGTERM/SIGINT
 (reboot, logout, launchd itself, or `reload`'s own fallback when the HTTP
 endpoint doesn't answer) instead gets `SIGNAL_DRAIN_GRACE_MS` (45s) — launchd's

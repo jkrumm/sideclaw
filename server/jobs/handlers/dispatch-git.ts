@@ -527,11 +527,16 @@ export async function createWorktree(
  * own copy instead, torn down when the episode ends: the same teardown, and the same "a
  * failed episode leaves the live checkout untouched" property, that implement already had.
  *
- * Cut from HEAD, not from `origin/<default>`: a read tier is answering a question about
- * *this* checkout, so the commit it is sitting on is the right thing to read, and there is
- * no artifact that will later need rebasing. That also means no fetch and no GitHub API
+ * Cut from HEAD by default, not from `origin/<default>`: a read tier is answering a question
+ * about *this* checkout, so the commit it is sitting on is the right thing to read, and there
+ * is no artifact that will later need rebasing. That also means no fetch and no GitHub API
  * call, which is what keeps `investigate` working in a repo whose origin is not GitHub, or
  * missing entirely — the read tiers resolve no identity.
+ *
+ * `atOid`, when given, checks out that commit instead of HEAD — the seam `review` uses to
+ * inspect a fetched PR/branch ref rather than the live checkout's own tip. The caller is
+ * responsible for making sure the OID already resolves in `cwd`'s object database (e.g. via a
+ * prior `git fetch`); this function does no fetching of its own either way.
  *
  * `git worktree add` only materializes TRACKED content at the pinned commit — that is a side
  * effect of the underlying git command, not a deliberate security guard, so a read episode
@@ -539,21 +544,29 @@ export async function createWorktree(
  * local config, no build output, no untracked scratch files. `copyUntrackedFiles` closes that
  * gap afterwards, best effort, with `.claude/` excluded for reasons that ARE security (see its
  * own comment) — reopening nothing, because the exposure this worktree exists to prevent is a
- * write landing in the live checkout, and copying files IN doesn't touch that.
+ * write landing in the live checkout, and copying files IN doesn't touch that. Untracked files
+ * are only ever copied from `cwd`'s OWN working tree, so this step is skipped for an `atOid`
+ * checkout — the untracked scratch files of the live checkout have no relationship to a
+ * fetched PR/branch ref, and copying them in would mix the two.
  *
  * The narrow claim, because the wide one would be false: this isolates the WORKING TREE. The
  * worktree shares `.git` with the live repo, and nothing confines the session's Bash to the
  * filesystem below it. What it buys is that the natural spelling of an injected write — a
  * relative path, a tool defaulting to cwd — lands somewhere nobody reads and nothing deploys.
  */
-export async function createReadWorktree(cwd: string, jobKey: string): Promise<DispatchWorktree> {
+export async function createReadWorktree(
+  cwd: string,
+  jobKey: string,
+  atOid?: string,
+): Promise<DispatchWorktree> {
   const branch = `dispatch/read-${jobKey.slice(0, 8)}`;
   const root = worktreeRoot();
   const path = join(root, jobKey);
   mkdirSync(root, { recursive: true });
   if (existsSync(path)) rmSync(path, { recursive: true, force: true });
 
-  const baseOid = await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
+  const baseOid = atOid ?? (await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd));
+  const baseRef = atOid ? atOid.slice(0, 12) : "HEAD";
   try {
     await gitOrThrow(["worktree", "add", "--quiet", "-b", branch, path, baseOid], cwd, 120_000);
   } catch (err) {
@@ -561,11 +574,11 @@ export async function createReadWorktree(cwd: string, jobKey: string): Promise<D
     throw err;
   }
   logger.info(
-    { event: "dispatch.worktree", project: cwd, branch, base: baseOid, baseRef: "HEAD", path },
+    { event: "dispatch.worktree", project: cwd, branch, base: baseOid, baseRef, path },
     "read worktree created",
   );
-  const wt: DispatchWorktree = { path, branch, base: baseOid, baseRef: "HEAD", pushable: false };
-  await copyUntrackedFiles(cwd, wt);
+  const wt: DispatchWorktree = { path, branch, base: baseOid, baseRef, pushable: false };
+  if (!atOid) await copyUntrackedFiles(cwd, wt);
   return wt;
 }
 

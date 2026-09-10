@@ -42,7 +42,7 @@ governs which window:
 - **HTTP-initiated** (`POST /api/shutdown`, `server/routes/shutdown.ts` — what `make reload`
   calls now): the process asks itself to exit. launchd's `ExitTimeOut` only starts counting when
   launchd sends the signal and waits for the exit; a SELF-initiated exit never starts that clock
-  at all. This path genuinely gets the long window, `HTTP_DRAIN_GRACE_MS` (~40 min, derivation
+  at all. This path genuinely gets the long window, `HTTP_DRAIN_GRACE_MS` (~50 min, derivation
   below) — the number the old `SHUTDOWN_GRACE_MS` always claimed to be, now actually true for
   the path it governs.
 - **Signal-initiated** (a real SIGTERM/SIGINT — reboot, logout, `launchctl kill`, launchd
@@ -61,7 +61,7 @@ A third, narrower kill surface sits alongside these two process-wide ones: `POST
 `terminateSessionsForJob` without touching the process or any other job — it lands `cancelled`,
 never `failed`, and shares no code path with `terminateActiveSessions()`'s drain-wide kill above.
 
-### Sizing `HTTP_DRAIN_GRACE_MS` — why 40 min, not a measured percentile
+### Sizing `HTTP_DRAIN_GRACE_MS` — why 50 min, not a measured percentile
 
 Measured 2026-09-08 over 91 real jobs from three days of `~/Library/Logs/sideclaw.jsonl`
 (`job.start` joined to `job.done`/`job.fail` by `jobId`, duration = `finished_at - started_at`):
@@ -142,7 +142,7 @@ documented trade instead of chasing either chain:
   no timeout of its own and is not folded into this figure; a genuine network hang there is a
   different failure class than "legitimate slow work".)
 
-That 40 minutes covers the dominant single-attempt path in full. Neither the ordinary
+That 50 minutes (the 30 min implement session plus a 20 min bounded `depositBranch`, which since 2026-09-11 includes up to a 10 min mechanical `check` before push) covers the dominant single-attempt path in full. Neither the ordinary
 salvage-retry chain nor the rarer double-timeout `max`→`iu` fallback chain (~60-70 min combined
 with teardown, either way) is covered — including the salvage-retry one, which is reachable on
 any `implement` episode that fumbles its JSON, no timeout or provider signal needed. A job
@@ -165,12 +165,12 @@ independently-true facts:
 
 | Constant | Where | Value | Role |
 |-|-|-|-|
-| `HTTP_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | 40 min (2400 s) | drain deadline for a self-initiated exit (`POST /api/shutdown`) — unbounded by launchd, since nothing signals the process on this path |
+| `HTTP_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | 50 min (3000 s) | drain deadline for a self-initiated exit (`POST /api/shutdown`) — unbounded by launchd, since nothing signals the process on this path |
 | `SIGNAL_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | 45 s | drain deadline for a real SIGTERM — must stay under `LAUNCHD_HARD_EXIT_TIMEOUT_MS` with real margin, or launchd SIGKILLs mid-drain regardless of what this number says |
 | `SHUTDOWN_FLUSH_MS` | `server/lib/shutdown.ts` | 3 s | HTTP response flush after the drain decision, stacked on top of whichever grace window applies |
 | `LAUNCHD_HARD_EXIT_TIMEOUT_MS` | `server/lib/shutdown.ts` | 60 s | launchd's actual, measured ceiling — not a value this codebase controls, only observes |
 | `ExitTimeOut` | `com.jkrumm.sideclaw-server.plist` | 60 s | set to exactly the measured cap, not a value implying more headroom than launchd grants |
-| poll ceiling | `Makefile`'s `reload`/`install-agent` targets | 46 min (5520 half-second ticks / 2760 s) | how long `make reload` waits for the old PID to exit before `kickstart`ing — now must exceed `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS` (2403 s), the true worst case on the normal self-exit path, not `ExitTimeOut` (which no longer bounds that path at all) |
+| poll ceiling | `Makefile`'s `reload`/`install-agent` targets | 55 min (6600 half-second ticks / 3300 s) | how long `make reload` waits for the old PID to exit before `kickstart`ing — now must exceed `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS` (3003 s), the true worst case on the normal self-exit path, not `ExitTimeOut` (which no longer bounds that path at all) |
 
 Three guards pin this in `bun test` rather than at the next reboot — all in
 `tests/shutdown-window.test.ts` (replacing the old `tests/deployment-plist.test.ts` and
@@ -233,7 +233,7 @@ reported success regardless: none of `bootout`/`cp`/`bootstrap` fail merely beca
 process couldn't bind a port, and the target's last line was an unconditional `echo`.
 
 `install-agent` now carries the same PID-capture-and-poll `reload` already had (same ceiling —
-5520 half-second ticks, pinned against `reload`'s own loop and, separately, against
+6600 half-second ticks, pinned against `reload`'s own loop and, separately, against
 `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS` by `tests/shutdown-window.test.ts`) between the
 `bootout` and the `cp`/`bootstrap` that follow, and the same job-in-flight guard `reload` has
 (refuses by default while a job is running; `FORCE=1` sends SIGINT — the catchable forced-abort
@@ -270,7 +270,7 @@ point being that a shutdown-killed job reads identically to a crashed one, every
 `promote()` refuses every `pending → running` transition while a drain is in progress
 (`setDraining()`, called from the SIGTERM/SIGINT handler) — a job promoted into the grace
 window's dying process would just be interrupted and burn its one re-queue for nothing. That
-means submissions genuinely back up during a reload, and with a 40 min window
+means submissions genuinely back up during a reload, and with a 50 min window
 `oldestPendingAgeMs` can comfortably exceed the health check's 15 min "wedged queue" threshold
 on a perfectly normal reload. `evaluateJobHealth()` takes `draining` as an input and skips the
 `oldestPendingAgeMs` criterion (only that one — `failedLastHour` still trips `ok: false`

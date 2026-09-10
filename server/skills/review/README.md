@@ -210,6 +210,13 @@ mcp__sideclaw__review({
 })
 ```
 
+`pr` (a pull request number) or `branch` (a remote branch name) may be passed instead of
+`scope`, to review a ref that has no local checkout — the seam an `implement` dispatch episode
+needs, since its own worktree is gone by the time the branch it pushed exists. Either fetches
+the ref from `cwd`'s `origin` into a throwaway read-only worktree and diffs it against the
+repo's default branch; `scope` must be omitted with either. See `GET /api/review-schema` for
+the published output shape (`schemaVersion`-pinned, mirrors `/api/dispatch-schema`).
+
 The `/review` skill and `/ship` orchestrator both invoke this tool.
 
 ### Untracked files

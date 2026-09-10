@@ -3,7 +3,7 @@
 // `artifactNote`'s prose. Exercises the two seams that don't require a live worker session:
 // `depositBranch` (the implement-tier artifact logic, factored out of `runDispatch`'s switch,
 // pure git — no network) and `salvage`/`applySensitiveScan` (also exported, no network). See the
-// report for which of the eleven outcomes have NO such seam and are therefore untested here.
+// report for which of the twelve outcomes have NO such seam and are therefore untested here.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "crypto";
@@ -15,6 +15,7 @@ import {
   salvage,
   type DispatchOutput,
 } from "../server/jobs/handlers/dispatch.ts";
+import { SessionCancelledError } from "../server/mcp/session-runner.ts";
 import {
   commitPendingWork,
   createReadWorktree,
@@ -62,12 +63,33 @@ function baseVerdict(overrides: Partial<DispatchOutput> = {}): DispatchOutput {
 // refusals" section uses to trip `assertNoSecrets` without any network call.
 const SECRET_BODY = "AKIAIOSFODNN7EXAMPLE";
 
+// `depositBranch` now runs the repo's own `check` before any push — a real run is a `claude
+// -p` session, so every case below that isn't specifically testing check behavior stubs it to
+// pass immediately via the injectable `checkCtx.runCheckFn`, the same seam
+// `initJobStore({ executor })` gives jobs-cancel-running.test.ts.
+async function passingCheck() {
+  return { passed: true as const, steps: [], summary: "stub: skipped" };
+}
+
+async function failingCheck() {
+  return {
+    passed: false as const,
+    steps: [
+      { name: "lint", passed: false as const, errors: ["unexpected any at foo.ts:12"] },
+      { name: "test", passed: true as const },
+    ],
+    summary: "1/2 steps failed: lint",
+  };
+}
+
 // ── depositBranch — the implement-tier outcomes ─────────────────────────────────
 
 describe("depositBranch outcomes", () => {
   test("no_changes — the episode committed nothing", async () => {
     const wt = await createWorktree(fx.repo, key(), "noop", "master");
-    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {});
+    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+      runCheckFn: passingCheck,
+    });
     expect(result.outcome).toBe("no_changes");
     expect(result.artifactUrl).toBeUndefined();
     expect(result.branch).toBeUndefined();
@@ -82,11 +104,76 @@ describe("depositBranch outcomes", () => {
       fx.write(`generated/file-${i}.txt`, `content ${i}\n`, wt.path);
     }
     await commitPendingWork(wt, "too many files");
-    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {});
+    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+      runCheckFn: passingCheck,
+    });
     expect(result.outcome).toBe("diff_refused");
     expect(result.artifactUrl).toBeUndefined();
     expect(result.branch).toBeUndefined();
     expect(result.note).toMatch(/DISCARDED/);
+  });
+
+  test("checks_failed — pushed for a human to inspect, but no PR is opened", async () => {
+    const wt = await createWorktree(fx.repo, key(), "red-checks", "master");
+    fx.write("added.txt", "content\n", wt.path);
+    await commitPendingWork(wt, "work worth pushing");
+    const result = await depositBranch(
+      wt,
+      ID,
+      baseVerdict({ prTitle: "Fix the thing", prBody: "a normal PR body" }),
+      "brief",
+      () => {},
+      { runCheckFn: failingCheck },
+    );
+    expect(result.outcome).toBe("checks_failed");
+    expect(result.branch).toBe(wt.branch);
+    expect(result.artifactUrl).toBeUndefined();
+    expect(result.note).toMatch(/NO pull request was opened/);
+    expect(result.note).toMatch(/lint/);
+  });
+
+  test("checks_failed — an unserialisable check result is treated as a failure, never a pass", async () => {
+    const wt = await createWorktree(fx.repo, key(), "broken-check", "master");
+    fx.write("added.txt", "content\n", wt.path);
+    await commitPendingWork(wt, "work worth pushing");
+    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+      runCheckFn: async () => {
+        throw new Error("check tool exploded");
+      },
+    });
+    expect(result.outcome).toBe("checks_failed");
+    expect(result.note).toMatch(/check tool exploded/);
+  });
+
+  test("a cancellation thrown by runCheckFn propagates and never pushes", async () => {
+    const wt = await createWorktree(fx.repo, key(), "cancel-during-check", "master");
+    fx.write("added.txt", "content\n", wt.path);
+    await commitPendingWork(wt, "work worth pushing");
+    await expect(
+      depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+        jobId: "job-cancel-1",
+        runCheckFn: async () => {
+          throw new SessionCancelledError("job-cancel-1");
+        },
+      }),
+    ).rejects.toBeInstanceOf(SessionCancelledError);
+    const refs = await fx.originRefs();
+    expect(Object.keys(refs)).not.toContain(wt.branch);
+  });
+
+  test("isCancelled observed true after a passing check also propagates and never pushes", async () => {
+    const wt = await createWorktree(fx.repo, key(), "cancel-after-check", "master");
+    fx.write("added.txt", "content\n", wt.path);
+    await commitPendingWork(wt, "work worth pushing");
+    await expect(
+      depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+        jobId: "job-cancel-2",
+        isCancelled: () => true,
+        runCheckFn: passingCheck,
+      }),
+    ).rejects.toBeInstanceOf(SessionCancelledError);
+    const refs = await fx.originRefs();
+    expect(Object.keys(refs)).not.toContain(wt.branch);
   });
 
   test("branch_no_pr — changes pushed, but the worker authored no PR text", async () => {
@@ -99,6 +186,7 @@ describe("depositBranch outcomes", () => {
       baseVerdict({ prTitle: "", prBody: "" }),
       "brief",
       () => {},
+      { runCheckFn: passingCheck },
     );
     expect(result.outcome).toBe("branch_no_pr");
     expect(result.branch).toBe(wt.branch);
@@ -116,6 +204,7 @@ describe("depositBranch outcomes", () => {
       baseVerdict({ prTitle: "Fix the thing", prBody: SECRET_BODY }),
       "brief",
       () => {},
+      { runCheckFn: passingCheck },
     );
     expect(result.outcome).toBe("pr_failed");
     expect(result.branch).toBe(wt.branch);
@@ -254,7 +343,7 @@ describe("GET /api/dispatch-schema", () => {
     expect(body.ok).toBe(true);
     expect(body.version).toBe(DISPATCH_SCHEMA_VERSION);
     expect(body.outcomes.toSorted()).toEqual([...DISPATCH_OUTCOMES].toSorted());
-    expect(body.outcomes).toHaveLength(11);
+    expect(body.outcomes).toHaveLength(12);
     expect(body.output.type).toBe("object");
     expect(Object.keys(body.output.properties)).toContain("outcome");
     expect(Object.keys(body.output.properties)).toContain("schemaVersion");

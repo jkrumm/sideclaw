@@ -61,7 +61,7 @@
        exit ITSELF via `POST /api/shutdown` (server/routes/shutdown.ts), and a process that
        exits on its own never starts launchd's ExitTimeOut clock in the first place — only a
        signal launchd sent itself does. That self-initiated path drains for up to
-       `HTTP_DRAIN_GRACE_MS` (server/lib/shutdown.ts, ~40 min). This key is the safety net for
+       `HTTP_DRAIN_GRACE_MS` (server/lib/shutdown.ts, ~50 min). This key is the safety net for
        the OTHER path — a real SIGTERM/SIGINT, which server/lib/shutdown.ts bounds to the short
        `SIGNAL_DRAIN_GRACE_MS` window specifically because this cap is real. See
        docs/deployment.md § Two shutdown paths, two windows for the full story of both paths,

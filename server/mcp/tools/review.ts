@@ -13,9 +13,10 @@ export function registerReviewTool(server: McpServer): void {
     description: `Run a deep multi-angle code review (architect + senior-dev always, file-type reviewers auto-added, plus a triage router for security/performance/concurrency/data-migration/api-contract/resilience). Runs as a BACKGROUND JOB: returns a jobId immediately — it does NOT return the findings.
 
 WHEN TO CALL: before committing, before a PR, or when asked to review code quality.
-ASYNC: returns { jobId }. Call job_wait({ jobId }) to block until done and read the result, or job_status to poll. The result has \`outcome\` (check first: "clean" | "actionable" | "needs-human"), \`blocking\`, \`improvements\`, \`discussions\`, \`testGaps\`.
+ASYNC: returns { jobId }. Call job_wait({ jobId }) to block until done and read the result, or job_status to poll. The result has \`outcome\` (check first: "clean" | "actionable" | "needs-human"), \`blocking\`, \`improvements\`, \`discussions\`, \`testGaps\`, \`schemaVersion\` (see GET /api/review-schema).
 READ-ONLY: never modifies files.
 CWD: absolute path of the repo to review. SCOPE: "uncommitted" (default) = working changes; "head" = last commit; a ref like "HEAD~3"/SHA = the range up to HEAD (last N commits); an explicit range like "main..HEAD" or a file path.
+PR/BRANCH: pass \`pr\` (a pull request number) or \`branch\` (a remote branch name on \`cwd\`'s origin) instead of \`scope\` to review a ref that has no local checkout — e.g. the branch an \`implement\` dispatch episode pushed after its own worktree was torn down. Runs in a throwaway read-only worktree fetched from origin; \`scope\` must be omitted with either.
 MODEL: angles + synthesis ${describeRoute(routeFor("review"))}; adversary ${describeRoute(routeFor("adversary"))} — see GET /api/routing.`,
   });
 }

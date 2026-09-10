@@ -20,7 +20,7 @@ build:
 # what the old 40-minute in-process drain window said — that window was fiction the whole time
 # it was wired to a signal. A SELF-initiated exit never starts launchd's ExitTimeOut clock at
 # all (only a signal launchd sent itself does), so it genuinely gets the long window
-# (`HTTP_DRAIN_GRACE_MS`, server/lib/shutdown.ts, ~40 min) instead. KeepAlive restarts the
+# (`HTTP_DRAIN_GRACE_MS`, server/lib/shutdown.ts, ~50 min) instead. KeepAlive restarts the
 # process once it exits, same as any other exit. The old PID is still polled away below before
 # `kickstart` runs — self-exit doesn't change that kickstart skips launchd's respawn throttle,
 # so firing it while the old process is still draining would still land it on that process.
@@ -75,12 +75,12 @@ build:
 #
 # The PID poll below has to outlast the drain: kickstart skips launchd's respawn throttle, so
 # firing it while the old process is still draining lands it on that process. The true worst
-# case is now HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS (server/lib/shutdown.ts, ~40 min + 3s =
-# 2403s) on the normal self-exit path — launchd's ExitTimeOut no longer bounds it at all, since
-# nothing signals the process. The ceiling here (5520 half-seconds = 2760s) already carried
-# comfortable slack past that number (it used to also need to outlast the plist's old 2700s
-# ExitTimeOut, which is why it's this large) — tests/shutdown-window.test.ts pins it against
-# HTTP_DRAIN_GRACE_MS+SHUTDOWN_FLUSH_MS now instead.
+# case is now HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS (server/lib/shutdown.ts, ~50 min + 3s =
+# 3003s — the implement tier's mechanical `check` before push added ten minutes on
+# 2026-09-11) on the normal self-exit path — launchd's ExitTimeOut no longer bounds it at all,
+# since nothing signals the process. The ceiling here (6600 half-seconds = 3300s) carries
+# slack past that number — tests/shutdown-window.test.ts pins it against
+# HTTP_DRAIN_GRACE_MS+SHUTDOWN_FLUSH_MS.
 reload: build
 	@tracked="com.jkrumm.sideclaw-server.plist"; \
 	installed="$$HOME/Library/LaunchAgents/com.jkrumm.sideclaw-server.plist"; \
@@ -116,7 +116,7 @@ reload: build
 	  sig=$${FORCE:+SIGINT}; sig=$${sig:-SIGTERM}; \
 	  launchctl kill $$sig gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null || true; \
 	fi; \
-	i=0; while [ -n "$$old" ] && kill -0 "$$old" 2>/dev/null && [ $$i -lt 5520 ]; do \
+	i=0; while [ -n "$$old" ] && kill -0 "$$old" 2>/dev/null && [ $$i -lt 6600 ]; do \
 	  if [ $$i -gt 0 ] && [ $$((i % 240)) -eq 0 ]; then echo "  still draining ($$((i / 2))s) — a job is finishing; ^C is safe, the drain continues"; fi; \
 	  sleep 0.5; i=$$((i+1)); \
 	done; \
@@ -146,7 +146,7 @@ reload: build
 # and it crash-loops — while every one of `bootout`/`cp`/`bootstrap` still exits 0, since none of
 # them fail merely because a DIFFERENT process couldn't bind a port. Without the poll (and the
 # health check at the end), this target reported "installed and started" regardless. Same ceiling
-# as `reload`'s own poll (5520 half-seconds — see the comment on that target); the two are pinned
+# as `reload`'s own poll (6600 half-seconds — see the comment on that target); the two are pinned
 # together by tests/shutdown-window.test.ts's Makefile poll-ceiling check.
 #
 # Same job-in-flight guard as `reload`, for the same reason a plist fix is often urgent (e.g.
@@ -167,7 +167,7 @@ install-agent: build
 	  launchctl kill SIGINT gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null || true; \
 	fi; \
 	launchctl bootout gui/$$(id -u)/com.jkrumm.sideclaw-server 2>/dev/null || true; \
-	i=0; while [ -n "$$old" ] && kill -0 "$$old" 2>/dev/null && [ $$i -lt 5520 ]; do \
+	i=0; while [ -n "$$old" ] && kill -0 "$$old" 2>/dev/null && [ $$i -lt 6600 ]; do \
 	  if [ $$i -gt 0 ] && [ $$((i % 240)) -eq 0 ]; then echo "  still draining ($$((i / 2))s) — a job is finishing; ^C is safe, the drain continues"; fi; \
 	  sleep 0.5; i=$$((i+1)); \
 	done

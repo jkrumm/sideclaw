@@ -74,31 +74,40 @@ export const IMPLEMENT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 // rarer, and that one is reachable on any `implement` episode that simply runs long and fumbles
 // its JSON, no timeout or provider retry involved at all.
 //
-// So the reachable worst case is ~70 minutes (2 × 30 min of session wall-clock, from either
+// So the reachable worst case is ~80 minutes (2 × 30 min of session wall-clock, from either
 // chain — most plausibly the ordinary salvage retry — plus `depositBranch()`'s own bounded
-// teardown, below), not the 40 minutes this window actually covers.
+// teardown, below), not the 50 minutes this window actually covers.
 //
-// A drain window covering that reachable 70-minute chain would put a `make reload` worst case
-// past an hour. That is not a usable operational number — a drain nobody actually waits out
-// just teaches everyone to reach for `FORCE=1`, which discards work rather than waiting for it,
-// so this file does NOT try to cover either doubling. It covers the DOMINANT path instead — a
-// single attempt (no retry triggered — the common case is still a session that either finishes
-// or fails outright inside its own budget) running up to its own full `timeoutMs`, followed by
-// `depositBranch()`'s fully bounded worst case:
+// A drain window covering that reachable 80-minute chain would put a `make reload` worst case
+// past an hour and a half. That is not a usable operational number — a drain nobody actually
+// waits out just teaches everyone to reach for `FORCE=1`, which discards work rather than
+// waiting for it, so this file does NOT try to cover either doubling. It covers the DOMINANT
+// path instead — a single attempt (no retry triggered — the common case is still a session
+// that either finishes or fails outright inside its own budget) running up to its own full
+// `timeoutMs`, followed by `depositBranch()`'s fully bounded worst case:
 //
-//   commitPendingWork (add + diff --cached + commit, 60s each) = 180s
-//   commitCount (rev-list, 60s)                                =  60s
-//   summarizeDiff (diff --numstat, 60s)                        =  60s
-//   diffRefusalReason → addedSecrets (diff -U0, 60s)           =  60s
-//   pushBranch (rev-parse 60s + push, explicit 180s timeout)   = 240s
-//                                                          total = 600s = 10 min
+//   commitPendingWork (add + diff --cached + commit, 60s each) =  180s
+//   commitCount (rev-list, 60s)                                =   60s
+//   summarizeDiff (diff --numstat, 60s)                        =   60s
+//   diffRefusalReason → addedSecrets (diff -U0, 60s)           =   60s
+//   check() — repo's own `check` tool, single attempt          =  600s
+//   pushBranch (rev-parse 60s + push, explicit 180s timeout)   =  240s
+//                                                          total = 1200s = 20 min
+//
+// `check()` (server/jobs/handlers/check.ts) runs AFTER `diffRefusalReason` in `depositBranch`,
+// deliberately — a diff refused for size, a workflow path or a secret match is discarded
+// either way, so a refusal short-circuits before this cost is ever paid — but a passing diff
+// always reaches it, so the WORST case still has to carry `check`'s own full `timeoutMs`
+// (10 min, one attempt — `check`'s own prose-instead-of-JSON retry is a second internal
+// attempt at the SAME budget, and same as every other doubling on this page, only the single
+// dominant attempt is counted here, not that retry).
 //
 // (`openPullRequest`'s Octokit call carries no explicit timeout of its own and is not folded
 // into this figure — a genuine network hang there is a different failure class than "legitimate
 // slow work", not one this window is trying to buy time for.)
 //
-// 30 min + 10 min = 40 min covers the dominant single-attempt path in full. Both retry chains
-// above (~60-70 min combined with teardown) are deliberately NOT covered — including the
+// 30 min + 20 min = 50 min covers the dominant single-attempt path in full. Both retry chains
+// above (~60-80 min combined with teardown) are deliberately NOT covered — including the
 // ordinary salvage-retry one, which needs no timeout and no provider signal to reach. A job
 // caught by either is killed at the grace deadline like any other still-running job, and —
 // since server/jobs/store.ts's `execute()` leaves a drain-killed job's row untouched at
@@ -113,7 +122,16 @@ export const IMPLEMENT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 // This number is only usable BECAUSE it governs the HTTP-initiated path — see the two-window
 // note above `IMPLEMENT_SESSION_TIMEOUT_MS`. Used for a real SIGTERM it would be fiction:
 // launchd SIGKILLs at 60s regardless.
-export const HTTP_DRAIN_GRACE_MS = IMPLEMENT_SESSION_TIMEOUT_MS + 10 * 60 * 1000;
+//
+// This 50-min figure moved (from 40 min) when `depositBranch` gained the `check()` step above
+// (2026-09-11). Everything downstream of this number was updated to match in the same pass:
+// the Makefile `reload`/`install-agent` poll ceiling (46 min → 55 min, `-lt 5520` → `-lt 6600`,
+// so it still outlasts `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS` — `tests/shutdown-window.test.ts`
+// pins that), `docs/deployment.md`'s sizing table and section header (now "why 50 min"), and
+// every "~40 min" prose mention — the tracked plist (`com.jkrumm.sideclaw-server.plist`),
+// `README.md`, `CLAUDE.md` — now reads "~50 min". This number and everything that quotes it
+// are back in agreement; there is no stale "40 min" left in the repo.
+export const HTTP_DRAIN_GRACE_MS = IMPLEMENT_SESSION_TIMEOUT_MS + 20 * 60 * 1000;
 
 // The signal-initiated counterpart (a real SIGTERM/SIGINT — see the two-window note above).
 // Must stay under LAUNCHD_HARD_EXIT_TIMEOUT_MS WITH real margin for SHUTDOWN_FLUSH_MS stacked
