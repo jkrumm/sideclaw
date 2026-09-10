@@ -12,6 +12,11 @@ import {
   setDraining,
 } from "../server/jobs/store.ts";
 import { jobsRoutes } from "../server/routes/jobs.ts";
+import {
+  recordFallback,
+  recordRouteOutcome,
+  ROUTE_STREAK_LIMIT,
+} from "../server/mcp/session-runner.ts";
 
 describe("recoveryStatusFor", () => {
   test("idempotent read-only tools are re-queued once", () => {
@@ -214,5 +219,69 @@ describe("GET /api/jobs/health", () => {
     } finally {
       __resetForTests();
     }
+  });
+
+  test("carries routeStreaks/degradedRoutes/warnings, and a degraded route never flips ok to false", async () => {
+    // Unique route keys per test — routeFailureStreaks() is module-scope state shared
+    // across this whole `bun test` process, same caveat as `draining` above.
+    const tool = "jobs-health-route";
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+    expect(ROUTE_STREAK_LIMIT).toBe(3);
+
+    const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
+    const body = await res.json();
+    const key = `${tool}@iu/glm-5.3-flash`;
+
+    expect(body.ok).toBe(true);
+    expect(body.routeStreaks[key]).toBe(3);
+    expect(body.degradedRoutes).toContain(key);
+    expect(body.warnings).toContain(`route ${key} failed 3 in a row`);
+
+    // Reset so this route doesn't leak a stale streak into a later test in this file.
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", true);
+  });
+
+  test("warnings lists a backend-fallback count alongside any degraded route", async () => {
+    recordFallback("iu-unavailable", "jobs-health-fallback-tool");
+    const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
+    const body = await res.json();
+    expect(body.backendFallbacks.count).toBeGreaterThanOrEqual(1);
+    expect(
+      body.warnings.some((w: string) => w.includes("backend fallback(s) in the last hour")),
+    ).toBe(true);
+  });
+
+  test("a route that has never failed stays out of routeStreaks AND never contributes a warning naming it", async () => {
+    // `warnings` is asserted directly here, not just `routeStreaks` — `body.warnings` is
+    // process-global across this whole file (other tests record fallbacks/streaks under
+    // their own keys), so the only thing this test can honestly claim is that THIS
+    // route's own key never appears in it, not that the array is empty.
+    const tool = "jobs-health-clean-route";
+    const key = `${tool}@iu/glm-5.3-flash`;
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", true); // resets/never-fails, stays out of the report
+    const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
+    const body = await res.json();
+    expect(body.routeStreaks[key]).toBeUndefined();
+    expect(body.degradedRoutes).not.toContain(key);
+    expect(body.warnings.some((w: string) => w.includes(key))).toBe(false);
+  });
+
+  test("a streak below ROUTE_STREAK_LIMIT appears in routeStreaks but not degradedRoutes/warnings", async () => {
+    const tool = "jobs-health-below-limit";
+    const key = `${tool}@iu/glm-5.3-flash`;
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false); // 2 < ROUTE_STREAK_LIMIT (3)
+
+    const res = await jobsRoutes.handle(new Request("http://localhost/api/jobs/health"));
+    const body = await res.json();
+
+    expect(body.routeStreaks[key]).toBe(2);
+    expect(body.degradedRoutes).not.toContain(key);
+    expect(body.warnings.some((w: string) => w.includes(key))).toBe(false);
+
+    // Reset so this route doesn't leak a stale streak into a later test in this file.
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", true);
   });
 });

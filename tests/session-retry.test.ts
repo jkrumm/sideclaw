@@ -12,6 +12,12 @@ import {
   unclassifiedOutputFailure,
   backendFallbacksLastHour,
   recordFallback,
+  isIuNeverAnswered,
+  recordRouteOutcome,
+  routeFailureStreaks,
+  ROUTE_STREAK_LIMIT,
+  ROUTE_STREAK_MAX_KEYS,
+  __resetRouteStreaksForTests,
 } from "../server/mcp/session-runner.ts";
 
 describe("isRetryableSessionError", () => {
@@ -325,6 +331,183 @@ describe("planNextAttempt", () => {
     });
     expect(plan).toEqual({ kind: "return" });
   });
+
+  test("iu exit-1 on a 403 cost-denial with no output → immediate fallback to max at attempt 1", () => {
+    const cost403 =
+      'Session exited with code 1. stderr: {"error":"access_denied","message":"rolling-30-day-cost-service-denial-limit"}';
+    const plan = planNextAttempt({
+      ...base,
+      result: {
+        ok: false,
+        backend: "iu",
+        error: cost403,
+        classificationText: cost403,
+      },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "max", model: "claude-haiku-4-5", reason: "iu-unavailable" },
+    });
+  });
+
+  test("the same 403 text WITH output already produced does not fall back — the worker may have started writing files", () => {
+    const cost403 =
+      'Session exited with code 1. stderr: {"error":"access_denied","message":"rolling-30-day-cost-service-denial-limit"}';
+    const plan = planNextAttempt({
+      ...base,
+      noOutputYet: false,
+      result: {
+        ok: false,
+        backend: "iu",
+        error: cost403,
+        classificationText: cost403,
+      },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  test("unrecognized_model on an ok:true result is never consulted — a successful attempt always returns", () => {
+    const plan = planNextAttempt({
+      ...base,
+      result: {
+        ok: true,
+        backend: "iu",
+        classificationText:
+          '[claude-code:unrecognized_model] {"model":"glm-5.3-flash","query_source":"generate_session_title"}',
+      },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  test("the same 403 text on a MAX-backend failure is unchanged — isIuNeverAnswered only gates the iu→max lane", () => {
+    const cost403 = 'stderr: {"error":"access_denied","message":"cost-service-denial-limit"}';
+    const plan = planNextAttempt({
+      ...base,
+      result: { ok: false, backend: "max", error: cost403, classificationText: cost403 },
+      fallback: maxToIu,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  // Measured 2026-09-10, job c4f0f631 (`--model glm-x`, reproduced by hand): a gateway
+  // refusal is NOT zero-turn — one synthetic assistant "turn" (Claude Code's own error
+  // rendering) plus a `result` event carrying `api_error_status` — so `noOutputYet` is
+  // false (`turns: 1`) and the text-only `isIuNeverAnswered` gate above never applies.
+  // `apiErrorStatus` is the fix: it must fall back on its own, `noOutputYet` or not.
+  test("apiErrorStatus 403 on iu, ONE turn already observed (noOutputYet: false) → still falls back to max at attempt 1", () => {
+    const plan = planNextAttempt({
+      ...base,
+      noOutputYet: false,
+      result: {
+        ok: false,
+        backend: "iu",
+        error: "Session exited with code 1. stderr: [claude-code:unrecognized_model] …",
+        apiErrorStatus: 403,
+      },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "max", model: "claude-haiku-4-5", reason: "iu-unavailable" },
+    });
+  });
+
+  test("apiErrorStatus 404 (the reproduced --model glm-x case, in the closed GATEWAY_REFUSED_STATUSES set) on iu → falls back to max the same way", () => {
+    const plan = planNextAttempt({
+      ...base,
+      noOutputYet: false,
+      result: {
+        ok: false,
+        backend: "iu",
+        error: "Session exited with code 1. stderr: [claude-code:unrecognized_model] …",
+        apiErrorStatus: 404,
+      },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "max", model: "claude-haiku-4-5", reason: "iu-unavailable" },
+    });
+  });
+
+  test("apiErrorStatus 503 on iu attempt 1 with no output → retry, not fallback — 503 is the existing retry ladder's territory, not in the closed gateway-refused set", () => {
+    const plan = planNextAttempt({
+      ...base,
+      result: {
+        ok: false,
+        backend: "iu",
+        error: "Session exited with code 1. stderr: 503 Service Unavailable",
+        apiErrorStatus: 503,
+      },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({ kind: "retry" });
+  });
+
+  test("apiErrorStatus on a MAX-backend failure is unchanged — that lane is quota-only, gatewayRefused does not feed it", () => {
+    const plan = planNextAttempt({
+      ...base,
+      noOutputYet: false,
+      result: {
+        ok: false,
+        backend: "max",
+        error: "Session exited with code 1. stderr: [claude-code:unrecognized_model] …",
+        apiErrorStatus: 403,
+      },
+      fallback: maxToIu,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  test("gatewayRefused on the LAST attempt still returns — isLastAttempt wins over any switch", () => {
+    const plan = planNextAttempt({
+      ...base,
+      attempt: MAX_SESSION_ATTEMPTS,
+      noOutputYet: false,
+      result: {
+        ok: false,
+        backend: "iu",
+        error: "Session exited with code 1. stderr: [claude-code:unrecognized_model] …",
+        apiErrorStatus: 403,
+      },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
+  test("a zero-output iu failure carrying the (now-excluded) CLI warning banners retries the same backend instead of jumping straight to fallback — the banners print on an ordinary transport failure's stderr too, which is exactly why they were dropped from IU_NEVER_ANSWERED_RE", () => {
+    const text =
+      'Session exited with code 1. stderr: ⚠ claude.ai connectors are disabled for this account [claude-code:unrecognized_model] {"model":"glm-5.3-flash","query_source":"generate_session_title"} 502 Bad Gateway';
+    const plan = planNextAttempt({
+      ...base,
+      result: { ok: false, backend: "iu", error: text, classificationText: text },
+      fallback: iuToHaiku,
+    });
+    expect(plan).toEqual({ kind: "retry" });
+  });
+});
+
+describe("isIuNeverAnswered", () => {
+  test("matches the gateway's own cost-ceiling refusal", () => {
+    expect(isIuNeverAnswered('{"error":"access_denied","reason":"cost-service-denial"}')).toBe(
+      true,
+    );
+    expect(isIuNeverAnswered("403 Forbidden")).toBe(true);
+  });
+
+  test("does NOT match the two Claude Code CLI warning lines — dropped 2026-09-10: they print on every IU run (including success) AND on an ordinary zero-output transport failure, so matching them skipped the documented same-backend retry on a plain 502/ECONNRESET", () => {
+    expect(isIuNeverAnswered('[claude-code:unrecognized_model] {"model":"glm-5.3-flash"}')).toBe(
+      false,
+    );
+    expect(isIuNeverAnswered("⚠ claude.ai connectors are disabled for this account")).toBe(false);
+  });
+
+  test("does not match unrelated text", () => {
+    expect(isIuNeverAnswered("Session timed out after 240000ms")).toBe(false);
+  });
 });
 
 // ── classifyErrorEnvelope — the is_error/no-`errors`/zero-turn carve-out ────────────
@@ -427,5 +610,57 @@ describe("backendFallbacksLastHour / recordFallback", () => {
     recordFallback("rate-limited", "review");
     setSystemTime(t0 + 60 * 60 * 1000); // exactly one hour later
     expect(backendFallbacksLastHour().count).toBe(1);
+  });
+});
+
+describe("recordRouteOutcome / routeFailureStreaks", () => {
+  test("three consecutive failures then a success: the streak climbs, hits the limit, then resets to 0 (dropped from the report)", () => {
+    const tool = "check-streak-a";
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+    const key = `${tool}@iu/glm-5.3-flash`;
+    expect(routeFailureStreaks()[key]).toBe(3);
+    expect(ROUTE_STREAK_LIMIT).toBe(3);
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", true);
+    expect(routeFailureStreaks()[key]).toBeUndefined();
+  });
+
+  test("keys are per route — a fallback attempt's own backend/model never shares a streak with the primary's", () => {
+    const tool = "check-streak-b";
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+    recordRouteOutcome(tool, "max", "claude-haiku-4-5", false);
+    const streaks = routeFailureStreaks();
+    expect(streaks[`${tool}@iu/glm-5.3-flash`]).toBe(1);
+    expect(streaks[`${tool}@max/claude-haiku-4-5`]).toBe(1);
+  });
+
+  test("routeFailureStreaks() reports only non-zero streaks", () => {
+    const tool = "check-streak-c";
+    recordRouteOutcome(tool, "iu", "glm-5.3-flash", true);
+    expect(routeFailureStreaks()[`${tool}@iu/glm-5.3-flash`]).toBeUndefined();
+  });
+
+  test("the map is bounded at ROUTE_STREAK_MAX_KEYS — a caller-controlled model string (e.g. narrative's params.model) cannot grow it forever", () => {
+    // `routeStreaks` is process-global module state shared with every other test in this
+    // file — reset to a known-empty map first so "size stays 64" is an exact assertion,
+    // not a guess about what earlier tests left behind.
+    __resetRouteStreaksForTests();
+    try {
+      expect(ROUTE_STREAK_MAX_KEYS).toBe(64);
+      const keys = Array.from({ length: 65 }, (_, i) => `bound-probe-${i}`);
+      for (const tool of keys) recordRouteOutcome(tool, "iu", "glm-5.3-flash", false);
+
+      const streaks = routeFailureStreaks();
+      expect(Object.keys(streaks).length).toBe(ROUTE_STREAK_MAX_KEYS);
+      // Oldest-first eviction: the very first key inserted is the one that falls out
+      // once the 65th insertion pushes the map past capacity.
+      expect(streaks[`${keys[0]}@iu/glm-5.3-flash`]).toBeUndefined();
+      // The rest of the 65 survive except that one.
+      expect(streaks[`${keys[64]}@iu/glm-5.3-flash`]).toBe(1);
+      expect(streaks[`${keys[1]}@iu/glm-5.3-flash`]).toBe(1);
+    } finally {
+      __resetRouteStreaksForTests();
+    }
   });
 });

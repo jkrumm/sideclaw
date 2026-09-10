@@ -388,10 +388,13 @@ export async function runOverview(
     // 2026-09-07: halves of the facts block took 34–149 s, the whole 10 KB prompt produced
     // NO event in 480 s, and one run stalled after 2 assistant turns until the cap. Any
     // timeout moves the job onto the route's fallback (Haiku on Max, session-runner.ts —
-    // `retryAfterOutput`, safe because this worker has no tools and no side effects), so
-    // this cap is the most a stalled gateway may cost before the fallback lane answers in
-    // ~60 s: ≈3 min end to end, instead of the 4 + 4 the earlier per-attempt cap allowed.
-    timeoutMs: 2 * 60 * 1000,
+    // `retryAfterOutput`, safe because this worker has no tools and no side effects).
+    // Re-measured 2026-09-10 on the 16 KB / 9-agent prompt: glm-iu answered in 139 s once
+    // and produced nothing in 82 s the next time; haiku-max 58–60 s clean, but ONE
+    // production attempt hit the 120 s cap exactly (job 9c5a7339, both lanes timed out,
+    // a 240 s job.fail). 2 min covered neither lane's tail; 3 min covers glm's measured
+    // success with margin and haiku's variance. Worst case 6 min end to end, not 3.
+    timeoutMs: 3 * 60 * 1000,
     readOnly: true,
     retryAfterOutput: true,
     // Disallow every tool `readOnly` doesn't already remove — the worker must reason over the

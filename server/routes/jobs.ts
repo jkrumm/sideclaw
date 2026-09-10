@@ -1,5 +1,9 @@
 import { Elysia, t } from "elysia";
-import { backendFallbacksLastHour } from "../mcp/session-runner.ts";
+import {
+  backendFallbacksLastHour,
+  ROUTE_STREAK_LIMIT,
+  routeFailureStreaks,
+} from "../mcp/session-runner.ts";
 import { createJob, getJob, jobHealth, listJobs, queueStats } from "../jobs/store.ts";
 import { isJobTool } from "../jobs/types.ts";
 import { DEFAULT_DISPATCH_TIER, resolveDispatchTarget } from "../lib/dispatch-policy.ts";
@@ -53,11 +57,35 @@ export const jobsRoutes = new Elysia({ prefix: "/api/jobs" })
   // Queue health for the devhost heartbeat: `ok` is false when ≥3 jobs failed in the last
   // hour or the oldest pending job has waited >15 min. Static route, so it is registered
   // before `/:id` — never resolved as a job named "health".
-  .get("/health", () => ({
-    ...jobHealth(),
-    // Reported, never enforced — see backendFallbacksLastHour().
-    backendFallbacks: backendFallbacksLastHour(),
-  }))
+  //
+  // `routeStreaks`/`degradedRoutes`/`warnings` are reported, never enforced, same as
+  // `backendFallbacks` above them — a route stuck on consecutive failures (e.g. the IU
+  // gateway refusing every `check@iu/glm-5.3-flash` attempt) is a WARN a human should look
+  // at, not a page. `ok` above stays computed from `evaluateJobHealth` alone.
+  .get("/health", () => {
+    const health = jobHealth();
+    const backendFallbacks = backendFallbacksLastHour();
+    const streaks = routeFailureStreaks();
+    const degradedRoutes = Object.entries(streaks)
+      .filter(([, count]) => count >= ROUTE_STREAK_LIMIT)
+      .map(([route]) => route);
+    const warnings: string[] = degradedRoutes.map(
+      (route) => `route ${route} failed ${streaks[route]} in a row`,
+    );
+    if (backendFallbacks.count > 0) {
+      const reasons = Object.entries(backendFallbacks.reasons)
+        .map(([reason, count]) => `${reason}×${count}`)
+        .join(", ");
+      warnings.push(`${backendFallbacks.count} backend fallback(s) in the last hour: ${reasons}`);
+    }
+    return {
+      ...health,
+      backendFallbacks,
+      routeStreaks: streaks,
+      degradedRoutes,
+      warnings,
+    };
+  })
 
   // Poll a single job's state. `job.status` terminal ⇒ `result` or `error` is set.
   .get("/:id", ({ params, set }) => {

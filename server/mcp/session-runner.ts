@@ -288,6 +288,14 @@ export interface SessionResult<T = unknown> {
    *  a structured signal that the CLI itself retried after a provider-side 429/529.
    *  Checked ahead of the `classificationText` regex in `planNextAttempt`. */
   hadApiRetry?: boolean;
+  /** The result event's own `api_error_status` — set when the failure is the gateway/API
+   *  refusing the request outright (bad model id, cost-ceiling denial) rather than a
+   *  model-produced error. See the doc comment above `apiErrorStatus` in
+   *  `runSessionAttempt` for the measured stream shape: this failure produces one
+   *  synthetic assistant "turn" that is Claude Code's own error text, so `noOutputYet`
+   *  does not catch it — `planNextAttempt` must gate on this field instead. Unset on the
+   *  timeout path and on `!envelope` (no result event ever arrived to carry it). */
+  apiErrorStatus?: number;
 }
 
 /** Live progress snapshot emitted via `onActivity` as stream-json events arrive. */
@@ -312,6 +320,10 @@ interface ClaudeJsonEnvelope {
   session_id?: string;
   total_cost_usd?: number;
   num_turns?: number;
+  /** Set by the CLI when the failure is the gateway/API itself refusing the request
+   *  (bad model id, cost-ceiling denial, …) rather than a model-produced error — see
+   *  `apiErrorStatus`'s doc comment in `runSessionAttempt` for the measured shape. */
+  api_error_status?: number | null;
 }
 
 // One NDJSON line from `--output-format stream-json --verbose`. See
@@ -336,6 +348,8 @@ interface StreamEvent {
   total_cost_usd?: number;
   // system-event field: the worker's real transcript session id (init event).
   session_id?: string;
+  // result-event field: see `ClaudeJsonEnvelope.api_error_status`.
+  api_error_status?: number | null;
 }
 
 /** Compact human label for a tool_use item, used as `lastAction`. */
@@ -631,6 +645,71 @@ export function backendFallbacksLastHour(): { count: number; reasons: Record<str
   return { count: recent.length, reasons };
 }
 
+/** Consecutive failures for one `${tool}@${backend}/${model}` route, since the last
+ *  success on that same route. Process-local and unpersisted, same rationale as
+ *  `fallbackLog` above — a restart resets a streak along with everything else this
+ *  process was mid-observing. Reset to 0 (not deleted) on success so `routeFailureStreaks`
+ *  only has to filter, never distinguish "never failed" from "recovered". */
+const routeStreaks = new Map<string, number>();
+export const ROUTE_STREAK_LIMIT = 3;
+
+/** Caps `routeStreaks`. The model component of a route key is not a closed set — e.g.
+ *  `narrative`'s `params.model` is a caller-supplied free string — so without a bound a
+ *  client that varies its model on every call grows this map forever. A Map preserves
+ *  insertion order, so "oldest" below is simply the first key. */
+export const ROUTE_STREAK_MAX_KEYS = 64;
+
+function routeKey(tool: string, backend: string, model: string): string {
+  return `${tool}@${backend}/${model}`;
+}
+
+/** Evict the oldest entry before inserting a genuinely NEW key at capacity. A no-op for
+ *  a key already tracked — that call is an update, not a growth, and must not evict
+ *  anything just because it happened to run at capacity. */
+function evictOldestIfAtCapacity(key: string): void {
+  if (routeStreaks.has(key) || routeStreaks.size < ROUTE_STREAK_MAX_KEYS) return;
+  const oldestKey = routeStreaks.keys().next().value;
+  if (oldestKey !== undefined) routeStreaks.delete(oldestKey);
+}
+
+/** Record one attempt's outcome against its route's streak. Exported only so
+ *  `tests/session-retry.test.ts` can drive it directly — no other caller outside this
+ *  module should ever call it. */
+export function recordRouteOutcome(
+  tool: string,
+  backend: string,
+  model: string,
+  ok: boolean,
+): void {
+  const key = routeKey(tool, backend, model);
+  evictOldestIfAtCapacity(key);
+  if (ok) {
+    routeStreaks.set(key, 0);
+    return;
+  }
+  routeStreaks.set(key, (routeStreaks.get(key) ?? 0) + 1);
+}
+
+/** Non-zero streaks only — a route that has never failed, or just recovered, has
+ *  nothing worth surfacing on a health poll. */
+export function routeFailureStreaks(): Record<string, number> {
+  const streaks: Record<string, number> = {};
+  for (const [key, count] of routeStreaks) {
+    if (count > 0) streaks[key] = count;
+  }
+  return streaks;
+}
+
+/** Test-only: wipe every tracked route, same rationale as `server/jobs/store.ts`'s
+ *  `__resetForTests` for `draining` — `routeStreaks` is process-global module state, so
+ *  a test asserting an exact bound (e.g. the eviction cap) needs a known-empty starting
+ *  point rather than whatever earlier test files happened to leave behind. Never called
+ *  from production code — a real process has exactly one of these maps for its own
+ *  lifetime and never wants it wiped mid-run. */
+export function __resetRouteStreaksForTests(): void {
+  routeStreaks.clear();
+}
+
 export function resolveBackend(route: ToolRoute): ResolvedBackend {
   const { model, backend } = route;
   if (!isClaudeModel(model)) return { backend: "iu", reason: "non-claude-model" };
@@ -663,6 +742,43 @@ const QUOTA_ERROR_RE = /hit your (usage )?limit|usage limit|rate.?limit|429|over
  *  (`isRetryableSessionError`), which stays backend-agnostic. */
 export function isQuotaError(text: string): boolean {
   return QUOTA_ERROR_RE.test(text);
+}
+
+// Text patterns for an `iu`-backend attempt the gateway itself refused outright:
+// `access_denied`, `cost-service-denial`, a bare 403. Deliberately narrower than the
+// first cut of this regex, which also matched two Claude Code CLI warning lines
+// (`unrecognized_model`, `connectors are disabled`) — those were confirmed 2026-09-10
+// to print on EVERY IU run, including a successful one, but ALSO on a genuine zero-output
+// transport failure (a 502/ECONNRESET before the first turn) that has nothing to do with
+// a gateway refusal. With them in the regex, that ordinary transport failure's
+// `classificationText` carried the banner too, so `isIuNeverAnswered` matched it and
+// skipped the documented one same-backend retry (`planNextAttempt`'s `iu` transport
+// lane) straight to the `max` fallback — a real, reachable false positive, not a
+// theoretical one. Dropped rather than gated further: nothing here needs them to catch
+// the shapes `apiErrorStatus` (see `runSessionAttempt`) now covers directly.
+const IU_NEVER_ANSWERED_RE = /access_denied|cost-service-denial|\b403\b/i;
+
+/** `SessionResult.apiErrorStatus` values that mean the request itself will never
+ *  succeed — bad/missing auth, an unknown model id, access denied — as opposed to
+ *  429/5xx, which are the existing retry ladder's territory (rate limits, transient
+ *  gateway overload) and must keep going through it rather than jump straight to a
+ *  backend switch. See `gatewayRefused` in `planNextAttempt`. */
+const GATEWAY_REFUSED_STATUSES = new Set([400, 401, 403, 404]);
+
+/** Does this TRANSPORT-sourced text look like the IU gateway refusing the request
+ *  outright (cost ceiling, access denial) rather than a generic transport error? Pure
+ *  — mirrors `isQuotaError`'s contract: callers must gate on zero output themselves. */
+export function isIuNeverAnswered(text: string): boolean {
+  return IU_NEVER_ANSWERED_RE.test(text);
+}
+
+/** Append the result event's own `api_error_status` (see `SessionResult.apiErrorStatus`)
+ *  to an already-built classification string, so the text-based classifiers can see it
+ *  too — transport/CLI-sourced, same standing as the rest of that text. A no-op when no
+ *  status was observed (the timeout and `!envelope` paths, which never reached a result
+ *  event). Shared by both `runSessionAttempt` return paths that can carry a status. */
+function appendApiErrorStatus(text: string, status: number | undefined): string {
+  return status !== undefined ? `${text} api_error_status=${status}` : text;
 }
 
 /** Classify an `is_error` result envelope for the reactive quota fallback. Pure —
@@ -1090,6 +1206,15 @@ async function runSessionAttempt<T = unknown>(
   // attempt. Truer than a text match, but not exhaustive — a definitive block the
   // CLI never got to retry sets this false while still being real quota exhaustion.
   let apiRetrySeen = false;
+  // Measured 2026-09-10 (job c4f0f631, `--model glm-x` reproduced by hand): a gateway
+  // refusal (unknown model, cost-ceiling denial) does NOT surface as zero turns — Claude
+  // Code emits one synthetic `assistant` event whose text is its OWN error rendering
+  // ("There's an issue with the selected model…"), then a `result` event with
+  // `is_error: true, api_error_status: 404 (or 403, …), num_turns: 1`, then exits 1. That
+  // one "turn" is Claude Code narrating the refusal, not model output, so `noOutputYet`
+  // (turns === 0) is the wrong gate for this failure shape — `api_error_status` is the
+  // right one, and it is transport/CLI-sourced same as `apiRetrySeen`, never model stdout.
+  let apiErrorStatus: number | undefined;
   let sessionEnvWritten = false;
   const maybeWriteSessionEnv = () => {
     if (sessionEnvWritten || !workerSessionId) return;
@@ -1143,6 +1268,7 @@ async function runSessionAttempt<T = unknown>(
         break;
       case "result":
         envelope = ev as ClaudeJsonEnvelope;
+        if (typeof ev.api_error_status === "number") apiErrorStatus = ev.api_error_status;
         if (!workerSessionId && ev.session_id) {
           workerSessionId = ev.session_id;
           maybeWriteSessionEnv();
@@ -1243,14 +1369,19 @@ async function runSessionAttempt<T = unknown>(
   }
 
   if (exitCode !== 0) {
-    emitAttribution("error", { durationMs, turns, exitCode });
+    emitAttribution("error", { durationMs, turns, exitCode, apiErrorStatus });
     // exitCode + stderr are both transport/provider-sourced (CLI diagnostics, never
-    // model stdout) — safe to reuse verbatim as the classification text.
+    // model stdout) — safe to reuse verbatim as the classification text. The result
+    // event (if one arrived before the process exited) is parsed ahead of this check —
+    // see `apiErrorStatus`'s doc comment above — so append it here too, transport-sourced
+    // same as the rest of this string.
     const error = `Session exited with code ${exitCode}${stderrTrimmed ? `. stderr: ${stderrTrimmed}` : ""}`;
+    const classificationText = appendApiErrorStatus(error, apiErrorStatus);
     return {
       ok: false,
       error,
-      classificationText: error,
+      classificationText,
+      apiErrorStatus,
       hadApiRetry: apiRetrySeen,
       backend,
       model,
@@ -1295,16 +1426,33 @@ async function runSessionAttempt<T = unknown>(
     // `result` to the classifier, so it must only fire when BOTH the CLI's own count and
     // the turns we observed on the stream agree that the model never spoke.
     const turnsObserved = Math.max(envelope.num_turns ?? 0, turns);
-    const { errMsg, classificationText } = classifyErrorEnvelope(envelope, turnsObserved);
+    const { errMsg, classificationText: classifiedText } = classifyErrorEnvelope(
+      envelope,
+      turnsObserved,
+    );
+    // See `apiErrorStatus`'s doc comment above: a gateway refusal (bad model id,
+    // cost-ceiling denial) lands here as `is_error: true` with exactly one turn — the
+    // turn is Claude Code's own error rendering, not model output — so append the
+    // envelope's own `api_error_status` to the classification text (transport-sourced,
+    // same standing as the rest of `classifyErrorEnvelope`'s output).
+    const classificationText = appendApiErrorStatus(classifiedText, apiErrorStatus);
     runnerLogger().error(
-      { event: "session.error", project: cwd, ...errCtx, subtype: envelope.subtype, error: errMsg },
+      {
+        event: "session.error",
+        project: cwd,
+        ...errCtx,
+        subtype: envelope.subtype,
+        error: errMsg,
+        apiErrorStatus,
+      },
       "session is_error",
     );
-    emitAttribution("error", { durationMs, turns: turnsObserved });
+    emitAttribution("error", { durationMs, turns: turnsObserved, apiErrorStatus });
     return {
       ok: false,
       error: errMsg,
       classificationText,
+      apiErrorStatus,
       hadApiRetry: apiRetrySeen,
       backend,
       model,
@@ -1464,6 +1612,9 @@ export interface AttemptOutcome {
   /** See `SessionResult.hadApiRetry` — the structured `api_retry` signal, checked
    *  ahead of `classificationText`. */
   hadApiRetry?: boolean;
+  /** See `SessionResult.apiErrorStatus` — a gateway/API refusal, checked instead of
+   *  `noOutputYet` since this failure shape produces one synthetic "turn". */
+  apiErrorStatus?: number;
 }
 
 export interface NextAttemptInput {
@@ -1492,9 +1643,11 @@ export type NextAttemptPlan =
  *  or switch lanes once. Rules, in order (see `runSession`'s doc comment for the why):
  *  1. `max` + iu fallback + quota-flavoured failure → fallback to `iu`, same model.
  *  2. `iu` + max fallback + "IU never answered" → fallback to `max` on `fallback.model`
- *     (or the same model). Immediately for missing credentials or a timeout with zero
- *     events (any timeout when `retryAfterOutput` is set); after one same-backend retry
- *     for an ordinary transport error.
+ *     (or the same model). Immediately for missing credentials, a timeout with zero
+ *     events (any timeout when `retryAfterOutput` is set), or a gateway/API refusal
+ *     (`apiErrorStatus`, e.g. an unrecognized model id or a cost-ceiling denial — see
+ *     `gatewayRefused` below); after one same-backend retry for an ordinary transport
+ *     error.
  *  3. Transient transport error → retry the same backend (bounded by MAX_SESSION_ATTEMPTS).
  *  4. Otherwise return. A fallback attempt that fails is never switched again. */
 export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
@@ -1510,8 +1663,26 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   // the wasted wait), so a stuck timeout goes straight to the fallback lane like a missing
   // IU credential does. The quota and transport lanes below keep the no-output guard.
   const timedOutStuck = (noOutputYet || retryAfterOutput) && error.startsWith("Session timed out");
+  // Measured 2026-09-10 (job c4f0f631, `--model glm-x` reproduced by hand): a gateway
+  // refusal (bad model id, cost-ceiling denial) does NOT produce zero turns — Claude
+  // Code emits one synthetic assistant "turn" that is its OWN error rendering ("There's
+  // an issue with the selected model…"), then a `result` event carrying
+  // `api_error_status` (404 for the reproduced case, 403 for the 2026-09-10 12:23Z cost
+  // denial), then exits 1. `noOutputYet` (turns === 0) never catches this shape, so
+  // `apiErrorStatus` is the direct signal instead. Deliberately a CLOSED set, not `>= 400`:
+  // 429 and 5xx are the existing retry ladder's territory (rate limits, transient gateway
+  // overload — genuinely worth a same-backend retry, or the quota lane above), so folding
+  // them in here would skip that retry on a status this codebase already knows how to
+  // recover from. Only statuses that mean "this exact request will never succeed" —
+  // bad/missing auth, an unknown model id, access denied — belong in this set.
+  const gatewayRefused =
+    typeof result.apiErrorStatus === "number" &&
+    GATEWAY_REFUSED_STATUSES.has(result.apiErrorStatus);
   const switchable =
-    !result.ok && !usedFallback && !isLastAttempt && (noOutputYet || timedOutStuck);
+    !result.ok &&
+    !usedFallback &&
+    !isLastAttempt &&
+    (noOutputYet || timedOutStuck || gatewayRefused);
   // The structured `api_retry` signal wins outright when present; otherwise fall back to
   // the regex over TRANSPORT-sourced text only (`classificationText`, never the full
   // `error`, which can embed the model's own stdout) — see `isQuotaError`'s doc comment.
@@ -1526,13 +1697,28 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   }
 
   const noCredentials = result.iuConfigError === true;
-  const iuDown = noCredentials || timedOutStuck || isRetryableSessionError(error);
+  // "IU never answered" — either the structured `apiErrorStatus` signal above (the
+  // gateway/API itself refused the request; wins outright, no `noOutputYet` gate needed
+  // since a real model turn cannot produce that field), or a gateway-level refusal
+  // matched by text that only means something on a failure with zero output (see
+  // `IU_NEVER_ANSWERED_RE`'s comment for why the two Claude Code CLI warning lines that
+  // used to also live in that regex were dropped rather than merely gated here: they
+  // print on every IU run, success or ordinary zero-output transport failure alike, and
+  // the false-positive cost of skipping the transport retry on a plain 502 was real).
+  // Confirmed 2026-09-10: a fast IU exit-1 on a 403 cost-denial hits neither
+  // `noCredentials` nor `timedOutStuck` nor `isRetryableSessionError` (403 is not in
+  // the retryable status set), so without this it fell through to "return failed"
+  // at attempt 1 instead of falling back to `max`.
+  const neverAnswered =
+    gatewayRefused ||
+    (noOutputYet && isIuNeverAnswered(result.classificationText ?? result.error ?? ""));
+  const iuDown = noCredentials || timedOutStuck || isRetryableSessionError(error) || neverAnswered;
   if (
     switchable &&
     result.backend === "iu" &&
     fallback?.backend === "max" &&
     iuDown &&
-    (noCredentials || timedOutStuck || attempt >= 2)
+    (noCredentials || timedOutStuck || neverAnswered || attempt >= 2)
   ) {
     return {
       kind: "fallback",
@@ -1555,6 +1741,15 @@ export async function runSession<T = unknown>(opts: SessionOptions<T>): Promise<
     attempt++;
     const turnsRef = { current: 0 };
     const result = await runSessionAttempt(opts, turnsRef, forced);
+    // One route key per attempt, primary or forced fallback alike — each backend/model
+    // combination a job actually ran on gets its own streak, so a healthy `max` fallback
+    // never gets buried under a struggling `iu` primary's count.
+    recordRouteOutcome(
+      opts.tool ?? "unknown",
+      result.backend ?? "unknown",
+      result.model ?? "unknown",
+      result.ok,
+    );
     const plan = planNextAttempt({
       result,
       attempt,
