@@ -69,7 +69,9 @@ sideclaw exposes workflow tools (`check`, `review`, `dispatch`, `overview`,
 (`job_status`, `job_wait`) as an MCP server — a **separate process** from the
 LaunchAgent, spawned on-demand by Claude Code via stdio transport.
 `GET /api/agents` (below) is HTTP-only, deliberately outside this MCP
-surface — see `### agents, overview, narrative`.
+surface — see `### agents, overview, narrative`. `otel` alone runs inline via
+`runSession`, never as a job — no `jobId`, no `job_wait` — by decision:
+`brain/wiki/engineering/model-routing.md`.
 
 Entry point: `server/mcp.ts`. Thin MCP tool wrappers live in
 `server/mcp/tools/`; the actual execution logic + schemas live in
@@ -232,26 +234,11 @@ hardcodes an id. Handlers pass `route: routeFor("<tool>")`, the MCP tool
 descriptions print the same route under `MODEL:`, and **`GET /api/routing`**
 shows the effective table plus every applied or refused override.
 
-| Tool | Primary | Fallback |
-|-|-|-|
-| `check`, `overview`, `review`'s router | `glm-5.3-flash` on **iu** (the CLASSIFY tier) | `claude-haiku-4-5` on max (IU transport failure before first output, or any timeout — `retryAfterOutput`) |
-| `narrative`, `excalidraw` | `claude-sonnet-5[1m]` on **iu** (the PROSE tier) | same model on max |
-| `review` (angles, synthesis), `dispatch`, `otel` | `claude-sonnet-5[1m]` on **max** (the JUDGE tier) | same model on iu (a quota-flavoured failure) |
-| `review` adversary | `gpt-5.6-terra` on iu (direct IU OpenAI text call — fixed `iu-openai` transport, `backend`/`fallback` informational only, a `SIDECLAW_BACKEND_ADVERSARY` override is refused) | none |
-| `read_image`, `read_drawing` | `gemini-3.5-flash` on iu (the VISION tier — same fixed `iu-openai` transport and override refusal) | none |
-
-Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`, `SIDECLAW_BACKEND_<TOOL>=iu|max`
-(read once at module load → `make reload`; the applied/refused list is logged
-once at startup — `info`, or `warn` if anything was refused);
-`SIDECLAW_WORKER_FALLBACK=none` pins every tool to its primary. Fallback runs
-**both directions**, purely **reactively** — `max`→`iu` on a quota-flavoured
-failure, `iu`→`max` on a transport failure after one same-backend retry —
-each latched so a fallback attempt is never switched again. A proactive
-Max-quota-ceiling pre-check used to also feed the `max`→`iu` hop before a
-session even launched; removed 2026-09-08 (false-positive triggers and
-stampede behavior under burst cost more than the quota it saved) — do not
-re-add it. Full backend-selection rationale, the classification signals and
-the retry ladder: `docs/routing-and-quota.md`.
+Live table: **`GET /api/routing`**. Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`,
+`SIDECLAW_BACKEND_<TOOL>=iu|max` (read once at module load → `make reload`).
+Full rationale — the tiers, the reactive fallback, why the proactive
+quota-ceiling pre-check was removed 2026-09-08 and must not return:
+`brain/wiki/engineering/model-routing.md`.
 
 **`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed
 `http` server) into its own worker session — key resolution fails soft

@@ -3,6 +3,20 @@ import { parseCols, renderText, type AgentEnrichment } from "../lib/agents.ts";
 import { buildOverviewPayload, cachedBuildSnapshot } from "../lib/overview-payload.ts";
 import { appLogger as logger } from "../logger.ts";
 
+/** Shared by both `.txt` routes: the start-of-request timestamp and the `color`/`cols` query
+ *  flags every plain-text renderer call takes. */
+function parseTextQuery(query: Record<string, string | undefined>): {
+  startMs: number;
+  color: boolean;
+  cols: number;
+} {
+  return {
+    startMs: performance.now(),
+    color: query.color === "1" || query.ansi === "1",
+    cols: parseCols(query.cols),
+  };
+}
+
 // Deterministic, read-only, no-LLM agent overview: one JSON snapshot of every Claude Code
 // agent on this Mac mini, grouped by project. Single producer behind Hermes, an Argo
 // dashboard, a brain page and a herdr pane. See CLAUDE.md's `### agents` section.
@@ -34,9 +48,7 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
     return { ok: true, data };
   })
   .get("/agents.txt", async ({ query, set }) => {
-    const startMs = performance.now();
-    const color = query.color === "1" || query.ansi === "1";
-    const cols = parseCols(query.cols);
+    const { startMs, color, cols } = parseTextQuery(query);
     logger.info(
       { event: "agents.request", tool: "agents", format: "text" },
       "agents snapshot requested",
@@ -77,14 +89,12 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
     return { ok: true, data: payload };
   })
   .get("/overview.txt", async ({ query, set }) => {
-    const startMs = performance.now();
-    const color = query.color === "1" || query.ansi === "1";
-    const cols = parseCols(query.cols);
+    const { startMs, color, cols } = parseTextQuery(query);
     logger.info(
       { event: "overview.request", tool: "overview", format: "text" },
       "overview snapshot requested",
     );
-    const { snapshot, merged } = await buildOverviewPayload();
+    const { snapshot, merged, warden } = await buildOverviewPayload();
     const enrichment = new Map<string, AgentEnrichment>();
     for (const project of merged.projects) {
       for (const agent of project.agents) {
@@ -108,5 +118,5 @@ export const agentsRoutes = new Elysia({ prefix: "/api" })
       },
       "overview snapshot built",
     );
-    return renderText(snapshot, { enrichment, overview: merged.overview, color, cols });
+    return renderText(snapshot, { enrichment, overview: merged.overview, warden, color, cols });
   });

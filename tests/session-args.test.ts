@@ -6,7 +6,7 @@
 // from silently going away again.
 
 import { describe, expect, test } from "bun:test";
-import { buildSessionArgs, WORKER_SETTINGS } from "../server/mcp/session-runner.ts";
+import { buildSessionArgs, buildWorkerEnv, WORKER_SETTINGS } from "../server/mcp/session-runner.ts";
 
 function args(overrides: Partial<Parameters<typeof buildSessionArgs>[0]> = {}): string[] {
   return buildSessionArgs({
@@ -135,5 +135,52 @@ describe("buildSessionArgs — json schema", () => {
 
   test("is omitted entirely when no schema is requested", () => {
     expect(args()).not.toContain("--json-schema");
+  });
+});
+
+// ── buildWorkerEnv — USAGE_LANE ──────────────────────────────────────────────────
+//
+// USAGE_LANE tags a worker's cost to its routed tool for usage-tracker's claude-code
+// collector. It must survive `buildWorkerEnv`'s own sensitive-env scrub (the same pass that
+// deletes any inherited TOKEN/SECRET/KEY-shaped var) — `USAGE_LANE` doesn't match that
+// pattern today, but this pins the behavior rather than trusting the regex by inspection.
+
+function workerEnv(overrides: Partial<Parameters<typeof buildWorkerEnv>[0]> = {}) {
+  return buildWorkerEnv({
+    backend: "max",
+    model: "claude-sonnet-5",
+    anthropicBase: "",
+    iuKey: "",
+    baseEnv: {},
+    ...overrides,
+  });
+}
+
+describe("buildWorkerEnv — USAGE_LANE", () => {
+  test("pins sideclaw:<tool> for a defined tool", () => {
+    expect(workerEnv({ tool: "review" }).USAGE_LANE).toBe("sideclaw:review");
+  });
+
+  test("defaults to sideclaw:unknown when no tool is given", () => {
+    expect(workerEnv({ tool: undefined }).USAGE_LANE).toBe("sideclaw:unknown");
+  });
+
+  test("survives the sensitive-env scrub that follows", () => {
+    // A worker env carrying credential-shaped inherited vars must have them scrubbed —
+    // but USAGE_LANE, set just before the scrub runs, must still be standing after it.
+    const env = workerEnv({
+      tool: "dispatch",
+      baseEnv: {
+        GITHUB_TOKEN: "ghp_x",
+        SOME_API_KEY: "secret",
+        SESSION_ID: "should-be-scrubbed",
+        HOME: "/Users/example",
+      },
+    });
+    expect(env.USAGE_LANE).toBe("sideclaw:dispatch");
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.SOME_API_KEY).toBeUndefined();
+    expect(env.SESSION_ID).toBeUndefined();
+    expect(env.HOME).toBe("/Users/example");
   });
 });

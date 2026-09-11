@@ -34,6 +34,7 @@ import {
   type HerdrWorkspaceRaw,
   type TranscriptTail,
 } from "../server/lib/agents.ts";
+import type { WardenBoard, WardenItem } from "../server/lib/warden-board.ts";
 
 // ── encodeProjectDir ─────────────────────────────────────────────────────────────────────────
 
@@ -1139,5 +1140,181 @@ describe("fitHeader", () => {
     const header = text.split("\n")[0] ?? "";
     expect(header.length).toBeLessThanOrEqual(110);
     expect(header).toContain("· overview 2m");
+  });
+});
+
+// ── renderText — warden block (opts.warden) ─────────────────────────────────────────────────
+
+function wardenItem(overrides: Partial<WardenItem> = {}): WardenItem {
+  return {
+    eventId: 1,
+    origin: "alert",
+    repo: "warden",
+    state: "needs_human",
+    title: "watchdog: sideclaw dispatch stuck",
+    note: null,
+    prUrl: null,
+    updatedAt: "2026-09-10T23:00:00.000Z",
+    inFlightJob: null,
+    ...overrides,
+  };
+}
+
+describe("renderText — warden block", () => {
+  const GENERATED_AT = Date.parse("2026-09-11T00:00:00.000Z");
+
+  function baseSnapshot(): AgentsSnapshot {
+    return {
+      generatedAt: GENERATED_AT,
+      staleAfterHours: 24,
+      summary: { needsYou: 0, working: 0, idle: 0, stale: 0, done: 0, dispatch: 0 },
+      projects: [],
+      humanQueue: [],
+      warnings: [],
+    };
+  }
+
+  function board(items: WardenItem[], countOverrides: Partial<WardenBoard> = {}): WardenBoard {
+    return {
+      ok: true,
+      generatedAt: "2026-09-11T00:00:00.000Z",
+      counts: {
+        new: 0,
+        investigating: 1,
+        verdict: 0,
+        implementing: 0,
+        validating: 0,
+        merged: 0,
+        liveness_pending: 0,
+        needs_human: 2,
+        merge_blocked: 1,
+        split: 0,
+      },
+      open: 4,
+      items,
+      itemsTruncated: false,
+      terminal24h: 0,
+      fetchedAt: GENERATED_AT,
+      ...countOverrides,
+    } as WardenBoard;
+  }
+
+  test("no `opts.warden` — the block is omitted entirely (old snapshots, plain /api/agents.txt)", () => {
+    const text = renderText(baseSnapshot());
+    expect(text).not.toContain("warden ·");
+  });
+
+  test("unreachable board renders the single diagnostic line", () => {
+    const text = renderText(baseSnapshot(), {
+      warden: { ok: false, error: "fetch failed: ECONNREFUSED", fetchedAt: GENERATED_AT },
+    });
+    expect(text).toContain("warden · unreachable (fetch failed: ECONNREFUSED)");
+  });
+
+  test("header carries open/needs_human/merge_blocked/in-flight counts", () => {
+    const text = renderText(baseSnapshot(), { warden: board([wardenItem()]) });
+    expect(text).toContain("warden · 4 open · needs_human 2 · merge_blocked 1 · in flight 1");
+  });
+
+  test("items are ordered needs_human/merge_blocked first (by original index), then in-flight, then the rest", () => {
+    const items = [
+      wardenItem({ eventId: 1, state: "merge_blocked", repo: "repo-a", title: "a" }),
+      wardenItem({ eventId: 2, state: "investigating", repo: "repo-b", title: "b" }),
+      wardenItem({ eventId: 3, state: "needs_human", repo: "repo-c", title: "c" }),
+      wardenItem({ eventId: 4, state: "verdict", repo: "repo-d", title: "d" }),
+    ];
+    const text = renderText(baseSnapshot(), { warden: board(items) });
+    const lines = text.split("\n").filter((l) => l.includes("repo-"));
+    // needs_human and merge_blocked share bucket 0 — original order (a before c) wins.
+    expect(lines[0]).toContain("repo-a");
+    expect(lines[1]).toContain("repo-c");
+    expect(lines[2]).toContain("repo-b"); // investigating (in-flight) bucket 1
+    expect(lines[3]).toContain("repo-d"); // verdict (rest) bucket 2
+  });
+
+  test("caps rendered item lines at 8", () => {
+    const items = Array.from({ length: 12 }, (_, i) =>
+      wardenItem({ eventId: i, state: "verdict", repo: `repo-${i}`, title: `item ${i}` }),
+    );
+    const text = renderText(baseSnapshot(), { warden: board(items) });
+    const itemLines = text.split("\n").filter((l) => l.includes("repo-"));
+    expect(itemLines).toHaveLength(8);
+  });
+
+  test("colour: needs_human and merge_blocked carry the bold-red SGR, in-flight carries green", () => {
+    const items = [
+      wardenItem({ eventId: 1, state: "needs_human", repo: "repo-a" }),
+      wardenItem({ eventId: 2, state: "merge_blocked", repo: "repo-b" }),
+      wardenItem({ eventId: 3, state: "investigating", repo: "repo-c" }),
+    ];
+    const text = renderText(baseSnapshot(), { warden: board(items), color: true });
+    const lines = text.split("\n");
+    const needsHumanLine = lines.find((l) => l.includes("repo-a"));
+    const mergeBlockedLine = lines.find((l) => l.includes("repo-b"));
+    const inFlightLine = lines.find((l) => l.includes("repo-c"));
+    expect(needsHumanLine).toContain("\x1b[1m\x1b[31m");
+    expect(mergeBlockedLine).toContain("\x1b[1m\x1b[31m");
+    expect(inFlightLine).toContain("\x1b[32m");
+  });
+
+  test("plain mode carries no SGR codes for the warden block", () => {
+    const text = renderText(baseSnapshot(), {
+      warden: board([wardenItem({ state: "needs_human" })]),
+      color: false,
+    });
+    expect(stripAnsi(text)).toBe(text);
+  });
+
+  test("respects `cols` — every warden line stays within budget", () => {
+    const items = [
+      wardenItem({
+        title: "a very long title that would otherwise overflow a narrow terminal pane by a lot",
+      }),
+    ];
+    const text = renderText(baseSnapshot(), { warden: board(items), cols: 60 });
+    for (const line of text.split("\n")) {
+      expect(line.length).toBeLessThanOrEqual(60);
+    }
+  });
+
+  test("security: an ANSI/control-byte injection in a title renders stripped", () => {
+    const items = [
+      wardenItem({
+        title: "watchdog\x1b[31m\x07 stuck\x1b[0m",
+      }),
+    ];
+    const text = renderText(baseSnapshot(), { warden: board(items) });
+    // \x1b[31m/\x1b[0m came from the ATTACKER-controlled title, not from color mode (which is
+    // off here) — a plain-mode render must never carry SGR bytes regardless of their source.
+    expect(text).not.toContain("\x1b[31m");
+    expect(text).not.toContain("\x07");
+    expect(text).toContain("watchdog");
+  });
+
+  test("security: an unreachable-board error carrying control bytes renders stripped", () => {
+    const text = renderText(baseSnapshot(), {
+      warden: { ok: false, error: "ECONNREFUSED\x1b[31m\x07", fetchedAt: GENERATED_AT },
+    });
+    expect(text).not.toContain("\x1b[31m");
+    expect(text).not.toContain("\x07");
+    expect(text).toContain("ECONNREFUSED");
+  });
+
+  test("appends `… N more` once items exceed the 8-line cap", () => {
+    const items = Array.from({ length: 11 }, (_, i) =>
+      wardenItem({ eventId: i, state: "verdict", repo: `repo-${i}`, title: `item ${i}` }),
+    );
+    const text = renderText(baseSnapshot(), { warden: board(items) });
+    const wardenLines = text.split("\n").filter((l) => l.includes("repo-") || l.includes("more"));
+    expect(wardenLines).toHaveLength(9); // 8 items + the "more" line
+    expect(wardenLines.at(-1)).toContain("… 3 more");
+  });
+
+  test("no `… more` line when items fit within the 8-line cap", () => {
+    const items = Array.from({ length: 8 }, (_, i) =>
+      wardenItem({ eventId: i, state: "verdict", repo: `repo-${i}`, title: `item ${i}` }),
+    );
+    const text = renderText(baseSnapshot(), { warden: board(items) });
+    expect(text).not.toContain("more");
   });
 });

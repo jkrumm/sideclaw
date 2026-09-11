@@ -6,6 +6,29 @@ import { appLogger as logger } from "../logger.ts";
 import type { JobRecord, JobStatus } from "../jobs/types.ts";
 import { listJobRecords } from "../jobs/store.ts";
 import { getGitStatus } from "./git.ts";
+import type { WardenBoard } from "./warden-board.ts";
+import { renderWardenBlock } from "./warden-board.ts";
+import {
+  RESET,
+  BOLD,
+  DIM,
+  RED,
+  GREEN,
+  BOLD_RED,
+  DIM_GREEN,
+  YELLOW,
+  CYAN,
+  MAGENTA,
+  MIN_TITLE_CHARS,
+  stripAnsi,
+  clampVisible,
+  clampLine,
+  truncate,
+  relativeAge,
+  stripControlBytes,
+} from "./render-text-utils.ts";
+
+export { stripAnsi, truncate, relativeAge };
 
 // One producer, one JSON snapshot, three renderers (Hermes, an Argo dashboard, a brain page,
 // a herdr pane). Read-only, no LLM: this module deterministically merges three CLI/registry
@@ -612,7 +635,7 @@ const MAX_STANDING_CHARS = MAX_LINE_CHARS - 8;
 export const MIN_COLS = 40;
 export const MAX_COLS = 200;
 export const DEFAULT_COLS = 110;
-const MIN_TITLE_CHARS = 20;
+// MIN_TITLE_CHARS lives in ./render-text-utils.ts (shared with warden-board.ts).
 // Below this width, "  [N agents]" on the project line would routinely be the difference
 // between fitting and wrapping on a phone terminal — drop it, the agent list itself still
 // shows the count.
@@ -634,38 +657,8 @@ export function parseCols(raw: string | undefined): number {
 // SGR only, no 256/truecolor — this renders in a herdr pane via `watch --color`, and plain
 // output must stay byte-identical when the flag is absent. Every coloured span resets before
 // the newline, so a truncated line or a terminal that dies mid-stream never leaks colour into
-// whatever follows.
-
-const RESET = "\x1b[0m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
-const YELLOW = "\x1b[33m";
-const CYAN = "\x1b[36m";
-const MAGENTA = "\x1b[35m";
-const BOLD_RED = `${BOLD}${RED}`;
-const DIM_GREEN = `${DIM}${GREEN}`;
-
-/** Strips SGR escape sequences — used by tests to assert `stripAnsi(coloured) === plain`, and
- *  internally to measure a coloured line's VISIBLE width for the 110-char clamp (never the
- *  escape bytes). A manual scan rather than a `/\x1b.../ ` regex literal — oxlint's
- *  `no-control-regex` flags the literal ESC byte in a regex pattern regardless of intent. */
-export function stripAnsi(text: string): string {
-  let out = "";
-  let i = 0;
-  while (i < text.length) {
-    if (text[i] === "\x1b") {
-      const end = text.indexOf("m", i);
-      if (end === -1) break;
-      i = end + 1;
-      continue;
-    }
-    out += text[i];
-    i += 1;
-  }
-  return out;
-}
+// whatever follows. The palette, `stripAnsi`, and the clamp/truncate/age helpers below all
+// live in ./render-text-utils.ts — shared with warden-board.ts's `renderWardenBlock`.
 
 /** A per-agent line/bar-bucket is coloured by its `overview` recommendation when enrichment is
  *  present, else by its deterministic `state` — EXCEPT `needs_you` always wins regardless of
@@ -743,31 +736,6 @@ const RECOMMENDATION_BAR_ORDER: Recommendation[] = [
 ];
 const STATE_BAR_ORDER: AgentState[] = ["needs_you", "working", "idle", "stale", "done", "unknown"];
 
-/** Clamps a (possibly ANSI-coloured) line to `maxChars` VISIBLE characters, passing escape
- *  bytes through uncounted, and always closing with a reset so a mid-escape cut can never
- *  leak colour into the next line. No-ops (returns `line` unchanged) when already within
- *  budget, so an uncoloured caller pays nothing extra. */
-function clampVisible(line: string, maxChars: number): string {
-  if (stripAnsi(line).length <= maxChars) return line;
-  let visible = 0;
-  let out = "";
-  let i = 0;
-  while (i < line.length) {
-    if (line[i] === "\x1b") {
-      const end = line.indexOf("m", i);
-      if (end === -1) break;
-      out += line.slice(i, end + 1);
-      i = end + 1;
-      continue;
-    }
-    if (visible >= maxChars) break;
-    out += line[i];
-    visible += 1;
-    i += 1;
-  }
-  return `${out}${RESET}`;
-}
-
 /** The coloured mode's compact summary bar. When a completed `overview` job exists, counts
  *  by RECOMMENDATION only (an agent with no recommendation — no cached verdict yet, or nulled
  *  by the staleness rule — folds into a trailing plain `? n`, never a state icon standing in
@@ -819,29 +787,8 @@ function buildRecommendationBar(
   return parts.length > 0 ? parts.join("   ") : null;
 }
 
-/** Exported for the `overview` job's prompt builder, which needs identical "N ago" phrasing
- *  for the facts it hands the LLM — one source of truth for the format, not a second copy. */
-export function relativeAge(ms: number | null, now: number): string {
-  if (ms == null) return "?";
-  const deltaSec = Math.max(0, Math.round((now - ms) / 1000));
-  if (deltaSec < 60) return `${deltaSec}s`;
-  const deltaMin = Math.round(deltaSec / 60);
-  if (deltaMin < 60) return `${deltaMin}m`;
-  const deltaHour = Math.round(deltaMin / 60);
-  if (deltaHour < 24) return `${deltaHour}h`;
-  const deltaDay = Math.round(deltaHour / 24);
-  return `${deltaDay}d`;
-}
-
-/** Exported for the same reason as `relativeAge` — the `overview` prompt builder caps
- *  lastPrompt/lastReply excerpts and should truncate identically to this renderer. */
-export function truncate(text: string, maxChars: number): string {
-  return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
-}
-
-function clampLine(line: string, maxChars: number = MAX_LINE_CHARS): string {
-  return line.length > maxChars ? line.slice(0, maxChars) : line;
-}
+// relativeAge, truncate, clampLine all live in ./render-text-utils.ts now (imported above,
+// re-exported for overview.ts/narrative.ts's prompt builders and this module's own tests).
 
 /** Fit the single-line header into `max` columns WITHOUT ever cutting the meta suffix
  *  (`· overview <age>` / `· overview none`). Cheapest concession first: the ISO date becomes
@@ -884,7 +831,15 @@ export interface RenderTextOptions {
    *  `DEFAULT_COLS`), every visible width re-derives from it instead — see the constants above
    *  `parseCols`. */
   cols?: number;
+  /** warden's board (server/lib/warden-board.ts), rendered as a block after the agent roster.
+   *  Omitted (undefined) — an old snapshot, or a caller that never fetches it — drops the
+   *  block entirely, same "absent means don't render" convention as `enrichment`. */
+  warden?: WardenBoard;
 }
+
+// The warden block itself (opt-in via `opts.warden`) is built by warden-board.ts's
+// `renderWardenBlock` — see that module for `WARDEN_IN_FLIGHT_STATES`/`wardenItemPriority`/
+// the block layout. `renderText` below only calls it and pushes the returned lines.
 
 /** Renders the same snapshot GET /api/agents returns as compact plain text for `watch`.
  *  `GET /api/overview.txt` calls this with `opts.enrichment`/`opts.overview` to swap the
@@ -1013,6 +968,10 @@ export function renderText(snapshot: AgentsSnapshot, opts?: RenderTextOptions): 
     }
   }
 
+  if (opts?.warden) {
+    lines.push(...renderWardenBlock(opts.warden, { color, lineMax, generatedAt }));
+  }
+
   return `${lines.join("\n")}\n`;
 }
 
@@ -1066,20 +1025,9 @@ export function humanQueueDir(): string {
   return join(process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"), "human-queue");
 }
 
-/** Drops the C0 bytes dotfiles' human-queue.sh `printable()` drops (`\t`, `\n`, `\r` kept —
- *  the renderer collapses whitespace). A request is written by an agent on the mini and
- *  lands in a `watch --color` pane and in Hermes, so a stray ESC must never reach either.
- *  A char-code scan for the same reason `stripAnsi` is one: `no-control-regex`. */
-function stripControlBytes(text: string): string {
-  let out = "";
-  for (const ch of text) {
-    const code = ch.charCodeAt(0);
-    const control =
-      (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) || code === 0x7f;
-    if (!control) out += ch;
-  }
-  return out;
-}
+// stripControlBytes lives in ./render-text-utils.ts now (imported above) — a request is
+// written by an agent on the mini and lands in a `watch --color` pane and in Hermes, so a
+// stray ESC must never reach either.
 
 /** Pure: one `.req` body → a queue entry, or null when it is not the expected shape. */
 export function parseHumanQueueRequest(text: string, fallbackId: string): HumanQueueEntry | null {

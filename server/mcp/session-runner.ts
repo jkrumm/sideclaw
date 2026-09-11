@@ -595,6 +595,117 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
   return args;
 }
 
+export interface WorkerEnvInput {
+  /** Routed tool name, tags `USAGE_LANE` as `sideclaw:<tool>` — `"unknown"` when absent. */
+  tool?: string;
+  backend: Backend;
+  model: string;
+  /** Only read on the `iu` backend. */
+  anthropicBase: string;
+  /** Only read on the `iu` backend. */
+  iuKey: string;
+  extraEnv?: Record<string, string>;
+  /** Override for tests — defaults to `process.env`. Only entries with a defined value are
+   *  copied, mirroring `Object.entries` skipping `undefined`. */
+  baseEnv?: Record<string, string | undefined>;
+}
+
+/** The worker's full spawn env. Split out of `runSessionAttempt` so `USAGE_LANE` and the
+ *  sensitive-env scrub around it are assertable without spawning anything — same reasoning as
+ *  `buildSessionArgs` above. Order matters and is preserved exactly: copy the inherited env,
+ *  strip the parent's own session identity, tag `USAGE_LANE`, THEN scrub every
+ *  credential-shaped key (so a name that happens to look sensitive, like `USAGE_LANE` does
+ *  not, is scrubbed before the backend switch writes its own auth — see the inline comment
+ *  below for why order there is load-bearing), then apply the backend/gateway/extraEnv
+ *  layers, each of which can reintroduce a var the scrub removed on purpose. */
+export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
+  const { tool, backend, model, anthropicBase, iuKey, extraEnv, baseEnv = process.env } = input;
+
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(baseEnv)) {
+    if (v !== undefined) env[k] = v;
+  }
+  delete env.CLAUDE_SESSION_ID;
+  delete env.CLAUDE_PARENT_SESSION_ID;
+  env.CLAUDE_ENTRYPOINT = "worker";
+  // Read by usage-tracker's claude-code collector (via hooks/notify.ts's session_env
+  // log line) to attribute this Max-lane worker's cost to its routed tool.
+  env.USAGE_LANE = `sideclaw:${tool ?? "unknown"}`;
+  // The worker env is copied from this process wholesale, so it carries whatever the
+  // LaunchAgent was started with — including live credentials the worker has no reason
+  // to hold. Scrub them BEFORE the switch below writes the session's own auth
+  // (`ANTHROPIC_AUTH_TOKEN` matches this regex) — a credential the switch sets must
+  // survive it. Measured 2026-08-31 with the scrub AFTER the switch: it deleted the
+  // just-written IU key, the CLI fell through to the inherited OAuth profile, and the
+  // worker died with "401 Unauthorized: Authorization parsing failed". Masked on a `max`
+  // route, which serves every claude-* id via OAuth, so only an `iu` route walks the
+  // broken path.
+  //
+  // A worker that never sees a token cannot leak one. This matters most for `dispatch`,
+  // whose prompt is assembled from untrusted material — but it is the right default for
+  // every worker, so it lives here rather than in one handler. `Bash` is available to
+  // these sessions, so `env` is one command away. Tools that genuinely need a credential
+  // pass it explicitly via `extraEnv` (review does this for the research-gateway),
+  // applied after all of this and therefore still winning.
+  for (const key of Object.keys(env)) {
+    if (SENSITIVE_ENV_RE.test(key) && !ALWAYS_KEEP_ENV.has(key)) delete env[key];
+  }
+  // ANTHROPIC_API_KEY is deleted in every branch: it is rejected by claude v2.x
+  // ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
+  delete env.ANTHROPIC_API_KEY;
+  // Exhaustive over Backend: a new variant must declare its own auth handling rather
+  // than inheriting another branch's credentials by omission.
+  switch (backend) {
+    case "iu":
+      // IU native Anthropic transport — same recipe as dotfiles' claude_iu(). The
+      // beta headers are an Anthropic Messages-protocol detail the CLI sends
+      // regardless of which model it asks for, and the native transport passes
+      // them straight through to IU's gateway unmodified.
+      env.ANTHROPIC_BASE_URL = anthropicBase;
+      env.ANTHROPIC_AUTH_TOKEN = iuKey;
+      break;
+    case "max":
+      // Fall through to the inherited OAuth profile (the Max subscription). Delete
+      // rather than skip — the parent env is copied wholesale above, so an inherited
+      // ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN would silently shadow OAuth and push
+      // the worker back onto IU despite the flag.
+      delete env.ANTHROPIC_BASE_URL;
+      delete env.ANTHROPIC_AUTH_TOKEN;
+      break;
+    default:
+      backend satisfies never;
+  }
+  // Gateway-tier env for non-Claude ids, mirroring dotfiles' `ca` gateway branch
+  // (config/zsh/claude.zsh). Three things a gateway id needs that a claude-* id does not:
+  //  - every ANTHROPIC_DEFAULT_* tier pinned to the SAME id, or a CLI-internal call
+  //    (title generation, compaction, a spawned subagent) asks the gateway for a
+  //    claude-* default it does not serve — measured 2026-08-31 as a hard
+  //    `[claude-code:unrecognized_model]` exit 1 on `generate_session_title` that
+  //    killed the whole session even though the main loop was fine;
+  //  - CLAUDE_CODE_MAX_CONTEXT_TOKENS matched to the model's real window via
+  //    GATEWAY_CONTEXT_TOKENS — Claude Code only trusts api.anthropic.com to
+  //    self-report a window, so a 1M gateway model otherwise budgets and
+  //    auto-compacts at 200k, and a blanket 1M would hard-reject on smaller models;
+  //  - API_TIMEOUT_MS raised — these models legitimately take minutes per turn
+  //    (glm-5.3-flash measured 280–737s per benchmark turn), and the default turns
+  //    slow-but-correct into a spurious timeout.
+  // Claude ids keep the inherited defaults: their `[1m]` window handling lives in the
+  // model id itself, and the CLI's own defaults resolve against served models.
+  if (!isClaudeModel(model)) {
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
+    env.ANTHROPIC_DEFAULT_FABLE_MODEL = model;
+    const ctx = String(gatewayContextTokens(model));
+    env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = ctx;
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = ctx;
+    env.API_TIMEOUT_MS = "3000000";
+  }
+  if (extraEnv) Object.assign(env, extraEnv);
+
+  return env;
+}
+
 // ── Retry policy ───────────────────────────────────────────────────────────────
 //
 // Moving a worker off Max onto the IU unified endpoint's gateway models means
@@ -1114,84 +1225,7 @@ async function runSessionAttempt<T = unknown>(
     extraDisallowedTools,
   });
 
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined) env[k] = v;
-  }
-  delete env.CLAUDE_SESSION_ID;
-  delete env.CLAUDE_PARENT_SESSION_ID;
-  env.CLAUDE_ENTRYPOINT = "worker";
-  // The worker env is copied from this process wholesale, so it carries whatever the
-  // LaunchAgent was started with — including live credentials the worker has no reason
-  // to hold. Scrub them BEFORE the switch below writes the session's own auth
-  // (`ANTHROPIC_AUTH_TOKEN` matches this regex) — a credential the switch sets must
-  // survive it. Measured 2026-08-31 with the scrub AFTER the switch: it deleted the
-  // just-written IU key, the CLI fell through to the inherited OAuth profile, and the
-  // worker died with "401 Unauthorized: Authorization parsing failed". Masked on a `max`
-  // route, which serves every claude-* id via OAuth, so only an `iu` route walks the
-  // broken path.
-  //
-  // A worker that never sees a token cannot leak one. This matters most for `dispatch`,
-  // whose prompt is assembled from untrusted material — but it is the right default for
-  // every worker, so it lives here rather than in one handler. `Bash` is available to
-  // these sessions, so `env` is one command away. Tools that genuinely need a credential
-  // pass it explicitly via `extraEnv` (review does this for the research-gateway),
-  // applied after all of this and therefore still winning.
-  for (const key of Object.keys(env)) {
-    if (SENSITIVE_ENV_RE.test(key) && !ALWAYS_KEEP_ENV.has(key)) delete env[key];
-  }
-  // ANTHROPIC_API_KEY is deleted in every branch: it is rejected by claude v2.x
-  // ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
-  delete env.ANTHROPIC_API_KEY;
-  // Exhaustive over Backend: a new variant must declare its own auth handling rather
-  // than inheriting another branch's credentials by omission.
-  switch (backend) {
-    case "iu":
-      // IU native Anthropic transport — same recipe as dotfiles' claude_iu(). The
-      // beta headers are an Anthropic Messages-protocol detail the CLI sends
-      // regardless of which model it asks for, and the native transport passes
-      // them straight through to IU's gateway unmodified.
-      env.ANTHROPIC_BASE_URL = anthropicBase;
-      env.ANTHROPIC_AUTH_TOKEN = iuKey;
-      break;
-    case "max":
-      // Fall through to the inherited OAuth profile (the Max subscription). Delete
-      // rather than skip — the parent env is copied wholesale above, so an inherited
-      // ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN would silently shadow OAuth and push
-      // the worker back onto IU despite the flag.
-      delete env.ANTHROPIC_BASE_URL;
-      delete env.ANTHROPIC_AUTH_TOKEN;
-      break;
-    default:
-      backend satisfies never;
-  }
-  // Gateway-tier env for non-Claude ids, mirroring dotfiles' `ca` gateway branch
-  // (config/zsh/claude.zsh). Three things a gateway id needs that a claude-* id does not:
-  //  - every ANTHROPIC_DEFAULT_* tier pinned to the SAME id, or a CLI-internal call
-  //    (title generation, compaction, a spawned subagent) asks the gateway for a
-  //    claude-* default it does not serve — measured 2026-08-31 as a hard
-  //    `[claude-code:unrecognized_model]` exit 1 on `generate_session_title` that
-  //    killed the whole session even though the main loop was fine;
-  //  - CLAUDE_CODE_MAX_CONTEXT_TOKENS matched to the model's real window via
-  //    GATEWAY_CONTEXT_TOKENS — Claude Code only trusts api.anthropic.com to
-  //    self-report a window, so a 1M gateway model otherwise budgets and
-  //    auto-compacts at 200k, and a blanket 1M would hard-reject on smaller models;
-  //  - API_TIMEOUT_MS raised — these models legitimately take minutes per turn
-  //    (glm-5.3-flash measured 280–737s per benchmark turn), and the default turns
-  //    slow-but-correct into a spurious timeout.
-  // Claude ids keep the inherited defaults: their `[1m]` window handling lives in the
-  // model id itself, and the CLI's own defaults resolve against served models.
-  if (!isClaudeModel(model)) {
-    env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
-    env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
-    env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
-    env.ANTHROPIC_DEFAULT_FABLE_MODEL = model;
-    const ctx = String(gatewayContextTokens(model));
-    env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = ctx;
-    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = ctx;
-    env.API_TIMEOUT_MS = "3000000";
-  }
-  if (extraEnv) Object.assign(env, extraEnv);
+  const env = buildWorkerEnv({ tool, backend, model, anthropicBase, iuKey, extraEnv });
 
   const startMs = performance.now();
   runnerLogger().info(

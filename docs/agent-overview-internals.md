@@ -162,6 +162,48 @@ is already assembled into the prompt by the handler.
   no mocks, mutation-verified on the unknown-id-drop and the
   standing-line-truncation bound.
 
+## Warden block — the ledger, folded into the overview
+
+`server/lib/warden-board.ts`'s `fetchWardenBoard()` normalizes warden's
+`GET /board` (`http://127.0.0.1:7734`, loopback-only, unauthenticated,
+read-only — `~/SourceRoot/warden/docs/api.md`) into the shape
+`overview-payload.ts` and `renderText` consume: `counts` per non-terminal
+chain state, `open` (the sum of those counts), and up to 20 items
+(`updated_at DESC`, `itemsTruncated` when more existed), each carrying one
+`inFlightJob` id (`validation_job ?? implement_job ?? dispatch_job ?? null`).
+A 2 s `AbortSignal.timeout` bounds the call, and it **never throws** — an
+unreachable/non-2xx/malformed warden resolves to `{ ok: false, error }`
+rather than delaying or failing the overview it's folded into.
+
+`buildOverviewPayload` fetches it alongside the agents snapshot, cached
+under the same 45 s TTL (`cachedFetchWardenBoard`, mirroring
+`cachedBuildSnapshot`) — a herdr pane and Hermes polling the overview back
+to back never pay for two live warden round trips. It rides on the
+`OverviewPayload.warden` field, so **Argo's push receives it automatically**
+inside the same JSON `pushOverviewToArgo` already sends — no second payload
+shape. `GET /api/agents`/`/api/agents.txt` never fetch it; only the
+`overview` routes and the Argo push do.
+
+`renderText` (`server/lib/agents.ts`) takes it as `opts.warden` and just
+calls `renderWardenBlock` (`server/lib/warden-board.ts`) for the block after
+the agent roster — a header (`warden · <open> open · needs_human <n> ·
+merge_blocked <n> · in flight <n>`, in-flight =
+investigating+implementing+validating+liveness_pending) then up to 8 item
+lines, `needs_human` and `merge_blocked` sharing bucket 0 (a human is needed
+for either), then in-flight states, then the rest, plus a trailing `… N
+more` line once more items exist than the 8-line cap — colour puts
+`needs_human`/`merge_blocked` in the "needs you" red and in-flight in
+"working" green. Every warden-sourced string (`state`/`repo`/`title`, and
+the unreachable-board `error`) passes through `stripControlBytes` before
+rendering — warden's ledger carries attacker-influenced text (an alert or a
+GitHub issue title). `opts.warden` omitted (old snapshots, the plain
+`/api/agents.txt` path) drops the block entirely; `{ ok: false }` renders
+the single line `warden · unreachable (<error>)`. Tests:
+`tests/warden-board.test.ts` (the fetch/parse boundary, stubbed `fetch`, the
+cache TTL) and `tests/agents.test.ts` (the render — ordering, truncation,
+the `… N more` line, colour, the control-byte strip, the no-`opts.warden`
+no-op).
+
 ## narrative — the vault-page writer
 
 The `narrative` job (`server/jobs/handlers/narrative.ts`, prompt in

@@ -66,10 +66,9 @@ through `server/lib/load-env.ts`. Every routing/backend flag is read at module l
 
 ## Routing
 
-`server/lib/routing.ts` is the single table (check/overview on `glm-5.3-flash` over IU,
-review/dispatch/otel on `claude-sonnet-5[1m]` over Max with a reactive fallback, …) and
-`GET /api/routing` shows what is live. Full rationale, fallback rules and every other
-mechanism: `CLAUDE.md`.
+`server/lib/routing.ts` is the single per-tool table. Live: `GET /api/routing`.
+Overrides: `SIDECLAW_MODEL_<TOOL>`/`SIDECLAW_BACKEND_<TOOL>`. Full rationale:
+`brain/wiki/engineering/model-routing.md`.
 
 ## Develop
 
