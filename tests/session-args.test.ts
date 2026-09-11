@@ -165,6 +165,15 @@ describe("buildWorkerEnv — USAGE_LANE", () => {
     expect(workerEnv({ tool: undefined }).USAGE_LANE).toBe("sideclaw:unknown");
   });
 
+  test("coarsens a review sub-step tool to sideclaw:review", () => {
+    // usage-tracker's sub_tool column has no sub-lane concept — review:router,
+    // review:angle, review:adversary and review:synthesis must all collapse to one lane.
+    expect(workerEnv({ tool: "review:router" }).USAGE_LANE).toBe("sideclaw:review");
+    expect(workerEnv({ tool: "review:angle" }).USAGE_LANE).toBe("sideclaw:review");
+    expect(workerEnv({ tool: "review:adversary" }).USAGE_LANE).toBe("sideclaw:review");
+    expect(workerEnv({ tool: "review:synthesis" }).USAGE_LANE).toBe("sideclaw:review");
+  });
+
   test("survives the sensitive-env scrub that follows", () => {
     // A worker env carrying credential-shaped inherited vars must have them scrubbed —
     // but USAGE_LANE, set just before the scrub runs, must still be standing after it.

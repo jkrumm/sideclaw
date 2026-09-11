@@ -610,6 +610,22 @@ export interface WorkerEnvInput {
   baseEnv?: Record<string, string | undefined>;
 }
 
+/**
+ * The `USAGE_LANE` value for a routed tool — `sideclaw:<tool>`, coarsened to the part
+ * before the first `:` in `tool` itself. `review`'s sub-steps (`review:router`,
+ * `review:angle`, `review:adversary`, `review:synthesis`) pass their own sub-tool label
+ * through `SessionOptions.tool` for logging/attribution, but usage-tracker's `sub_tool`
+ * column is a flat string with no sub-lane concept (`report.ts`'s grouping is a plain
+ * `coalesce`, nothing wildcard-aware) — one lane per Max-lane worker keeps
+ * `stats --by sub_tool` a single `sideclaw:review` row instead of four fragments. Single
+ * chokepoint so every spawn path (all of them already route through `buildWorkerEnv`)
+ * gets this for free rather than each call site coarsening its own `tool` string.
+ */
+export function usageLane(tool: string | undefined): string {
+  const base = (tool ?? "unknown").split(":")[0];
+  return `sideclaw:${base}`;
+}
+
 /** The worker's full spawn env. Split out of `runSessionAttempt` so `USAGE_LANE` and the
  *  sensitive-env scrub around it are assertable without spawning anything — same reasoning as
  *  `buildSessionArgs` above. Order matters and is preserved exactly: copy the inherited env,
@@ -630,7 +646,7 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
   env.CLAUDE_ENTRYPOINT = "worker";
   // Read by usage-tracker's claude-code collector (via hooks/notify.ts's session_env
   // log line) to attribute this Max-lane worker's cost to its routed tool.
-  env.USAGE_LANE = `sideclaw:${tool ?? "unknown"}`;
+  env.USAGE_LANE = usageLane(tool);
   // The worker env is copied from this process wholesale, so it carries whatever the
   // LaunchAgent was started with — including live credentials the worker has no reason
   // to hold. Scrub them BEFORE the switch below writes the session's own auth
