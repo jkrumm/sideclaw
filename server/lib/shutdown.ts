@@ -33,58 +33,35 @@
 // regardless of what SHUTDOWN_GRACE_MS said. Splitting the two constants makes each one true
 // for the path it actually governs.
 
-// Must equal dispatch.ts's `TIERS.implement.timeoutMs` — pinned by
-// tests/shutdown-dispatch-coupling.test.ts, kept as an independent literal (not a runtime
-// import of dispatch.ts) so this module stays free of that handler's import graph
-// (session-runner, octokit, routing) rather than importing dispatch.ts just for one number.
+// Standalone operational constant — 2026-09-12 removed every worker session's `maxTurns`,
+// `timeoutMs` and absolute ceiling (`server/mcp/session-runner.ts`; dispatch's own
+// `TIERS.implement.timeoutMs` went with it, see `server/jobs/handlers/dispatch.ts`). A worker
+// session's only liveness rule now is the idle watchdog (no stdout for `IDLE_TIMEOUT_MS`), which
+// bounds STALLS, not total wall-clock — a session that keeps producing output can legitimately
+// run far longer than the 30 minutes this constant assumes. This value is therefore no longer
+// derived from, or required to equal, any per-tier ceiling dispatch configures (there isn't
+// one) — it is this file's own assumption about the DOMINANT-case duration worth draining for
+// before a `make reload` gives up and kills a still-running `implement` episode.
+// `tests/shutdown-dispatch-coupling.test.ts` now only pins the internal relationship below
+// (`HTTP_DRAIN_GRACE_MS` > this), not an equality against dispatch.ts.
 export const IMPLEMENT_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 
-// A single `dispatch implement` attempt can legitimately run up to its own configured
-// `timeoutMs` — but NOT "and never longer", which is what an earlier version of this file
-// claimed (first "never longer than its own timeout", then a revision that covered only the
-// rare provider-retry fallback chain and still undercounted). Two independent retry mechanisms
-// can each double that number, and the more reachable of the two is the ORDINARY path, not an
-// edge case:
+// A `dispatch implement` episode's own worker session(s) now have NO configured ceiling — see
+// the note above. The reasoning this file used to carry here (a `timeoutMs`-doubling chain
+// through `dispatch.ts`'s handler-level salvage retry, `isSalvageable()`, or through
+// `runSession()`'s own `max`→`iu` fallback ladder) assumed a bounded per-attempt duration that
+// no longer exists: with no `timeoutMs`, a single attempt's wall-clock is bounded only by the
+// idle watchdog, which can in principle let it run indefinitely as long as it keeps emitting
+// stdout. This file has NOT been re-derived against that reality — `IMPLEMENT_SESSION_TIMEOUT_MS`
+// and `HTTP_DRAIN_GRACE_MS` below keep their pre-existing values as a placeholder operational
+// choice, not a re-measured bound, pending an owner decision on how long a self-initiated drain
+// should wait for a now-unbounded episode before killing it. Treat the "50 min" figure below as
+// stale in its JUSTIFICATION (it assumed a removed ceiling) even though the constant itself is
+// unchanged.
 //
-//   - `dispatch.ts`'s own handler-level salvage retry (`isSalvageable()`) fires on a
-//     `max_turns` error or a schema/parse failure — hitting the turn budget without emitting
-//     valid JSON, or emitting JSON that doesn't validate. That is a routine way for a session
-//     to end badly, not a rare fault. The retry is a FRESH `runSession()` call with a smaller
-//     turn budget (`retryTurns`) but the SAME `timeoutMs` ceiling as the first attempt — so the
-//     reachable chain through this path alone is two full `timeoutMs` windows, 2 × 30 min =
-//     60 min of session wall-clock, with no timeout and no provider-side signal required on
-//     either attempt.
-//   - `runSession()`'s own internal retry/fallback ladder (server/mcp/session-runner.ts) is a
-//     SEPARATE mechanism that can also double a single attempt's wall-clock. A timeout's error
-//     text ("Session timed out after Xms") never matches `isRetryableSessionError` (no HTTP
-//     status, no connection-reset pattern), so the same-backend transient retry never fires for
-//     a hang. The ONE lane switch that CAN follow a timeout is `max` → `iu` (dispatch's route:
-//     primary `max`, fallback `{ backend: "iu" }`, same model), and only when `hadApiRetry` was
-//     observed mid-run (the CLI itself saw a provider-side 429/529 before the hang) —
-//     `usedFallback` then latches, so the `iu` attempt that follows can itself only return or
-//     hang to completion, never retry or switch again. This path is rarer (it needs that
-//     mid-hang provider signal) but reaches the same 60-minute figure for one `runEpisode` call.
-//
-// The two do not compound past 60 minutes for a single `runEpisode` call: `isSalvageable()`
-// explicitly excludes a timeout (`noOutput` is never set on that return path, and the error
-// text matches neither `max_structured_output_retries` nor `max_turns`), so a hang that
-// exhausts the internal fallback throws straight to the job failure with no further dispatch.ts
-// retry stacked on top. But that bounds only the fallback chain at 60 min — it does not make
-// the OTHER chain (the salvage retry, triggered by the ordinary max_turns/schema case) any
-// rarer, and that one is reachable on any `implement` episode that simply runs long and fumbles
-// its JSON, no timeout or provider retry involved at all.
-//
-// So the reachable worst case is ~80 minutes (2 × 30 min of session wall-clock, from either
-// chain — most plausibly the ordinary salvage retry — plus `depositBranch()`'s own bounded
-// teardown, below), not the 50 minutes this window actually covers.
-//
-// A drain window covering that reachable 80-minute chain would put a `make reload` worst case
-// past an hour and a half. That is not a usable operational number — a drain nobody actually
-// waits out just teaches everyone to reach for `FORCE=1`, which discards work rather than
-// waiting for it, so this file does NOT try to cover either doubling. It covers the DOMINANT
-// path instead — a single attempt (no retry triggered — the common case is still a session
-// that either finishes or fails outright inside its own budget) running up to its own full
-// `timeoutMs`, followed by `depositBranch()`'s fully bounded worst case:
+// It covers the DOMINANT path — a single attempt (no retry triggered — the common case is
+// still a session that finishes or fails outright well inside 30 minutes in practice) running
+// up to that assumed 30-minute figure, followed by `depositBranch()`'s fully bounded worst case:
 //
 //   commitPendingWork (add + diff --cached + commit, 60s each) =  180s
 //   commitCount (rev-list, 60s)                                =   60s

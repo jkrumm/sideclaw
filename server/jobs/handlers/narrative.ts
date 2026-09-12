@@ -627,8 +627,6 @@ export async function runNarrative(
       isCancelled,
       jsonSchema: NARRATIVE_WORKER_JSON_SCHEMA,
       route,
-      maxTurns: 3,
-      timeoutMs: 180 * 1000,
       readOnly: true,
       extraDisallowedTools: ["Bash", "Read", "Grep", "Glob"],
       validate: zodValidator(NARRATIVE_WORKER_OUTPUT),

@@ -21,20 +21,30 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
   ? join(homedir(), ".local/bin/claude")
   : "claude";
 
-// A worker is killed by an idle watchdog (no stdout chunk for this long — "wedged", not
-// "slow"; stderr does not reset it) plus an absolute ceiling, not one wall-clock timer —
-// mirrors modelpick's bench/spawn.ts. A single timer cannot tell "still working" from
-// "wedged": glm-5.3-flash defaults to max reasoning effort and is genuinely slow on hard
-// work (minutes per turn), and a caller's own `timeoutMs` used to kill it mid-turn on that
-// alone.
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
-// The floor applied on top of a caller's `timeoutMs` (`Math.max(timeoutMs, CEILING_FLOOR_MS)`)
-// — deliberately generous so no existing caller's ceiling ends up tighter than its old
-// single wall-clock timeout.
-const CEILING_FLOOR_MS = 60 * 60 * 1000;
+// A worker is killed by an idle watchdog ONLY (no stdout chunk for this long — "wedged", not
+// "slow"; stderr does not reset it) — there is no turn limit and no wall-clock ceiling
+// anywhere else. A single wall-clock timer cannot tell "still working" from "wedged":
+// glm-5.3-flash defaults to max reasoning effort and is genuinely slow on hard work (minutes
+// per turn), and a caller's own timeout used to kill it mid-turn on that alone. Workers are
+// agents doing large work — the only liveness rule that matters is whether they are still
+// producing output.
+export const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 // How often the idle watchdog checks `lastChunkAt` — cheap enough to run every tick of a
 // multi-minute session without mattering to the measurement.
 const IDLE_CHECK_INTERVAL_MS = 5_000;
+
+/** Pure idle-watchdog predicate: has it been at least `idleTimeoutMs` since the last stdout
+ *  chunk (or spawn, if none arrived yet)? Extracted out of the `setInterval` callback below so
+ *  the "no separate ceiling" behavior — a session that keeps producing output can run past any
+ *  fixed wall-clock duration without ever being killed — is unit-testable without spawning a
+ *  real subprocess or driving a live timer. */
+export function isIdleTimedOut(
+  now: number,
+  lastActivityAt: number,
+  idleTimeoutMs: number = IDLE_TIMEOUT_MS,
+): boolean {
+  return now - lastActivityAt >= idleTimeoutMs;
+}
 
 // Worker sessions run on either the IU unified endpoint's native Anthropic transport
 // (metered per token, off Max — the same recipe dotfiles' `ca`/`claude_iu` use; the
@@ -149,8 +159,6 @@ export interface SessionOptions<T = unknown> {
    *  via `withModel`: a gateway id forces the backend to `iu` since Max cannot serve it. */
   model?: string;
   jsonSchema?: Record<string, unknown>;
-  maxTurns?: number;
-  timeoutMs?: number;
   /**
    * `--setting-sources` value. Default "project" (repo CLAUDE.md only) keeps the
    * system prompt small — most one-shot workers don't need the global rule set.
@@ -535,7 +543,6 @@ export const WORKER_SETTINGS = JSON.stringify({ disableAllHooks: true });
 export interface SessionArgsInput {
   prompt: string;
   settingSources: string;
-  maxTurns: number;
   model: string;
   readOnly: boolean;
   jsonSchema?: Record<string, unknown>;
@@ -547,16 +554,8 @@ export interface SessionArgsInput {
  *  flags that constrain a worker are assertable without spawning anything — several of them
  *  are load-bearing security bounds whose absence is invisible at runtime. */
 export function buildSessionArgs(input: SessionArgsInput): string[] {
-  const {
-    prompt,
-    settingSources,
-    maxTurns,
-    model,
-    readOnly,
-    jsonSchema,
-    mcpServers,
-    extraDisallowedTools,
-  } = input;
+  const { prompt, settingSources, model, readOnly, jsonSchema, mcpServers, extraDisallowedTools } =
+    input;
 
   const args: string[] = [
     "-p",
@@ -577,8 +576,6 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
     "--strict-mcp-config",
     "--mcp-config",
     mcpServers ? JSON.stringify({ mcpServers }) : '{"mcpServers": {}}',
-    "--max-turns",
-    String(maxTurns),
     "--model",
     model,
   ];
@@ -1236,8 +1233,6 @@ async function runSessionAttempt<T = unknown>(
     cwd,
     prompt,
     jsonSchema,
-    maxTurns = 30,
-    timeoutMs = 10 * 60 * 1000,
     settingSources = "project",
     readOnly = false,
     mcpServers,
@@ -1262,7 +1257,7 @@ async function runSessionAttempt<T = unknown>(
   // on 8 `session.timeout` entries came back with `model: null, backend: null, tool: null` and
   // had to be joined against jobs.db by timestamp to find out which job each one belonged to —
   // this is what makes each line self-describing instead.
-  const errCtx = { tool, model, backend, jobId, timeoutMs };
+  const errCtx = { tool, model, backend, jobId };
   if (forced) {
     recordFallback(forced.reason, tool);
     runnerLogger().warn(
@@ -1279,7 +1274,7 @@ async function runSessionAttempt<T = unknown>(
   }
 
   const emitAttribution = (
-    outcome: "ok" | "error" | "timeout_idle" | "timeout_ceiling",
+    outcome: "ok" | "error" | "timeout_idle",
     extras: Record<string, unknown> = {},
   ): void => {
     writeAttribution({
@@ -1323,7 +1318,6 @@ async function runSessionAttempt<T = unknown>(
   const args = buildSessionArgs({
     prompt,
     settingSources,
-    maxTurns,
     model,
     readOnly,
     jsonSchema,
@@ -1339,7 +1333,6 @@ async function runSessionAttempt<T = unknown>(
       event: "session.spawn",
       project: cwd,
       model,
-      maxTurns,
       jsonSchema: !!jsonSchema,
       settingSources,
       readOnly,
@@ -1371,17 +1364,17 @@ async function runSessionAttempt<T = unknown>(
       }, HEARTBEAT_INTERVAL_MS)
     : null;
 
-  // Idle watchdog (killed only once no stdout chunk has arrived for IDLE_TIMEOUT_MS) plus
-  // an absolute ceiling (Math.max(timeoutMs, CEILING_FLOOR_MS)) — see the module header
-  // comment on IDLE_TIMEOUT_MS for why a single wall-clock timer can't tell "still working"
-  // from "wedged". Same two-stage SIGTERM → wait 5s → SIGKILL as before either way.
-  let killReason: "idle" | "ceiling" | null = null;
+  // Idle watchdog — killed only once no stdout chunk has arrived for IDLE_TIMEOUT_MS. No
+  // absolute ceiling: see the module header comment on IDLE_TIMEOUT_MS for why a single
+  // wall-clock timer can't tell "still working" from "wedged". Two-stage SIGTERM → wait 5s →
+  // SIGKILL.
+  let killReason: "idle" | null = null;
   let idleMsAtKill: number | null = null;
   let lastChunkAt: number | null = null;
   const spawnedAt = Date.now();
   let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
-  const kill = (reason: "idle" | "ceiling"): void => {
-    if (killReason) return; // the other watchdog already fired
+  const kill = (reason: "idle"): void => {
+    if (killReason) return; // already firing
     killReason = reason;
     idleMsAtKill = Date.now() - (lastChunkAt ?? spawnedAt);
     runnerLogger().error(
@@ -1401,10 +1394,8 @@ async function runSessionAttempt<T = unknown>(
     }, 5000);
   };
   const idleWatchdog = setInterval(() => {
-    if (Date.now() - (lastChunkAt ?? spawnedAt) >= IDLE_TIMEOUT_MS) kill("idle");
+    if (isIdleTimedOut(Date.now(), lastChunkAt ?? spawnedAt)) kill("idle");
   }, IDLE_CHECK_INTERVAL_MS);
-  const ceilingMs = Math.max(timeoutMs, CEILING_FLOOR_MS);
-  const ceilingTimer = setTimeout(() => kill("ceiling"), ceilingMs);
 
   // stderr is buffered whole (it's small — diagnostics only); stdout is consumed as
   // a live NDJSON stream so we can track per-event activity and capture the result.
@@ -1539,7 +1530,6 @@ async function runSessionAttempt<T = unknown>(
 
   const stderr = await stderrPromise;
   clearInterval(idleWatchdog);
-  clearTimeout(ceilingTimer);
   if (sigkillTimer !== null) clearTimeout(sigkillTimer);
 
   const exitCode = await proc.exited;
@@ -1566,21 +1556,16 @@ async function runSessionAttempt<T = unknown>(
   const durationMs = Math.round(performance.now() - startMs);
 
   if (killReason) {
-    // Outcome distinguishes the two watchdogs — "idle" is a wedged worker that produced
-    // no stdout for IDLE_TIMEOUT_MS, "ceiling" is one that kept the stream alive (still
-    // emitting turns, however slowly) all the way to the absolute cap.
-    emitAttribution(killReason === "idle" ? "timeout_idle" : "timeout_ceiling", {
+    // Only one watchdog left — "idle" is a wedged worker that produced no stdout for
+    // IDLE_TIMEOUT_MS.
+    emitAttribution("timeout_idle", {
       durationMs,
       turns,
       killReason,
       idleMsAtKill,
     });
-    // Both branches keep the "Session timed out" prefix `timedOutStuck` matches in
-    // `planNextAttempt` — only the detail differs.
-    const error =
-      killReason === "idle"
-        ? `Session timed out — idle ${idleMsAtKill}ms with no stdout (budget ${IDLE_TIMEOUT_MS}ms)`
-        : `Session timed out — hit its ${ceilingMs}ms ceiling`;
+    // Keeps the "Session timed out" prefix `timedOutStuck` matches in `planNextAttempt`.
+    const error = `Session timed out — idle ${idleMsAtKill}ms with no stdout (budget ${IDLE_TIMEOUT_MS}ms)`;
     // `classificationText` here is always this fixed string, which QUOTA_ERROR_RE never
     // matches, and a hang produces no `api_retry` event either — a Max quota exhaustion
     // that surfaces as a stall rather than a fast is_error/429 is invisible to both

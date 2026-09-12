@@ -118,7 +118,6 @@ export async function runCheck(
   const { cwd, commands } = parseParams(CHECK_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
-  const cmdCount = commands?.length ?? 0;
   const prompt = await loadSkillPrompt(commands);
   const runWorker = (p: string) =>
     runSession<CheckOutput>({
@@ -129,10 +128,6 @@ export async function runCheck(
       isCancelled,
       jsonSchema: CHECK_JSON_SCHEMA,
       route: routeFor("check"),
-      // Fast path needs only one Bash turn per command + the JSON turn — cap tight so
-      // a churny worker can't burn the discovery-sized budget it no longer needs.
-      maxTurns: cmdCount > 0 ? cmdCount + 6 : 30,
-      timeoutMs: 10 * 60 * 1000,
       readOnly: true,
       // No `retryAfterOutput`: glm-5.3-flash defaults to max reasoning effort and is
       // genuinely slow on hard validation runs, not stuck — a timeout after it has

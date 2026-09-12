@@ -12,7 +12,6 @@ function args(overrides: Partial<Parameters<typeof buildSessionArgs>[0]> = {}): 
   return buildSessionArgs({
     prompt: "do the thing",
     settingSources: "user,project",
-    maxTurns: 30,
     model: "claude-sonnet-5",
     readOnly: false,
     ...overrides,
@@ -109,11 +108,15 @@ describe("buildSessionArgs — pass-through", () => {
     );
   });
 
-  test("carries prompt, model and turn budget", () => {
-    const a = args({ prompt: "brief text", model: "claude-haiku-4-5", maxTurns: 7 });
+  test("carries prompt and model", () => {
+    const a = args({ prompt: "brief text", model: "claude-haiku-4-5" });
     expect(valueOf(a, "-p")).toBe("brief text");
     expect(valueOf(a, "--model")).toBe("claude-haiku-4-5");
-    expect(valueOf(a, "--max-turns")).toBe("7");
+  });
+
+  test("never passes --max-turns — workers have no turn limit, only the idle watchdog", () => {
+    const a = args();
+    expect(a).not.toContain("--max-turns");
   });
 
   test("streams NDJSON so the job layer can track activity", () => {

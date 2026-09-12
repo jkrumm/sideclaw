@@ -115,8 +115,9 @@ is already assembled into the prompt by the handler.
   cheaper and lets the model reason about relative priority across agents.
   `readOnly: true` plus `extraDisallowedTools: ["Bash", "Read", "Grep",
   "Glob"]` make it prompt-only: the worker cannot read a file or shell out,
-  only reason over what the handler already gave it. `maxTurns: 3`, 120s
-  timeout — there is no discovery to do.
+  only reason over what the handler already gave it — there is no discovery
+  to do. No turn or wall-clock limit is set (idle watchdog only, same as
+  every other worker session — see `session-runner.ts`).
 - **Nonce-fenced facts, same pattern as dispatch's brief hardening**
   (`buildPrompt` in `overview.ts`): the facts block quotes transcript
   excerpts (a user's prompts, an assistant's own replies), which is

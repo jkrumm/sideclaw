@@ -18,7 +18,6 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `project`    | string?  | Absolute cwd of target repo                          |
 | `model`      | string?  | Claude model used in session                         |
 | `backend`    | string?  | Worker auth path: `"iu"` \| `"max"` — see `backend.select`/`backend.fallback` |
-| `timeoutMs`  | number?  | Configured session timeout, on the `session.*` failure events |
 | `durationMs` | number?  | Execution duration in ms                             |
 | `costUsd`    | number?  | Session cost from claude envelope                    |
 | `turns`      | number?  | `num_turns` from claude envelope                     |
@@ -39,8 +38,8 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `mcp.tool.end`             | mcp     | Tool invocation completed (carries `passed`, `durationMs`)                                                                                            |
 | `session.spawn`            | mcp/app | `claude -p` subprocess started                                                                                                                        |
 | `session.end`              | mcp/app | Session completed successfully (carries `costUsd`, `turns`, `durationMs`)                                                                             |
-| `session.timeout`          | mcp/app | Session hit timeout (carries `tool`, `model`, `backend`, `jobId`, `timeoutMs`)                                                                        |
-| `session.timeout_unclassified` | mcp/app | **warn.** A `backend: "max"` session timed out with no quota-classification signal (no `api_retry` event, and a timeout's `classificationText` never regex-matches) — a Max quota exhaustion surfacing as a hang is invisible to the reactive fallback; visibility only, nothing acts on it (carries `tool`, `model`, `backend`, `jobId`, `timeoutMs`, `turns`) |
+| `session.timeout`          | mcp/app | Idle watchdog killed a session — no stdout for `IDLE_TIMEOUT_MS` (no separate turn/wall-clock ceiling; carries `tool`, `model`, `backend`, `jobId`, `killReason`, `idleMsAtKill`)                                                                        |
+| `session.timeout_unclassified` | mcp/app | **warn.** A `backend: "max"` session timed out with no quota-classification signal (no `api_retry` event, and a timeout's `classificationText` never regex-matches) — a Max quota exhaustion surfacing as a hang is invisible to the reactive fallback; visibility only, nothing acts on it (carries `tool`, `model`, `backend`, `jobId`, `turns`) |
 | `session.error`            | mcp/app | Session returned `is_error` or produced no output (carries `tool`, `model`, `backend`, `jobId`)                                                       |
 | `session.recovered_output` | mcp/app | `result` field was empty; JSON recovered from the last assistant text (worker ended on a tool call; carries `tool`, `model`, `backend`, `jobId`)      |
 | `github.cache.hit`         | app     | Octokit request served from cache (carries `kind: "soft" \| "304"`, `url`)                                                                            |
@@ -55,10 +54,10 @@ NDJSON (one JSON object per line). Both the HTTP server (`source: "app"`) and th
 | `mcp.tool.submit`          | mcp     | Thin MCP tool submitted a job to the HTTP server (carries `tool`, `jobId`, `status`)                                                                  |
 | `routing.overrides`        | mcp/app | Logged once at startup when `SIDECLAW_MODEL_*`/`SIDECLAW_BACKEND_*` overrides are in effect — **warn** if any was refused, info otherwise (carries `overrides`, the full applied/refused list from `GET /api/routing`) |
 | `routing.stale_env`        | mcp/app | **warn.** Logged once at startup if `SIDECLAW_MAX_QUOTA_CEILING`/`SIDECLAW_MAX_WEEKLY_CEILING`/`SIDECLAW_QUOTA_FILE_MAX_AGE_S` is still set in `.env` — these fed the proactive Max-quota pre-check removed 2026-09-08 and are now a silent no-op (carries `vars`, the subset that's set) |
-| `backend.select`           | mcp/app | Worker auth backend resolved for a session launch (carries `tool`, `model`, `backend`, `jobId`, `timeoutMs`, `reason`: `"non-claude-model"` \| `"ok"`)  |
+| `backend.select`           | mcp/app | Worker auth backend resolved for a session launch (carries `tool`, `model`, `backend`, `jobId`, `reason`: `"non-claude-model"` \| `"ok"`)  |
 | `backend.fallback`         | mcp/app | Reactive once-only retry from `max` onto `iu` after a quota-flavored failure (carries `tool`, `model`, `backend: "iu"`, `jobId`, `reason: "rate-limited"`)     |
 | `backend.fallback` (`iu-unavailable`) | mcp/app | Reactive once-only retry from `iu` onto `max` after an IU transport failure or missing IU credentials (carries `tool`, `model` — the fallback model, e.g. Haiku for check — `backend: "max"`, `jobId`)  |
-| `session.stderr`           | mcp/app | Worker stderr; **warn** when the session failed (timeout, non-zero exit, `is_error`), debug otherwise (carries `tool`, `model`, `backend`, `jobId`, `timeoutMs`, `exitCode`, `stderr` ≤4 KB) |
+| `session.stderr`           | mcp/app | Worker stderr; **warn** when the session failed (timeout, non-zero exit, `is_error`), debug otherwise (carries `tool`, `model`, `backend`, `jobId`, `exitCode`, `stderr` ≤4 KB) |
 | `session.retry`            | mcp/app | Transient transport error before any output — retrying (carries `tool`, `model`, `jobId`, `attempt`, `error`)                                            |
 | `check.retry`              | app     | `check` output was prose, not schema JSON — one JSON-only retry (carries `project`, `error`)                                                              |
 | `job.requeue`              | app     | Boot recovery re-queued an interrupted check/overview/narrative/review once (carries `jobId`, `tool`, `attempts`)                                        |

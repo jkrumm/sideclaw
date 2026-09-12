@@ -281,13 +281,6 @@ describe("TIERS", () => {
     expect(TIERS.implement.readOnly).toBe(false);
   });
 
-  test("every tier's retry budget is smaller than its first pass", () => {
-    for (const tier of TIER_NAMES) {
-      expect(TIERS[tier].retryTurns).toBeLessThan(TIERS[tier].maxTurns);
-      expect(TIERS[tier].timeoutMs).toBeGreaterThan(0);
-    }
-  });
-
   test("every tier's prompt file exists on disk", async () => {
     // A renamed skill file fails at episode time, inside a job, as a thrown string nobody
     // reads until the verdict never arrives.

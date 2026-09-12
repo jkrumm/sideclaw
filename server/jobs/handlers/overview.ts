@@ -384,17 +384,6 @@ export async function runOverview(
     isCancelled,
     jsonSchema: OVERVIEW_WORKER_JSON_SCHEMA,
     route,
-    // Classification over a prompt, not an investigation: no discovery, no repo reads.
-    maxTurns: 3,
-    // The gateway tier (glm-5.3-flash) is slow and erratic on this prompt — measured
-    // 2026-09-07: halves of the facts block took 34–149 s, the whole 10 KB prompt produced
-    // NO event in 480 s, and one run stalled after 2 assistant turns until the cap.
-    // Re-measured 2026-09-10 on the 16 KB / 9-agent prompt: glm-iu answered in 139 s once
-    // and produced nothing in 82 s the next time; haiku-max 58–60 s clean, but ONE
-    // production attempt hit the 120 s cap exactly (job 9c5a7339, both lanes timed out,
-    // a 240 s job.fail). 2 min covered neither lane's tail; 3 min covers glm's measured
-    // success with margin and haiku's variance. Worst case 6 min end to end, not 3.
-    timeoutMs: 3 * 60 * 1000,
     readOnly: true,
     // No `retryAfterOutput`: glm defaulting to max reasoning effort is slow, not stuck —
     // a timeout after it already emitted turns used to re-lane onto Haiku mid-job on

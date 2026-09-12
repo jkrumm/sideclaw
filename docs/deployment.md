@@ -63,6 +63,17 @@ never `failed`, and shares no code path with `terminateActiveSessions()`'s drain
 
 ### Sizing `HTTP_DRAIN_GRACE_MS` — why 50 min, not a measured percentile
 
+**Stale as of 2026-09-12**: every worker session's `maxTurns`/`timeoutMs`/absolute ceiling was
+removed (`server/mcp/session-runner.ts` keeps only the idle watchdog; `dispatch.ts`'s
+`TIERS.implement.timeoutMs` and `retryTurns` no longer exist). The derivation below assumed a
+bounded per-attempt `timeoutMs` that dispatch no longer configures — a single `implement`
+attempt's wall-clock is now bounded only by the idle watchdog, which does not cap total
+duration for a session that keeps producing output. `IMPLEMENT_SESSION_TIMEOUT_MS` and
+`HTTP_DRAIN_GRACE_MS` (`server/lib/shutdown.ts`) keep their pre-existing numeric values as a
+placeholder, not a re-measured bound — this section has not been re-derived against the new
+reality and needs an owner decision on how long a self-initiated drain should wait for a
+now-unbounded episode. Kept below for historical record only.
+
 Measured 2026-09-08 over 91 real jobs from three days of `~/Library/Logs/sideclaw.jsonl`
 (`job.start` joined to `job.done`/`job.fail` by `jobId`, duration = `finished_at - started_at`):
 
@@ -178,10 +189,11 @@ Three guards pin this in `bun test` rather than at the next reboot — all in
 `SIGNAL_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS < LAUNCHD_HARD_EXIT_TIMEOUT_MS` with real margin, the
 plist's `ExitTimeOut` equals `LAUNCHD_HARD_EXIT_TIMEOUT_MS` exactly, and the Makefile poll
 ceiling outlasts `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS`. A fourth,
-`tests/shutdown-dispatch-coupling.test.ts`, is unchanged in spirit: the 30-min base literal in
-`shutdown.ts` still matches `TIERS.implement.timeoutMs` in `dispatch.ts` — the two are
-independent literals on purpose, kept in step by a test rather than a runtime import, so
-`shutdown.ts` stays free of `dispatch.ts`'s import graph. `tests/shutdown-route.test.ts` covers
+`tests/shutdown-dispatch-coupling.test.ts`, now only pins `shutdown.ts`'s own internal relation
+(`HTTP_DRAIN_GRACE_MS` > `IMPLEMENT_SESSION_TIMEOUT_MS`) — the coupling it used to guard against
+`TIERS.implement.timeoutMs` in `dispatch.ts` no longer applies since that field was removed
+2026-09-12 along with every worker session's turn/wall-clock ceiling; `IMPLEMENT_SESSION_TIMEOUT_MS`
+is now a standalone literal in `shutdown.ts`, not one half of a cross-file pair. `tests/shutdown-route.test.ts` covers
 `POST /api/shutdown` itself (triggers the right `force`, responds before the drain settles,
 degrades to 503 if no controller is registered).
 

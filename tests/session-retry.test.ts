@@ -19,6 +19,8 @@ import {
   ROUTE_STREAK_LIMIT,
   ROUTE_STREAK_MAX_KEYS,
   __resetRouteStreaksForTests,
+  isIdleTimedOut,
+  IDLE_TIMEOUT_MS,
 } from "../server/mcp/session-runner.ts";
 
 describe("isRetryableSessionError", () => {
@@ -733,5 +735,26 @@ describe("recordRouteOutcome / routeFailureStreaks", () => {
     } finally {
       __resetRouteStreaksForTests();
     }
+  });
+});
+
+describe("isIdleTimedOut", () => {
+  test("a session with steady stdout well past the old 60-minute ceiling is never flagged idle", () => {
+    // Simulate a worker that emits a stdout chunk every 4 minutes (under IDLE_TIMEOUT_MS's
+    // 5-minute budget) for 3 hours straight — three times the removed CEILING_FLOOR_MS. There
+    // is no ceiling left to hit: as long as each gap stays under IDLE_TIMEOUT_MS, the watchdog
+    // must never fire, no matter how long the session runs in total.
+    const stepMs = 4 * 60 * 1000;
+    const totalMs = 3 * 60 * 60 * 1000;
+    let lastActivityAt = 0;
+    for (let now = 0; now <= totalMs; now += stepMs) {
+      expect(isIdleTimedOut(now, lastActivityAt)).toBe(false);
+      lastActivityAt = now; // a stdout chunk just arrived, resetting the clock
+    }
+  });
+
+  test("flags idle once the gap since the last chunk reaches IDLE_TIMEOUT_MS", () => {
+    expect(isIdleTimedOut(IDLE_TIMEOUT_MS - 1, 0)).toBe(false);
+    expect(isIdleTimedOut(IDLE_TIMEOUT_MS, 0)).toBe(true);
   });
 });

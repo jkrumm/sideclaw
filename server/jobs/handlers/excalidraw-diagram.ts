@@ -155,8 +155,6 @@ export async function runExcalidrawDiagram(
     isCancelled,
     route: routeFor("excalidraw"),
     jsonSchema: WORKER_JSON_SCHEMA,
-    maxTurns: 40,
-    timeoutMs: 15 * 60 * 1000,
     readOnly: true,
     settingSources: "user,project",
     validate: zodValidator(WORKER_OUTPUT),

@@ -1,22 +1,20 @@
-// Guards the coupling docs/deployment.md § Drain window sizing describes: HTTP_DRAIN_GRACE_MS's
-// 30-minute base is an independent literal in server/lib/shutdown.ts (kept independent so that
-// file stays free of dispatch.ts's import graph — session-runner, octokit, routing — rather
-// than importing it just for one number), not a live reference to the actual job timeout it's
-// meant to bound. If TIERS.implement.timeoutMs ever changes without this literal moving with
-// it, the drain window silently stops matching the reasoning documented alongside it — this
-// test fails loudly instead, the same pattern tests/shutdown-window.test.ts uses for the
-// signal-side window against launchd's measured ExitTimeOut cap.
+// Was: guards docs/deployment.md § Drain window sizing's coupling between
+// `IMPLEMENT_SESSION_TIMEOUT_MS` and `TIERS.implement.timeoutMs` (`server/jobs/handlers/
+// dispatch.ts`). That field no longer exists — 2026-09-12 removed every worker session's
+// `maxTurns`/`timeoutMs`/absolute ceiling; the only liveness rule left is session-runner.ts's
+// idle watchdog (no stdout for IDLE_TIMEOUT_MS), which has no upper bound on total wall-clock
+// for a session that keeps producing output. `IMPLEMENT_SESSION_TIMEOUT_MS` is therefore now a
+// standalone operational constant in `shutdown.ts` — not derived from, or required to match,
+// any per-tier ceiling dispatch no longer configures. What still has to hold, and what this file
+// now guards instead, is the internal relationship the drain-window math in `shutdown.ts` itself
+// depends on: `HTTP_DRAIN_GRACE_MS` must cover more than `IMPLEMENT_SESSION_TIMEOUT_MS` alone
+// (it adds the `depositBranch()` teardown margin on top).
 
 import { describe, expect, test } from "bun:test";
-import { TIERS } from "../server/jobs/handlers/dispatch.ts";
 import { HTTP_DRAIN_GRACE_MS, IMPLEMENT_SESSION_TIMEOUT_MS } from "../server/lib/shutdown.ts";
 
-describe("shutdown/dispatch timeout coupling", () => {
-  test("IMPLEMENT_SESSION_TIMEOUT_MS matches dispatch's actual configured implement timeout", () => {
-    expect(IMPLEMENT_SESSION_TIMEOUT_MS).toBe(TIERS.implement.timeoutMs);
-  });
-
-  test("HTTP_DRAIN_GRACE_MS covers at least one full implement session plus real margin", () => {
-    expect(HTTP_DRAIN_GRACE_MS).toBeGreaterThan(TIERS.implement.timeoutMs);
+describe("shutdown drain-window sizing", () => {
+  test("HTTP_DRAIN_GRACE_MS covers at least one full implement-session budget plus real margin", () => {
+    expect(HTTP_DRAIN_GRACE_MS).toBeGreaterThan(IMPLEMENT_SESSION_TIMEOUT_MS);
   });
 });

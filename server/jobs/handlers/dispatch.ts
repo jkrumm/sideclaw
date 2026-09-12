@@ -310,11 +310,6 @@ export const WORKER_OUTPUT = {
 interface TierProfile {
   /** Session permission profile. Only `implement` writes. */
   readOnly: boolean;
-  /** First-pass turn budget. */
-  maxTurns: number;
-  /** Reduced budget for the one salvage retry (a FRESH session — see JSON_ONLY_RETRY). */
-  retryTurns: number;
-  timeoutMs: number;
   /** Tier prompt appended to `_common.md`. */
   skill: string;
 }
@@ -322,27 +317,14 @@ interface TierProfile {
 export const TIERS: Record<DispatchTier, TierProfile> = {
   investigate: {
     readOnly: true,
-    maxTurns: 25,
-    retryTurns: 12,
-    timeoutMs: 8 * 60 * 1000,
     skill: "investigate.md",
   },
   author: {
     readOnly: true,
-    maxTurns: 30,
-    retryTurns: 14,
-    timeoutMs: 10 * 60 * 1000,
     skill: "author.md",
   },
   implement: {
     readOnly: false,
-    // Writing code and running the repo's validators is a different order of work from
-    // reading it: the budget has to cover read, edit, test, fix. Still structural — the
-    // ceiling is turns plus wall clock plus sideclaw's concurrency cap, because
-    // --max-budget-usd is API-only and does not cap a Max session.
-    maxTurns: 60,
-    retryTurns: 25,
-    timeoutMs: 30 * 60 * 1000,
     skill: "implement.md",
   },
 };
@@ -364,8 +346,8 @@ RETRY — a previous attempt at this same brief failed to return a valid verdict
 
 You are a FRESH session: you have not read anything yet, and you do not have the previous
 attempt's findings. Do not pretend otherwise and do not invent evidence. Do the work
-yourself, but go straight to the answer — you have a much smaller turn budget than the
-first attempt, so do the two or three things that matter most and then stop.
+yourself, but go straight to the answer — do the two or three things that matter most and
+then stop.
 
 If this is the implement tier, note that any edits the previous attempt made are still in
 your working tree: inspect it with \`git status\` and \`git diff\` before deciding what is
@@ -662,8 +644,15 @@ export async function runDispatch(
   // restarted worker, so offset the retry's counts instead of passing them through raw.
   // Same shape as review's shared `bump` across its parallel angle sessions.
   let turnOffset = 0;
+  // Raw turn count last reported by the current episode — captured so a retry (a fresh
+  // session, counting from 0 again) can offset from where the first episode actually left
+  // off rather than from a fixed budget number.
+  let lastObservedTurns = 0;
   const relayProgress: ProgressSink | undefined = onProgress
-    ? (p) => onProgress({ ...p, turns: turnOffset + p.turns })
+    ? (p) => {
+        lastObservedTurns = p.turns;
+        onProgress({ ...p, turns: turnOffset + p.turns });
+      }
     : undefined;
   const note = (lastAction: string): void =>
     onProgress?.({ turns: turnOffset, lastAction, lastActivityAt: Date.now() });
@@ -711,7 +700,7 @@ export async function runDispatch(
     // back before anything is committed. See stripProjectSettings.
     const strippedSettings = stripProjectSettings(worktree);
     if (strippedSettings.length > 0) note(`stripped ${strippedSettings.join(", ")}`);
-    const runEpisode = (p: string, maxTurns: number) =>
+    const runEpisode = (p: string) =>
       runSession<DispatchOutput>({
         cwd: sessionCwd,
         prompt: p,
@@ -721,8 +710,6 @@ export async function runDispatch(
         route: routeFor("dispatch"),
         model,
         jsonSchema: z.toJSONSchema(WORKER_OUTPUT[tier]),
-        maxTurns,
-        timeoutMs: profile.timeoutMs,
         readOnly: profile.readOnly,
         // The whole premise is the repo's own Claude-shaped context, and the global rule
         // hierarchy it inherits — unlike `check`, which deliberately keeps the prompt small.
@@ -736,7 +723,7 @@ export async function runDispatch(
         onActivity: relayProgress,
       });
 
-    let result = await runEpisode(prompt, profile.maxTurns);
+    let result = await runEpisode(prompt);
     // Hold the first attempt's text: the retry is a fresh session, so a retry that fails
     // HARDER (no text at all) would otherwise discard a full investigation and salvage
     // nothing. Whichever attempt actually produced text is what gets preserved.
@@ -755,12 +742,11 @@ export async function runDispatch(
         { event: "dispatch.retry", tool: "dispatch", project: cwd, tier, error: result.error },
         "dispatch output unusable — retrying once",
       );
-      turnOffset = profile.maxTurns;
+      turnOffset = lastObservedTurns;
       note("retry (fresh session)");
-      // The retry is a FRESH session that has to re-read the repo, so a serialize-only
-      // budget would guarantee a second failure. It is still well under the first pass's —
-      // the prompt tells it to go straight to the answer.
-      result = await runEpisode(prompt + JSON_ONLY_RETRY, profile.retryTurns);
+      // The retry is a FRESH session that has to re-read the repo, so it is told to go
+      // straight to the answer rather than re-investigating from scratch.
+      result = await runEpisode(prompt + JSON_ONLY_RETRY);
       if (!result.ok && !isSalvageable(result)) {
         throw new Error(
           `dispatch retry did not complete: ${result.error ?? "unknown session failure"}`,

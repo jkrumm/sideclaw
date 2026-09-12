@@ -85,11 +85,13 @@ it — design new tools with these baked in.
    should say: your very last message is the JSON, never a tool call.
 2. **Don't make the worker discover what the caller can pass in.**
    Repo/environment discovery is the dominant turn-sink and the main cause
-   of timeouts on non-Node repos. Accept an explicit-command param as a fast
-   path (`check`'s `commands`, `implement`'s `validateCmd`); when present,
-   skip discovery entirely — build a minimal prompt that forbids
-   `which`/`git remote -v`/ecosystem sniffing/`fallow`, cap `maxTurns`
-   tight. Prefer doing discovery in handler code (deterministic parallel
+   of slow, wandering sessions on non-Node repos — there is no turn or
+   wall-clock limit to cap against (idle watchdog only), so an undirected
+   worker just runs longer instead of erroring out. Accept an
+   explicit-command param as a fast path (`check`'s `commands`,
+   `implement`'s `validateCmd`); when present, skip discovery entirely —
+   build a minimal prompt that forbids `which`/`git remote -v`/ecosystem
+   sniffing/`fallow`. Prefer doing discovery in handler code (deterministic parallel
    `shell()` calls) over asking the worker — why `review` never had this
    time-sink: it gathers diff/fallow/coderabbit itself.
 3. **Keep skills ecosystem-agnostic.** Don't hardwire Node/`package.json`

@@ -621,8 +621,6 @@ async function routeExtraAngles(
     // what the knob does — don't "fix" this inconsistency.
     route: routeFor("review_router"),
     jsonSchema: ROUTER_JSON_SCHEMA,
-    maxTurns: 8,
-    timeoutMs: 3 * 60 * 1000,
     readOnly: true,
     // No `retryAfterOutput`: same CLASSIFY tier as check/overview, and glm-5.3-flash
     // defaulting to max reasoning effort reads as "stalling" when it is only slow. A
@@ -1016,8 +1014,6 @@ export async function runReview(
           route: routeFor("review"),
           model,
           jsonSchema: ANGLE_JSON_SCHEMA,
-          maxTurns: 60,
-          timeoutMs: 15 * 60 * 1000,
           readOnly: true,
           settingSources: "user,project",
           extraEnv: researchEnv,
@@ -1110,7 +1106,7 @@ export async function runReview(
       .replace("[FALLOW_RESULTS]", fallowBlock)
       .replace("[CODERABBIT_RESULTS]", coderabbitBlock);
 
-    const runSynthesis = (synthPrompt: string, maxTurns: number) =>
+    const runSynthesis = (synthPrompt: string) =>
       runSession<SynthesisOutput>({
         cwd: effectiveCwd,
         prompt: synthPrompt,
@@ -1120,15 +1116,13 @@ export async function runReview(
         route: routeFor("review"),
         model,
         jsonSchema: REVIEW_JSON_SCHEMA,
-        maxTurns,
-        timeoutMs: 10 * 60 * 1000,
         readOnly: true,
         settingSources: "user,project",
         validate: zodValidator(SYNTHESIS_OUTPUT),
         onActivity: (p) => bump(`synthesis: ${p.lastAction}`),
       });
 
-    let synthesisResult = await runSynthesis(finalPrompt, 20);
+    let synthesisResult = await runSynthesis(finalPrompt);
 
     // Salvage: the synthesizer occasionally emits prose instead of the schema JSON.
     // Rather than discard the whole multi-angle run, retry once with a hardened
@@ -1140,7 +1134,7 @@ export async function runReview(
         "synthesis output invalid — retrying with JSON-only directive",
       );
       bump("synthesis: retry (json-only)");
-      synthesisResult = await runSynthesis(finalPrompt + SYNTHESIS_JSON_ONLY_RETRY, 8);
+      synthesisResult = await runSynthesis(finalPrompt + SYNTHESIS_JSON_ONLY_RETRY);
     }
 
     if (!synthesisResult.ok || !synthesisResult.data) {
