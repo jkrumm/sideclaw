@@ -21,6 +21,7 @@ import {
   initJobStore,
   markDrainCompleted,
   markDrainKilled,
+  protectedWorktreePaths,
   queueStats,
   setDraining,
 } from "./jobs/store";
@@ -109,7 +110,14 @@ const app = new Elysia()
 // the process never runs its teardown, and what it leaves behind is not confined to
 // sideclaw's own state dir — the worktree is registered, and its branch created, inside the
 // LIVE repo.
-await sweepStaleWorktrees().catch((err: unknown) => {
+//
+// `protectedWorktreePaths()` is read BEFORE `initJobStore()` below runs its `recover()` —
+// while every `running` dispatch row from the previous process is still `running`, not yet
+// reconciled to `pending`/`interrupted`. A row `recover()` is about to resume (a `session_id`
+// and an on-disk worktree both survived) is not a leftover — it's the next attempt's own
+// worktree — so this sweep must never delete it out from under a resume it hasn't happened
+// yet. Querying `store.ts` here does not itself run any recovery: only `initJobStore()` does.
+await sweepStaleWorktrees(protectedWorktreePaths()).catch((err: unknown) => {
   logger.warn({ event: "dispatch.worktree_sweep_failed", error: String(err) }, "sweep failed");
 });
 

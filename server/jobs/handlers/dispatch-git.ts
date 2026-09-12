@@ -967,15 +967,22 @@ export async function salvageWorktree(
  *
  * Safe to run unconditionally at boot because launchd keeps exactly one instance of this
  * server: at the moment it starts, no episode of its own is in flight, so every directory
- * under the root is by definition abandoned.
+ * under the root is by definition abandoned — UNLESS it belongs to a `running` dispatch row
+ * boot recovery is about to resume rather than abandon (`protectedPaths`, below): that
+ * directory is not a leftover, it's the next attempt's own worktree, still described by a
+ * `session_id` on the job row. `server/index.ts` reads `protectedWorktreePaths()`
+ * (`server/jobs/store.ts`) BEFORE `initJobStore()` runs its `recover()` and passes the result
+ * here, ahead of `recover()` itself — see that call site for why the ordering matters.
  */
-export async function sweepStaleWorktrees(): Promise<number> {
+export async function sweepStaleWorktrees(protectedPaths: readonly string[] = []): Promise<number> {
   const root = worktreeRoot();
   if (!existsSync(root)) return 0;
+  const protectedSet = new Set(protectedPaths);
   let swept = 0;
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const path = join(root, entry.name);
+    if (protectedSet.has(path)) continue;
     const { main, branch } = describeLeftover(path);
     if (main) {
       // Every leftover here is, by definition, from an abnormal exit — nothing at boot ever

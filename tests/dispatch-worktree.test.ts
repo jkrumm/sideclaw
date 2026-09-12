@@ -348,6 +348,16 @@ describe("sweepStaleWorktrees", () => {
     rmSync(fx.worktrees, { recursive: true, force: true });
     expect(await sweep()).toBe(0);
   });
+
+  test("skips a directory named in protectedPaths — a resume-eligible worktree, not a leftover", async () => {
+    const kept = await createWorktree(fx.repo, key(), "resumable", "master");
+    const stray = await createWorktree(fx.repo, key(), "abandoned", "master");
+
+    expect(await sweep([kept.path])).toBe(1);
+
+    expect(existsSync(kept.path)).toBe(true);
+    expect(existsSync(stray.path)).toBe(false);
+  });
 });
 
 // ── Salvage ───────────────────────────────────────────────────────────────────

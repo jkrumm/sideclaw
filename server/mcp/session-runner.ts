@@ -248,6 +248,33 @@ export interface SessionOptions<T = unknown> {
    * Zod schema via `zodValidator(MY_OUTPUT)`.
    */
   validate?: (data: unknown) => { ok: true; value: T } | { ok: false; error: string };
+  /**
+   * Resume a previously-started worker transcript instead of spawning a fresh session —
+   * `buildSessionArgs` emits `--resume <id>` alongside `-p <prompt>` (verified against
+   * `.claude/skills/claude-cli/references/cli-flags.md`'s Sessions table: `--resume`/`-r` takes
+   * a UUID and carries no documented restriction against `-p`). `prompt` in this mode should be
+   * a short continuation nudge, not the original brief — the resumed transcript already has it.
+   *
+   * This is narrower than the vendored skill's own "No `--resume` for HITL" guidance
+   * (`.claude/skills/claude-cli/SKILL.md`), which is about a human-in-the-loop workflow
+   * re-entering a session across separate turns and warns that a killed mid-execution resume
+   * can corrupt it. The caller here (`server/jobs/handlers/dispatch.ts`'s boot-recovery resume,
+   * `server/jobs/store.ts`'s `recover()`) is a NARROWER, owner-decided case: a worker killed by
+   * this process's own restart (crash, SIGKILL, `FORCE=1`, launchd's `ExitTimeOut`), resumed
+   * exactly once from the last recorded transcript id in the same worktree it left on disk. The
+   * corruption risk the skill warns about is real and not eliminated by that narrowing — flagged
+   * here rather than silently assumed away.
+   */
+  resumeSessionId?: string;
+  /**
+   * Fired once, the instant the worker's real transcript session id is first observed (the
+   * same moment `writeSessionEnv`'s sidecar log fires) — before the session finishes. Lets a
+   * job handler persist it immediately (`server/jobs/store.ts`'s `updateJobSessionId`), so a
+   * process killed moments later still leaves a resumable id on the job row instead of only
+   * learning it from a `SessionResult` that a kill prevents from ever being returned.
+   * Fire-and-forget; errors are swallowed by the runner, same contract as `onActivity`.
+   */
+  onSessionId?: (sessionId: string) => void;
 }
 
 /** JSON-stringify for diagnostics only. Never throws — a value that cannot be serialized
@@ -548,14 +575,24 @@ export interface SessionArgsInput {
   jsonSchema?: Record<string, unknown>;
   mcpServers?: Record<string, unknown>;
   extraDisallowedTools?: string[];
+  /** See `SessionOptions.resumeSessionId`. Emits `--resume <id>` alongside `-p`. */
+  resumeSessionId?: string;
 }
 
 /** The full `claude` argument vector for a worker session. Split out from `runSession` so the
  *  flags that constrain a worker are assertable without spawning anything — several of them
  *  are load-bearing security bounds whose absence is invisible at runtime. */
 export function buildSessionArgs(input: SessionArgsInput): string[] {
-  const { prompt, settingSources, model, readOnly, jsonSchema, mcpServers, extraDisallowedTools } =
-    input;
+  const {
+    prompt,
+    settingSources,
+    model,
+    readOnly,
+    jsonSchema,
+    mcpServers,
+    extraDisallowedTools,
+    resumeSessionId,
+  } = input;
 
   const args: string[] = [
     "-p",
@@ -579,6 +616,10 @@ export function buildSessionArgs(input: SessionArgsInput): string[] {
     "--model",
     model,
   ];
+
+  if (resumeSessionId) {
+    args.push("--resume", resumeSessionId);
+  }
 
   // Read-only tools: remove the editing tools outright.
   //
@@ -1242,6 +1283,8 @@ async function runSessionAttempt<T = unknown>(
     jobId,
     validate,
     onActivity,
+    resumeSessionId,
+    onSessionId,
   } = opts;
   const route = withModel(opts.route, opts.model);
   const model = forced?.model ?? route.model;
@@ -1323,6 +1366,7 @@ async function runSessionAttempt<T = unknown>(
     jsonSchema,
     mcpServers,
     extraDisallowedTools,
+    resumeSessionId,
   });
 
   const env = buildWorkerEnv({ tool, backend, model, anthropicBase, iuKey, extraEnv });
@@ -1436,6 +1480,13 @@ async function runSessionAttempt<T = unknown>(
     // known silent-default-to-max weak point) and keeps the drift audit meaningful.
     writeSessionEnv(workerSessionId, backend === "max" ? null : anthropicBase, model, backend);
     sessionEnvWritten = true;
+    // Report the id up to the job layer the instant it's known — see `onSessionId`'s doc
+    // comment: a job killed moments after this fires still leaves a resumable id on its row.
+    try {
+      onSessionId?.(workerSessionId);
+    } catch {
+      /* fire-and-forget, same contract as onActivity */
+    }
   };
   const emitActivity = () => {
     if (!onActivity) return;

@@ -1,6 +1,6 @@
 import type { JobRecord } from "./types.ts";
 import type { ProgressSink } from "./store.ts";
-import { isCancelRequested } from "./store.ts";
+import { isCancelRequested, updateJobSessionId, updateJobWorktreeMeta } from "./store.ts";
 import { runCheck } from "./handlers/check.ts";
 import { runReview } from "./handlers/review.ts";
 import { runExcalidrawDiagram } from "./handlers/excalidraw-diagram.ts";
@@ -27,7 +27,21 @@ export function executeJob(job: JobRecord, onProgress: ProgressSink): Promise<un
     case "excalidraw_diagram":
       return runExcalidrawDiagram(job.params, onProgress, job.id, isCancelRequested);
     case "dispatch":
-      return runDispatch(job.params, onProgress, job.id, isCancelRequested);
+      // `job.sessionId`/`job.worktreeMeta` are non-null only when `store.ts`'s `recover()`
+      // landed this row `pending` with a "resume" decision (`dispatchRecoveryStatusFor`) — a
+      // fresh job (or one recovered "fresh") always starts with both null, so `resume` below is
+      // undefined and `runDispatch` takes its ordinary from-scratch path. The two `on*` sinks
+      // are wired unconditionally: they no-op harmlessly (`UPDATE ... WHERE status = 'running'`
+      // matches nothing) if this job never gets resumed, and dispatch.ts is what decides when
+      // to call them.
+      return runDispatch(job.params, onProgress, job.id, isCancelRequested, {
+        resume:
+          job.sessionId && job.worktreeMeta
+            ? { sessionId: job.sessionId, worktreeMeta: job.worktreeMeta }
+            : undefined,
+        onSessionId: (sessionId) => updateJobSessionId(job.id, sessionId),
+        onWorktreeReady: (meta) => updateJobWorktreeMeta(job.id, meta),
+      });
     case "overview":
       return runOverview(job.params, onProgress, job.id, isCancelRequested);
     case "narrative":

@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { appLogger as logger } from "../logger.ts";
@@ -62,6 +62,8 @@ interface JobRow {
   started_at: number | null;
   finished_at: number | null;
   cancel_requested_at: number | null;
+  session_id: string | null;
+  worktree_meta: string | null;
 }
 
 const db = new Database(DB_PATH);
@@ -100,6 +102,22 @@ try {
 // a job an operator asked to stop.
 try {
   db.run("ALTER TABLE jobs ADD COLUMN cancel_requested_at INTEGER");
+} catch {
+  /* column already exists */
+}
+
+// Migration for dbs created before boot-recovery resume support. `session_id` is the worker's
+// real transcript id (`session-runner.ts`'s `onSessionId`, via `updateJobSessionId` below);
+// `worktree_meta` is the dispatch handler's `DispatchWorktree`, JSON-encoded (via
+// `updateJobWorktreeMeta`). Both are set only for `dispatch` — every other tool leaves them
+// null for the row's whole life. Same ignore-if-present pattern as the two migrations above.
+try {
+  db.run("ALTER TABLE jobs ADD COLUMN session_id TEXT");
+} catch {
+  /* column already exists */
+}
+try {
+  db.run("ALTER TABLE jobs ADD COLUMN worktree_meta TEXT");
 } catch {
   /* column already exists */
 }
@@ -248,11 +266,15 @@ const recoveredFromDrain = (() => {
  *  longer true to ask. */
 export const BOOT_HEALTH_GRACE_MS = 5 * 60 * 1000;
 
-/** Tools whose interrupted run is re-queued ONCE on boot (attempts 1 → 2). All are
- *  read-only and idempotent — re-running costs tokens, never correctness. `dispatch`
- *  is deliberately absent: an `implement` episode may have pushed a branch or opened a
- *  PR before the restart, and a second episode would do it again; `excalidraw_diagram`
- *  writes a file. Those stay `interrupted` for the caller to decide. */
+/** Tools whose interrupted run is re-queued ONCE on boot (attempts 1 → 2) by re-running from
+ *  scratch. All are read-only and idempotent — re-running costs tokens, never correctness.
+ *  `dispatch` is deliberately absent: it has its OWN recovery path below
+ *  (`dispatchRecoveryStatusFor`, applied in `recover()` before this function is ever consulted
+ *  for a dispatch row) because a from-scratch re-run is only sometimes the right call — an
+ *  `implement` episode may already have pushed a branch or opened a PR, and a session with a
+ *  recorded `session_id` can be RESUMED in its own worktree instead of restarted.
+ *  `excalidraw_diagram` writes a file and has no resume path of its own, so it stays
+ *  `interrupted` for the caller to decide, same as before. */
 const REQUEUE_ON_RECOVER: ReadonlySet<JobTool> = new Set<JobTool>([
   "check",
   "overview",
@@ -262,10 +284,41 @@ const REQUEUE_ON_RECOVER: ReadonlySet<JobTool> = new Set<JobTool>([
 const MAX_RECOVER_ATTEMPTS = 2;
 
 /** Pure boot-recovery decision for a `running` row whose worker died with the previous
- *  process. Exported for tests. */
+ *  process. Exported for tests. Never called for `dispatch` in production — see
+ *  `dispatchRecoveryStatusFor` below — but left total over `JobTool` rather than narrowed,
+ *  since a `dispatch` row calling this directly (as a test may, to pin the "no unconditional
+ *  requeue" boundary) must still get a real, honest answer instead of a runtime guard failing. */
 export function recoveryStatusFor(tool: JobTool, attempts: number): "pending" | "interrupted" {
   if (!REQUEUE_ON_RECOVER.has(tool)) return "interrupted";
   return attempts < MAX_RECOVER_ATTEMPTS ? "pending" : "interrupted";
+}
+
+/** `dispatch`'s own boot-recovery decision — three-way, unlike every other tool's binary
+ *  pending/interrupted, because a dispatch row's worker may have died at one of two very
+ *  different points: before it produced its first stream event (nothing has happened — no
+ *  session id was ever recorded) or after (a `session_id` was captured, and the worktree it was
+ *  working in is still on disk).
+ *
+ *  - `"resume"`: a `session_id` is recorded AND its worktree still exists on disk — the handler
+ *    reopens that exact worktree and resumes the transcript (`runSession`'s `resumeSessionId`)
+ *    instead of starting over, so investigation work already done is not thrown away.
+ *  - `"fresh"`: no `session_id` (killed before the worker ever produced an event — nothing to
+ *    resume) or the worktree is gone (e.g. deleted out from under the row by something other
+ *    than this reconciliation) — re-run from scratch, same as `REQUEUE_ON_RECOVER` tools.
+ *  - `"interrupted"`: `MAX_RECOVER_ATTEMPTS` already spent, resume or fresh alike — never an
+ *    unbounded retry loop.
+ *
+ *  Pure and exported for tests; `hasSessionId`/`worktreeExists` are passed in rather than read
+ *  here so the disk check (`existsSync`) stays at the one call site in `recover()`. */
+export type DispatchRecoveryDecision = "resume" | "fresh" | "interrupted";
+
+export function dispatchRecoveryStatusFor(
+  attempts: number,
+  hasSessionId: boolean,
+  worktreeExists: boolean,
+): DispatchRecoveryDecision {
+  if (attempts >= MAX_RECOVER_ATTEMPTS) return "interrupted";
+  return hasSessionId && worktreeExists ? "resume" : "fresh";
 }
 
 // ── Row mapping ──────────────────────────────────────────────────────────────
@@ -284,6 +337,8 @@ function rowToRecord(row: JobRow): JobRecord {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     cancelRequestedAt: row.cancel_requested_at,
+    sessionId: row.session_id,
+    worktreeMeta: row.worktree_meta === null ? null : JSON.parse(row.worktree_meta),
   };
 }
 
@@ -609,6 +664,58 @@ function updateProgress(id: string, progress: JobProgress): void {
   ]);
 }
 
+/** Persist the worker's real transcript session id the instant it's known (`session-runner.ts`'s
+ *  `onSessionId`, threaded down through `executeJob` → `runDispatch`). `WHERE status = 'running'`
+ *  guards the same race `updateProgress` above does — a late-arriving write racing a `finish()`
+ *  that already landed the row terminal must not resurrect it. Only ever called for `dispatch`
+ *  today, but not tool-gated here: this module has no reason to know which tools resume. */
+export function updateJobSessionId(id: string, sessionId: string): void {
+  db.run("UPDATE jobs SET session_id = ? WHERE id = ? AND status = 'running'", [sessionId, id]);
+}
+
+/** Persist the dispatch handler's `DispatchWorktree` the instant the worktree is created — well
+ *  before the worker session even starts, so a process killed before any stream event still
+ *  leaves enough on the row for `sweepStaleWorktrees()` to be told to skip it (see
+ *  `protectedWorktreePaths` below), even though `recover()` will not treat that particular row
+ *  as resumable without a `session_id` too (see `dispatchRecoveryStatusFor`). Stored as the full
+ *  object, not just its `path` — see `JobRecord.worktreeMeta`'s doc comment for why `base` must
+ *  survive a resume unchanged rather than be re-derived. */
+export function updateJobWorktreeMeta(id: string, meta: Record<string, unknown>): void {
+  db.run("UPDATE jobs SET worktree_meta = ? WHERE id = ? AND status = 'running'", [
+    JSON.stringify(meta),
+    id,
+  ]);
+}
+
+/**
+ * Worktree paths a `running` dispatch row still owns, read BEFORE `initJobStore`'s `recover()`
+ * runs — `server/index.ts` calls this ahead of `sweepStaleWorktrees()` so the sweep can skip
+ * them. A row only counts as protected once it has BOTH a `session_id` and a `worktree_meta`:
+ * the same pair `dispatchRecoveryStatusFor` requires for a "resume" decision — a row with a
+ * worktree but no session id yet is going to be recovered "fresh" (worktree discarded), so
+ * protecting its directory from the sweep would just leave it for `discardWorktree` to remove
+ * one call later instead of the sweep doing it now.
+ */
+export function protectedWorktreePaths(): string[] {
+  const rows = db
+    .query<{ worktree_meta: string }, []>(
+      `SELECT worktree_meta FROM jobs
+       WHERE status = 'running' AND tool = 'dispatch'
+         AND session_id IS NOT NULL AND worktree_meta IS NOT NULL`,
+    )
+    .all();
+  const paths: string[] = [];
+  for (const row of rows) {
+    try {
+      const meta = JSON.parse(row.worktree_meta) as { path?: unknown };
+      if (typeof meta.path === "string") paths.push(meta.path);
+    } catch {
+      /* a malformed row protects nothing rather than throwing at boot */
+    }
+  }
+  return paths;
+}
+
 const EVENT_BY_STATUS: Record<
   Extract<JobStatus, "done" | "failed" | "cancelled">,
   "job.done" | "job.fail" | "job.cancelled"
@@ -688,15 +795,18 @@ function finish(
  *  `REQUEUE_ON_RECOVER` tool (check/overview/narrative/review) would silently resume the exact
  *  job the cancel was trying to stop.
  *
- *  Otherwise: idempotent read-only tools (`REQUEUE_ON_RECOVER`) on their first attempt go back
- *  to `pending` and run again (attempts 1 → 2 on promotion); everything else — a second
- *  interruption, or a tool with side effects — is marked `interrupted`. `pending` rows never
- *  started; they are simply promoted. */
+ *  Otherwise, `dispatch` rows go through `dispatchRecoveryStatusFor` (below) — resume in place,
+ *  re-run from scratch, or interrupted, depending on whether a `session_id` and its worktree
+ *  survived. Every other tool: idempotent read-only ones (`REQUEUE_ON_RECOVER`) on their first
+ *  attempt go back to `pending` and run again (attempts 1 → 2 on promotion); everything else —
+ *  a second interruption, or a tool with side effects — is marked `interrupted`. `pending` rows
+ *  never started; they are simply promoted. */
 function recover(): void {
   const now = Date.now();
   const running = db.query<JobRow, []>("SELECT * FROM jobs WHERE status = 'running'").all();
   let interrupted = 0;
   let requeued = 0;
+  let resumed = 0;
   let cancelled = 0;
   for (const row of running) {
     if (row.cancel_requested_at !== null) {
@@ -708,6 +818,64 @@ function recover(): void {
       logger.info(
         { event: "job.cancelled", jobId: row.id, tool: row.tool },
         "cancel was requested before this restart — landed cancelled on boot, never resumed",
+      );
+      continue;
+    }
+    if ((row.tool as JobTool) === "dispatch") {
+      const worktreePath =
+        row.worktree_meta !== null
+          ? ((JSON.parse(row.worktree_meta) as { path?: unknown }).path ?? null)
+          : null;
+      const decision = dispatchRecoveryStatusFor(
+        row.attempts,
+        row.session_id !== null,
+        typeof worktreePath === "string" && existsSync(worktreePath),
+      );
+      if (decision === "interrupted") {
+        db.run(
+          "UPDATE jobs SET status = 'interrupted', error = 'HTTP server restarted while job was running', finished_at = ? WHERE id = ?",
+          [now, row.id],
+        );
+        interrupted++;
+        continue;
+      }
+      if (decision === "resume") {
+        // Keep session_id/worktree_meta as-is — their presence IS the resume marker the
+        // dispatch handler reads back off `job.sessionId`/`job.worktreeMeta` at promotion.
+        db.run(
+          "UPDATE jobs SET status = 'pending', progress = NULL, started_at = NULL, error = NULL WHERE id = ?",
+          [row.id],
+        );
+        resumed++;
+        logger.warn(
+          {
+            event: "job.requeue",
+            jobId: row.id,
+            tool: row.tool,
+            attempts: row.attempts,
+            resume: true,
+          },
+          "interrupted dispatch re-queued for resume — worktree and transcript preserved",
+        );
+        continue;
+      }
+      // "fresh" — clear both markers so the handler creates a new worktree, same as an
+      // ordinary first attempt.
+      db.run(
+        `UPDATE jobs SET status = 'pending', progress = NULL, started_at = NULL, error = NULL,
+           session_id = NULL, worktree_meta = NULL WHERE id = ?`,
+        [row.id],
+      );
+      requeued++;
+      logger.warn(
+        {
+          event: "job.requeue",
+          jobId: row.id,
+          tool: row.tool,
+          attempts: row.attempts,
+          resume: false,
+        },
+        "interrupted dispatch re-queued from scratch — no session id was ever recorded",
       );
       continue;
     }
@@ -733,9 +901,9 @@ function recover(): void {
   const pending =
     db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM jobs WHERE status = 'pending'").get()
       ?.n ?? 0;
-  if (interrupted > 0 || pending > 0 || cancelled > 0) {
+  if (interrupted > 0 || pending > 0 || cancelled > 0 || resumed > 0) {
     logger.info(
-      { event: "job.recover", interrupted, requeued, cancelled, pending },
+      { event: "job.recover", interrupted, requeued, resumed, cancelled, pending },
       "job recovery on startup",
     );
   }
@@ -776,5 +944,7 @@ function fallbackRecord(
     startedAt: null,
     finishedAt: null,
     cancelRequestedAt: null,
+    sessionId: null,
+    worktreeMeta: null,
   };
 }

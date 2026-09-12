@@ -360,6 +360,15 @@ be under 200 characters, and \`confidence\` / \`nextAction\` must be one of the 
 exactly. If your reduced budget only supports a partial answer, say so in \`verdict\` and set
 \`confidence: "low"\` — an honest thin verdict is correct, a fabricated thorough one is not.`;
 
+/** The `-p` prompt for a boot-recovery resume (`--resume <id>`, `SessionOptions.resumeSessionId`)
+ *  — a short continuation nudge, not the original brief-laden prompt: the resumed transcript
+ *  already has that. Deliberately tells the worker to re-read git state before acting, since it
+ *  is a NEW process attaching to an old transcript and its own belief about what it already did
+ *  may be stale relative to what actually landed on disk before the kill. */
+export const RESUME_CONTINUATION_PROMPT =
+  "Continue the task; the daemon that hosted you restarted. Re-read `git status`/`git diff` " +
+  "in this worktree before acting, then finish and emit the structured output.";
+
 export { newFenceNonce };
 
 /** Tier prompt = the shared hardening preamble + the tier's own section. Split so the
@@ -600,6 +609,40 @@ export function applySensitiveScan(
 
 // ── Core ───────────────────────────────────────────────────────────────────────
 
+/** Boot-recovery resume plumbing, injected by `executor.ts` (never constructed by a direct
+ *  caller — tests exercise `resume` directly since it needs no live session). `resume` present
+ *  means `store.ts`'s `recover()` landed this job `pending` with a "resume" decision
+ *  (`dispatchRecoveryStatusFor`): reopen the named worktree and continue the named transcript
+ *  instead of starting a fresh episode. `onSessionId`/`onWorktreeReady` are called on every run
+ *  regardless (a fresh job has nothing to resume yet, but still needs its OWN session id and
+ *  worktree recorded in case IT gets killed) — `store.ts`'s setters are no-ops once the row
+ *  leaves `running`, so calling them on a job that never resumes costs nothing. */
+export interface DispatchResumeContext {
+  resume?: { sessionId: string; worktreeMeta: Record<string, unknown> };
+  onSessionId?: (sessionId: string) => void;
+  onWorktreeReady?: (meta: DispatchWorktree) => void;
+}
+
+/** Reconstruct a `DispatchWorktree` from the JSON round-trip through `jobs.worktree_meta`
+ *  (`store.ts` stringifies whatever `onWorktreeReady` was called with; `executor.ts` hands the
+ *  parsed `Record<string, unknown>` back here). A malformed row refuses loudly rather than
+ *  running a session against a half-typed object — this shape is only ever produced by this
+ *  module's own `onWorktreeReady` call, so a mismatch means on-disk corruption or a schema
+ *  change, not a normal runtime condition. */
+function reconstructWorktree(meta: Record<string, unknown>): DispatchWorktree {
+  const { path, branch, base, baseRef, pushable } = meta;
+  if (
+    typeof path !== "string" ||
+    typeof branch !== "string" ||
+    typeof base !== "string" ||
+    typeof baseRef !== "string" ||
+    typeof pushable !== "boolean"
+  ) {
+    throw new Error("dispatch resume refused: persisted worktree metadata is malformed");
+  }
+  return { path, branch, base, baseRef, pushable };
+}
+
 /** Run one dispatch episode and return its verdict. Throws on failure — the store turns a
  *  throw into `status: "failed"`. */
 export async function runDispatch(
@@ -607,6 +650,7 @@ export async function runDispatch(
   onProgress?: ProgressSink,
   jobId?: string,
   isCancelled?: (jobId: string) => boolean,
+  resumeCtx?: DispatchResumeContext,
 ): Promise<DispatchOutput> {
   const { cwd, brief, tier, context, model, sensitive } = parseParams(DISPATCH_INPUT, rawParams);
   // Checked before the filesystem checks below — the repo policy (server/lib/dispatch-policy.ts)
@@ -684,26 +728,45 @@ export async function runDispatch(
   // bookkeeping to recover it. Falls back to a fresh id for a direct call with no outer job
   // (tests, or a future non-job caller).
   const jobKey = jobId ?? randomUUID();
+  const resuming = resumeCtx?.resume !== undefined;
   let worktree: DispatchWorktree | undefined;
   try {
-    if (tier === "implement" && identity) {
+    if (resumeCtx?.resume) {
+      // Reopen exactly what `dispatchRecoveryStatusFor` verified existed at `recover()` time —
+      // reconstructed from the persisted object, not re-derived: `base` in particular is a
+      // pinned OID (`DispatchWorktree.base`'s doc comment) that must survive unchanged, not be
+      // recomputed from the worktree's current state.
+      worktree = reconstructWorktree(resumeCtx.resume.worktreeMeta);
+      if (!existsSync(worktree.path)) {
+        throw new Error(
+          `dispatch resume refused: worktree ${worktree.path} no longer exists on disk`,
+        );
+      }
+      note(`resuming ${worktree.branch}`);
+    } else if (tier === "implement" && identity) {
       worktree = await createWorktree(cwd, jobKey, slugify(brief), identity.defaultBranch);
       note(`worktree ${worktree.branch}`);
     } else {
       worktree = await createReadWorktree(cwd, jobKey);
     }
+    // Recorded the instant the worktree exists — well before the worker session starts — so a
+    // process killed before the FIRST stream event still leaves this on the job row. A resume
+    // re-records the same value; store.ts's setter is a plain UPDATE, so this costs nothing.
+    resumeCtx?.onWorktreeReady?.(worktree);
     const sessionCwd = worktree.path;
     // The episode loads the repo's Claude-shaped context on purpose — CLAUDE.md, rules,
     // skills. It must not also load the repo's *executable* config: a project settings file
     // supplies hooks that run as this user and an `env` block that overrides the environment
     // the handler set, including the git-credential overlay below. Removed from the copy, put
-    // back before anything is committed. See stripProjectSettings.
+    // back before anything is committed. See stripProjectSettings. Idempotent on a resumed
+    // worktree — a file already stripped before the kill is simply absent the second time.
     const strippedSettings = stripProjectSettings(worktree);
     if (strippedSettings.length > 0) note(`stripped ${strippedSettings.join(", ")}`);
-    const runEpisode = (p: string) =>
+    const runEpisode = (p: string, opts: { resumeSessionId?: string } = {}) =>
       runSession<DispatchOutput>({
         cwd: sessionCwd,
         prompt: p,
+        resumeSessionId: opts.resumeSessionId,
         tool: "dispatch",
         jobId,
         isCancelled,
@@ -721,9 +784,18 @@ export async function runDispatch(
         extraEnv: GIT_DENY_CREDENTIALS_ENV,
         validate: zodValidator(WORKER_OUTPUT[tier]),
         onActivity: relayProgress,
+        onSessionId: resumeCtx?.onSessionId,
       });
 
-    let result = await runEpisode(prompt);
+    // A resume attaches to the existing transcript with a short continuation nudge instead of
+    // re-sending the original (already-seen) brief prompt; everything past this first call —
+    // the schema-validation retry below — is unaffected and always a fresh session, resume or
+    // not, same as before this feature existed.
+    let result = resuming
+      ? await runEpisode(RESUME_CONTINUATION_PROMPT, {
+          resumeSessionId: resumeCtx?.resume?.sessionId,
+        })
+      : await runEpisode(prompt);
     // Hold the first attempt's text: the retry is a fresh session, so a retry that fails
     // HARDER (no text at all) would otherwise discard a full investigation and salvage
     // nothing. Whichever attempt actually produced text is what gets preserved.

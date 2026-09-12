@@ -119,6 +119,17 @@ describe("buildSessionArgs — pass-through", () => {
     expect(a).not.toContain("--max-turns");
   });
 
+  test("omits --resume by default", () => {
+    expect(args()).not.toContain("--resume");
+  });
+
+  test("emits --resume <id> alongside -p when resuming a boot-recovered session", () => {
+    const a = args({ resumeSessionId: "abc-123", prompt: "continue" });
+    expect(valueOf(a, "--resume")).toBe("abc-123");
+    // -p (the continuation prompt) is still present, never replaced by --resume.
+    expect(valueOf(a, "-p")).toBe("continue");
+  });
+
   test("streams NDJSON so the job layer can track activity", () => {
     const a = args();
     expect(valueOf(a, "--output-format")).toBe("stream-json");

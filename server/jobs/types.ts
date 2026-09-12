@@ -111,6 +111,25 @@ export interface JobRecord {
    * once set (even if the job wins the race and finishes normally — see `execute()`'s success
    * path), so it stays a true historical record of "cancellation was asked for this job". */
   cancelRequestedAt: number | null;
+  /**
+   * The worker's real transcript session id, recorded (`server/jobs/store.ts`'s
+   * `updateJobSessionId`) the instant `session-runner.ts` observes it — before the job
+   * finishes, so a process killed moments later still leaves a resumable id behind. Currently
+   * only meaningful for `dispatch`: it is what a boot-recovery resume (`recover()`) passes to
+   * `runSession`'s `resumeSessionId` instead of starting a fresh episode. Null until the first
+   * worker event arrives, or for a tool that never resumes.
+   */
+  sessionId: string | null;
+  /**
+   * The dispatch handler's `DispatchWorktree` (path/branch/base/baseRef/pushable), recorded
+   * (`updateJobWorktreeMeta`) as soon as the worktree is created — persisted as the full object,
+   * not just `path`, because `base` is a security-relevant pinned OID
+   * (`server/jobs/handlers/dispatch-git.ts`'s `DispatchWorktree.base`) that a resume must reuse
+   * exactly rather than re-derive. Only ever set by `dispatch`; null for every other tool. Also
+   * what `server/index.ts`'s boot sweep (`sweepStaleWorktrees`) reads to avoid deleting a
+   * worktree a resume-eligible `running` row still owns.
+   */
+  worktreeMeta: Record<string, unknown> | null;
 }
 
 /** Public-facing view returned to MCP callers — adds derived elapsed + idle time. */

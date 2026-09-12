@@ -42,9 +42,9 @@ governs which window:
 - **HTTP-initiated** (`POST /api/shutdown`, `server/routes/shutdown.ts` — what `make reload`
   calls now): the process asks itself to exit. launchd's `ExitTimeOut` only starts counting when
   launchd sends the signal and waits for the exit; a SELF-initiated exit never starts that clock
-  at all. This path genuinely gets the long window, `HTTP_DRAIN_GRACE_MS` (~50 min, derivation
-  below) — the number the old `SHUTDOWN_GRACE_MS` always claimed to be, now actually true for
-  the path it governs.
+  at all. This path genuinely gets an unbounded window, `HTTP_DRAIN_GRACE_MS` (`Infinity`,
+  derivation below) — the "wait as long as it takes" behavior the old `SHUTDOWN_GRACE_MS` always
+  implied but never actually was, now actually true for the path it governs.
 - **Signal-initiated** (a real SIGTERM/SIGINT — reboot, logout, `launchctl kill`, launchd
   itself, or `make reload`'s own fallback for when the HTTP endpoint doesn't answer): here
   launchd genuinely is the one waiting, so this path gets the short window,
@@ -61,141 +61,66 @@ A third, narrower kill surface sits alongside these two process-wide ones: `POST
 `terminateSessionsForJob` without touching the process or any other job — it lands `cancelled`,
 never `failed`, and shares no code path with `terminateActiveSessions()`'s drain-wide kill above.
 
-### Sizing `HTTP_DRAIN_GRACE_MS` — why 50 min, not a measured percentile
+### `HTTP_DRAIN_GRACE_MS` is unbounded — why a finite budget stopped making sense
 
-**Stale as of 2026-09-12**: every worker session's `maxTurns`/`timeoutMs`/absolute ceiling was
-removed (`server/mcp/session-runner.ts` keeps only the idle watchdog; `dispatch.ts`'s
-`TIERS.implement.timeoutMs` and `retryTurns` no longer exist). The derivation below assumed a
-bounded per-attempt `timeoutMs` that dispatch no longer configures — a single `implement`
-attempt's wall-clock is now bounded only by the idle watchdog, which does not cap total
-duration for a session that keeps producing output. `IMPLEMENT_SESSION_TIMEOUT_MS` and
-`HTTP_DRAIN_GRACE_MS` (`server/lib/shutdown.ts`) keep their pre-existing numeric values as a
-placeholder, not a re-measured bound — this section has not been re-derived against the new
-reality and needs an owner decision on how long a self-initiated drain should wait for a
-now-unbounded episode. Kept below for historical record only.
+This section used to derive a finite number (40 min, then 50 min as `depositBranch()` grew a
+`check()` step) from `dispatch implement`'s own per-attempt `timeoutMs` and the bounded git/PR
+work after it. As of 2026-09-12 that derivation no longer applies to anything: every worker
+session's `maxTurns`/`timeoutMs`/absolute ceiling was removed (`server/mcp/session-runner.ts`
+keeps only the idle watchdog — no stdout for `IDLE_TIMEOUT_MS`, 5 min), so there is no
+per-attempt budget left to derive a drain window from. `HTTP_DRAIN_GRACE_MS` is now `Infinity`
+(`server/lib/shutdown.ts`) — the self-initiated path (`POST /api/shutdown`, what `make reload`
+calls) waits for every running job with no wall-clock cap at all.
 
-Measured 2026-09-08 over 91 real jobs from three days of `~/Library/Logs/sideclaw.jsonl`
-(`job.start` joined to `job.done`/`job.fail` by `jobId`, duration = `finished_at - started_at`):
+Two changes landed in the same pass that make this safe rather than reckless:
 
-| Tool | n | p50 | p95 | max |
-|-|-|-|-|-|
-| overview | 50 | 100 s | 242 s | 482 s |
-| narrative | 18 | 49 s | 73 s | 73 s |
-| check | 12 | 78 s | 166 s | 166 s |
-| review | 9 | 345 s | 685 s | 685 s |
-| dispatch | 2 | 98 s | — | 98 s |
-| all | 91 | 78 s | 421 s | 685 s |
+1. **The idle watchdog is the only thing that can end a stalled session**, and it already
+   existed independently of this window — a bounded drain used to exist to give up on a session
+   that might simply be slow, but that job now belongs entirely to the watchdog. A drain window
+   on top of it would only ever cut off a session that is still actively producing output — the
+   dispatch `implement` case this whole section used to worry about losing.
+2. **A worker killed anyway is no longer a dead end.** `server/jobs/store.ts`'s boot recovery
+   (`dispatchRecoveryStatusFor`) resumes a `dispatch` episode that has a recorded `session_id`
+   and an on-disk worktree from exactly where it stopped (`runSession`'s `resumeSessionId`,
+   `--resume <id>` on the CLI) instead of discarding it. The previous derivation existed
+   entirely because killing an `implement` episode lost everything it had done; that asymmetry
+   is what changed. `server/index.ts` also reads `protectedWorktreePaths()` (`store.ts`) before
+   the boot-time worktree sweep runs, so a resume-eligible worktree survives the same restart
+   that would otherwise have deleted it as an ordinary leftover.
 
-96% of all 91 jobs ran longer than the old `HTTP_DRAIN_GRACE_MS` (20 s, `server/index.ts`) — the
-drain had never once carried a real job to completion; SIGTERM always fell through to "grace
-period over, exiting with jobs still running".
-
-`HTTP_DRAIN_GRACE_MS` is deliberately **not** read off this table — `review`'s n=9 is too thin to
-size a deadline from, and treating a single observed max as a safe ceiling is precisely the
-estimation error a drain window exists to guard against. It's built from `dispatch`'s
-`implement` tier instead (`TIERS.implement.timeoutMs`, `server/jobs/handlers/dispatch.ts`,
-30 min) — the longest job timeout actually *configured* in code, and the only tool with real
-work to do after its worker session returns.
-
-### The math this section used to get wrong
-
-An earlier version of this file (and the comment in `shutdown.ts`) sized the window on "a job
-can legitimately run up to its own configured timeout, and never longer." That was false. A
-follow-up revision fixed the timeout math but still undercounted: it treated the only
-double-`timeoutMs` chain as the rare `max`→`iu` provider-retry fallback inside
-`runSession()`, and concluded the window's true worst case was "60 minutes, reachable only when
-a provider-side retry signal happens to fire mid-hang." That is a real chain, but it is not the
-only one, and it is not the one most likely to fire — `dispatch.ts`'s own handler-level salvage
-retry is a SEPARATE mechanism that reaches the same 60-minute figure through the *ordinary*
-path, no timeout or provider signal required at all:
-
-- `isSalvageable()` (`server/jobs/handlers/dispatch.ts`) fires on a `max_turns` error or a
-  schema/parse failure — hitting the turn budget without emitting valid JSON, or emitting JSON
-  that doesn't validate. That is a routine way for a session to end badly, not an edge case.
-- The retry it triggers is a FRESH `runSession()` call with a smaller turn budget
-  (`retryTurns`) but the SAME `timeoutMs` ceiling as the first attempt (`profile.timeoutMs`,
-  unchanged between the two `runEpisode()` calls in `runDispatch()`). So the reachable chain
-  through this path alone is two full `timeoutMs` windows — 2 × 30 min = 60 min of session
-  wall-clock — on any `implement` episode that simply runs long and fumbles its JSON.
-
-The two chains do not compound past 60 minutes for a single `runEpisode()` call:
-`isSalvageable()` explicitly excludes a timeout (`noOutput` is never set on that return path,
-and the error text matches neither `max_structured_output_retries` nor `max_turns`), so a hang
-that exhausts the internal `max`→`iu` fallback throws straight to the job failure with no
-further dispatch.ts retry stacked on top. But that bounds only the fallback chain — it does not
-make the salvage-retry chain any rarer, and that one needs neither a timeout nor a provider
-signal to reach.
-
-So the reachable worst case, from either chain (most plausibly the ordinary salvage retry) plus
-`depositBranch()`'s own bounded git/PR work after a successful session, is **~70 minutes**, not
-the 60 the prior revision of this doc claimed and not the 40 this window actually covers.
-Covering that reachable 70-minute chain would put `make reload`'s worst case past an hour. That
-is not sizing conservatively — it is a window nobody would actually wait out, which defeats the
-window's purpose as much as the original wrong math did — so this file makes a deliberate,
-documented trade instead of chasing either chain:
-
-- **30 min base** — a single `implement` attempt's own configured `timeoutMs`, the dominant
-  case (no retry triggered — the common outcome is still a session that finishes or fails
-  outright inside its own budget).
-- **+10 min teardown margin** — `depositBranch()`'s fully bounded worst case, computed from its
-  actual per-call timeouts (`server/jobs/handlers/dispatch-git.ts`), not guessed:
-
-  | Step | Calls | Timeout each |
-  |-|-|-|
-  | `commitPendingWork` (add, diff --cached, commit) | 3 | 60 s |
-  | `commitCount` (rev-list) | 1 | 60 s |
-  | `summarizeDiff` (diff --numstat) | 1 | 60 s |
-  | `diffRefusalReason` → `addedSecrets` (diff -U0) | 1 | 60 s |
-  | `pushBranch` (rev-parse + push) | 2 | 60 s / 180 s |
-
-  Sum: 600 s = 10 min, if every one of those subprocess calls independently hung to its own
-  ceiling — a real code-level bound, not a percentile. (`openPullRequest`'s Octokit call carries
-  no timeout of its own and is not folded into this figure; a genuine network hang there is a
-  different failure class than "legitimate slow work".)
-
-That 50 minutes (the 30 min implement session plus a 20 min bounded `depositBranch`, which since 2026-09-11 includes up to a 10 min mechanical `check` before push) covers the dominant single-attempt path in full. Neither the ordinary
-salvage-retry chain nor the rarer double-timeout `max`→`iu` fallback chain (~60-70 min combined
-with teardown, either way) is covered — including the salvage-retry one, which is reachable on
-any `implement` episode that fumbles its JSON, no timeout or provider signal needed. A job
-caught by either is killed at the grace deadline like any other still-running job, and (see
-`execute()` in `server/jobs/store.ts`) is left `running` rather than written `failed`, so the
-next boot's ordinary crash-recovery reconciles it exactly like a crash. `dispatch` is
-deliberately absent from `REQUEUE_ON_RECOVER` (an `implement` episode may already have pushed a
-branch or opened a PR before the kill), so it lands on `interrupted`, not a silent automatic
-re-run — never silently discarded, never misreported as a real failure on
-`GET /api/jobs/health`, and never doubled against a repo the first episode may have already
-changed. Doubling every reload's worst-case wait to cover a chain this ordinarily reachable is a
-worse trade than that.
+The historical percentile measurement (91 real jobs, three days of `~/Library/Logs/sideclaw.jsonl`)
+and the per-step `depositBranch()` math that used to justify "50 min" are no longer reproduced
+here — they motivated a number that no longer exists. `git log -p -- docs/deployment.md`
+carries that derivation verbatim (2026-09-08 and 2026-09-11 revisions) if it's ever needed again.
 
 **The old "four numbers move together" coupling — `ExitTimeOut` > `SHUTDOWN_GRACE_MS` +
 `SHUTDOWN_FLUSH_MS`, with the Makefile poll ceiling outlasting `ExitTimeOut` on top — no longer
 exists**, and that is not an oversight: it described a relationship this file now knows to be
 false (launchd doesn't honor a raised `ExitTimeOut` past 60s regardless of the plist, so nothing
-was ever actually "exceeding" it in the way the table implied). What replaces it is two smaller,
+was ever actually "exceeding" it in the way the table implied). What replaces it is a handful of
 independently-true facts:
 
 | Constant | Where | Value | Role |
 |-|-|-|-|
-| `HTTP_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | 50 min (3000 s) | drain deadline for a self-initiated exit (`POST /api/shutdown`) — unbounded by launchd, since nothing signals the process on this path |
+| `HTTP_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | `Infinity` | drain deadline for a self-initiated exit (`POST /api/shutdown`) — waits for every running job, unbounded, since nothing signals the process on this path and a worker killed anyway is now resumable |
 | `SIGNAL_DRAIN_GRACE_MS` | `server/lib/shutdown.ts` | 45 s | drain deadline for a real SIGTERM — must stay under `LAUNCHD_HARD_EXIT_TIMEOUT_MS` with real margin, or launchd SIGKILLs mid-drain regardless of what this number says |
 | `SHUTDOWN_FLUSH_MS` | `server/lib/shutdown.ts` | 3 s | HTTP response flush after the drain decision, stacked on top of whichever grace window applies |
 | `LAUNCHD_HARD_EXIT_TIMEOUT_MS` | `server/lib/shutdown.ts` | 60 s | launchd's actual, measured ceiling — not a value this codebase controls, only observes |
 | `ExitTimeOut` | `com.jkrumm.sideclaw-server.plist` | 60 s | set to exactly the measured cap, not a value implying more headroom than launchd grants |
-| poll ceiling | `Makefile`'s `reload`/`install-agent` targets | 55 min (6600 half-second ticks / 3300 s) | how long `make reload` waits for the old PID to exit before `kickstart`ing — now must exceed `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS` (3003 s), the true worst case on the normal self-exit path, not `ExitTimeOut` (which no longer bounds that path at all) |
+| poll ceiling | `Makefile`'s `reload`/`install-agent` targets | none (unbounded) | how long `make reload` waits for the old PID to exit before `kickstart`ing — matches `HTTP_DRAIN_GRACE_MS` being unbounded; prints a progress line once a minute so a human watching can tell it's alive rather than hung |
 
-Three guards pin this in `bun test` rather than at the next reboot — all in
-`tests/shutdown-window.test.ts` (replacing the old `tests/deployment-plist.test.ts` and
-`tests/makefile-poll-ceiling.test.ts`, which pinned the coupling above that no longer holds):
-`SIGNAL_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS < LAUNCHD_HARD_EXIT_TIMEOUT_MS` with real margin, the
-plist's `ExitTimeOut` equals `LAUNCHD_HARD_EXIT_TIMEOUT_MS` exactly, and the Makefile poll
-ceiling outlasts `HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS`. A fourth,
-`tests/shutdown-dispatch-coupling.test.ts`, now only pins `shutdown.ts`'s own internal relation
-(`HTTP_DRAIN_GRACE_MS` > `IMPLEMENT_SESSION_TIMEOUT_MS`) — the coupling it used to guard against
-`TIERS.implement.timeoutMs` in `dispatch.ts` no longer applies since that field was removed
-2026-09-12 along with every worker session's turn/wall-clock ceiling; `IMPLEMENT_SESSION_TIMEOUT_MS`
-is now a standalone literal in `shutdown.ts`, not one half of a cross-file pair. `tests/shutdown-route.test.ts` covers
-`POST /api/shutdown` itself (triggers the right `force`, responds before the drain settles,
-degrades to 503 if no controller is registered).
+Guards pin this in `bun test` rather than at the next reboot — all in `tests/shutdown-window.test.ts`
+(replacing the old `tests/deployment-plist.test.ts` and `tests/makefile-poll-ceiling.test.ts`,
+which pinned the coupling above that no longer holds): `SIGNAL_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS
+< LAUNCHD_HARD_EXIT_TIMEOUT_MS` with real margin, the plist's `ExitTimeOut` equals
+`LAUNCHD_HARD_EXIT_TIMEOUT_MS` exactly, and the Makefile's drain-wait loops carry no numeric
+`-lt N` ceiling at all. `tests/shutdown-dispatch-coupling.test.ts` now just pins
+`HTTP_DRAIN_GRACE_MS === Infinity` directly — the cross-file relation it used to guard
+(`HTTP_DRAIN_GRACE_MS` > `IMPLEMENT_SESSION_TIMEOUT_MS`) no longer applies since
+`IMPLEMENT_SESSION_TIMEOUT_MS` was deleted in the same pass. `tests/shutdown-route.test.ts`
+covers `POST /api/shutdown` itself (triggers the right `force`, responds before the drain
+settles, degrades to 503 if no controller is registered).
+
 
 ### A plist edit needs `make install-agent`, not `make reload`
 
@@ -244,10 +169,9 @@ the old process can still be mid-drain — holding `:7705` for up to that window
 reported success regardless: none of `bootout`/`cp`/`bootstrap` fail merely because a DIFFERENT
 process couldn't bind a port, and the target's last line was an unconditional `echo`.
 
-`install-agent` now carries the same PID-capture-and-poll `reload` already had (same ceiling —
-6600 half-second ticks, pinned against `reload`'s own loop and, separately, against
-`HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS` by `tests/shutdown-window.test.ts`) between the
-`bootout` and the `cp`/`bootstrap` that follow, and the same job-in-flight guard `reload` has
+`install-agent` now carries the same PID-capture-and-poll `reload` already had (same unbounded
+loop, no `-lt N` ceiling — `tests/shutdown-window.test.ts` pins that neither loop has one)
+between the `bootout` and the `cp`/`bootstrap` that follow, and the same job-in-flight guard `reload` has
 (refuses by default while a job is running; `FORCE=1` sends SIGINT — the catchable forced-abort
 signal, never SIGKILL, for the same reason `reload`'s `FORCE=1` does — before `bootout`, then
 proceeds without waiting). The target now also polls the new instance's `/health` after
@@ -282,7 +206,7 @@ point being that a shutdown-killed job reads identically to a crashed one, every
 `promote()` refuses every `pending → running` transition while a drain is in progress
 (`setDraining()`, called from the SIGTERM/SIGINT handler) — a job promoted into the grace
 window's dying process would just be interrupted and burn its one re-queue for nothing. That
-means submissions genuinely back up during a reload, and with a 50 min window
+means submissions genuinely back up during a reload, and with an unbounded drain window
 `oldestPendingAgeMs` can comfortably exceed the health check's 15 min "wedged queue" threshold
 on a perfectly normal reload. `evaluateJobHealth()` takes `draining` as an input and skips the
 `oldestPendingAgeMs` criterion (only that one — `failedLastHour` still trips `ok: false`

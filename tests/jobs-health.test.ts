@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
   BOOT_HEALTH_GRACE_MS,
   __resetForTests,
+  dispatchRecoveryStatusFor,
   evaluateJobHealth,
   jobFinishLogFields,
   jobHealth,
@@ -26,9 +27,33 @@ describe("recoveryStatusFor", () => {
     }
   });
 
-  test("dispatch is never auto re-run — an implement episode may already have pushed", () => {
+  test("this generic path never auto re-runs dispatch — it has its own decision below", () => {
+    // recover() never actually calls recoveryStatusFor for a dispatch row in production
+    // (dispatchRecoveryStatusFor below is dispatch's real path) — pinned here anyway so this
+    // function stays honest if something ever calls it with "dispatch" directly.
     expect(recoveryStatusFor("dispatch", 1)).toBe("interrupted");
     expect(recoveryStatusFor("excalidraw_diagram", 1)).toBe("interrupted");
+  });
+});
+
+describe("dispatchRecoveryStatusFor", () => {
+  test("resumes when a session id was recorded and its worktree is still on disk", () => {
+    expect(dispatchRecoveryStatusFor(0, true, true)).toBe("resume");
+    expect(dispatchRecoveryStatusFor(1, true, true)).toBe("resume");
+  });
+
+  test("re-runs from scratch when no session id was ever recorded", () => {
+    expect(dispatchRecoveryStatusFor(0, false, true)).toBe("fresh");
+    expect(dispatchRecoveryStatusFor(0, false, false)).toBe("fresh");
+  });
+
+  test("re-runs from scratch when the session id survived but its worktree did not", () => {
+    expect(dispatchRecoveryStatusFor(0, true, false)).toBe("fresh");
+  });
+
+  test("interrupts once the attempt cap is spent, resume-eligible or not", () => {
+    expect(dispatchRecoveryStatusFor(2, true, true)).toBe("interrupted");
+    expect(dispatchRecoveryStatusFor(2, false, true)).toBe("interrupted");
   });
 });
 

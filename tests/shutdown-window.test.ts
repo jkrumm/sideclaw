@@ -13,7 +13,6 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  HTTP_DRAIN_GRACE_MS,
   LAUNCHD_HARD_EXIT_TIMEOUT_MS,
   SHUTDOWN_FLUSH_MS,
   SIGNAL_DRAIN_GRACE_MS,
@@ -44,30 +43,25 @@ describe("com.jkrumm.sideclaw-server.plist ExitTimeOut", () => {
   });
 });
 
-describe("Makefile PID-poll ceiling", () => {
-  /** Every `[ $$i -lt N ]` poll-ceiling literal in the Makefile's drain-wait loops (`reload` and
-   *  `install-agent` both carry one, and share one ceiling by convention rather than a type
-   *  check — nothing type-checks a Makefile literal against another). Returns their tick counts
-   *  in ms — asserted below to agree with each other AND to outlast the longest window a
-   *  self-initiated `make reload` can actually wait on (HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS),
-   *  not launchd's ExitTimeOut — that cap no longer bounds the HTTP path at all. */
-  function readPollCeilingsMs(): number[] {
-    const makefile = readFileSync(join(import.meta.dir, "..", "Makefile"), "utf-8");
-    const matches = [...makefile.matchAll(/\[\s*\$\$i\s+-lt\s+(\d+)\s*\]/g)];
-    if (matches.length === 0) throw new Error("Makefile has no `-lt N` poll-ceiling literal");
-    // Ticks are 0.5s each — see the `sleep 0.5` in the same loops.
-    return matches.map((m) => parseInt(m[1] as string, 10) * 500);
+describe("Makefile PID-poll — unbounded (HTTP_DRAIN_GRACE_MS is now Infinity)", () => {
+  /** `reload` and `install-agent`'s drain-wait loops used to share a numeric `[ $$i -lt N ]`
+   *  ceiling, pinned here against `HTTP_DRAIN_GRACE_MS`. That constant is now `Infinity`
+   *  (owner decision, 2026-09-12 — see shutdown.ts), so a finite ceiling here would silently
+   *  reintroduce the exact bound this file used to guard against having. */
+  function readMakefile(): string {
+    return readFileSync(join(import.meta.dir, "..", "Makefile"), "utf-8");
   }
 
-  test("every poll ceiling in the Makefile agrees with the others", () => {
-    const ceilings = readPollCeilingsMs();
-    expect(new Set(ceilings).size).toBe(1);
+  test("neither loop has a numeric poll ceiling", () => {
+    expect(readMakefile()).not.toMatch(/\[\s*\$\$i\s+-lt\s+\d+\s*\]/);
   });
 
-  test("outlasts HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS, the true worst case the self-initiated exit can take", () => {
-    const httpWindowMs = HTTP_DRAIN_GRACE_MS + SHUTDOWN_FLUSH_MS;
-    for (const ceilingMs of readPollCeilingsMs()) {
-      expect(ceilingMs).toBeGreaterThan(httpWindowMs);
+  test("both loops print a progress line at least once a minute while waiting", () => {
+    const matches = [...readMakefile().matchAll(/\$\$\(\(i % (\d+)\)\) -eq 0/g)];
+    expect(matches.length).toBe(2);
+    for (const m of matches) {
+      // Ticks are 0.5s each — see the `sleep 0.5` in the same loops.
+      expect(parseInt(m[1] as string, 10) * 500).toBeLessThanOrEqual(60_000);
     }
   });
 });

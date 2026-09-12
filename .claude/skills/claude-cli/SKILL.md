@@ -46,7 +46,13 @@ it. This skill is the pattern library behind it; when the two disagree,
 - **No `--resume` for HITL** — session IDs can change on resume, context is
   lost after API limits, and a killed mid-execution resume corrupts the
   session. Use a fresh session with prior context injected into the prompt
-  instead.
+  instead. **Narrow exception**: `dispatch`'s boot-recovery resume
+  (`server/jobs/handlers/dispatch.ts`, `SessionOptions.resumeSessionId` in
+  `session-runner.ts`) uses `--resume` anyway — a deliberate, owner-decided
+  trade for a killed-mid-execution episode restarted in the exact worktree it
+  left on disk, not a HITL workflow. The corruption risk above is real and not
+  eliminated by that narrowing; it is accepted, once per interrupted episode,
+  bounded by `MAX_RECOVER_ATTEMPTS`.
 
 ## Key flags quick reference
 
