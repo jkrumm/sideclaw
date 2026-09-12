@@ -21,6 +21,21 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
   ? join(homedir(), ".local/bin/claude")
   : "claude";
 
+// A worker is killed by an idle watchdog (no stdout chunk for this long — "wedged", not
+// "slow"; stderr does not reset it) plus an absolute ceiling, not one wall-clock timer —
+// mirrors modelpick's bench/spawn.ts. A single timer cannot tell "still working" from
+// "wedged": glm-5.3-flash defaults to max reasoning effort and is genuinely slow on hard
+// work (minutes per turn), and a caller's own `timeoutMs` used to kill it mid-turn on that
+// alone.
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+// The floor applied on top of a caller's `timeoutMs` (`Math.max(timeoutMs, CEILING_FLOOR_MS)`)
+// — deliberately generous so no existing caller's ceiling ends up tighter than its old
+// single wall-clock timeout.
+const CEILING_FLOOR_MS = 60 * 60 * 1000;
+// How often the idle watchdog checks `lastChunkAt` — cheap enough to run every tick of a
+// multi-minute session without mattering to the measurement.
+const IDLE_CHECK_INTERVAL_MS = 5_000;
+
 // Worker sessions run on either the IU unified endpoint's native Anthropic transport
 // (metered per token, off Max — the same recipe dotfiles' `ca`/`claude_iu` use; the
 // endpoint is itself a multi-provider gateway, its error text names it "Requesty Global
@@ -333,6 +348,19 @@ interface ClaudeJsonEnvelope {
    *  (bad model id, cost-ceiling denial, …) rather than a model-produced error — see
    *  `apiErrorStatus`'s doc comment in `runSessionAttempt` for the measured shape. */
   api_error_status?: number | null;
+  /** Token accounting on the result event — see stream-format.md's `result` shape.
+   *  `output_tokens_details.thinking_tokens` is absent on some models/backends rather
+   *  than zero, hence the nested optional. */
+  usage?: ClaudeUsage;
+}
+
+/** Result-event `usage` block — see `.claude/skills/claude-cli/references/stream-format.md`. */
+interface ClaudeUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  output_tokens_details?: { thinking_tokens?: number };
 }
 
 // One NDJSON line from `--output-format stream-json --verbose`. See
@@ -1029,10 +1057,22 @@ export function isRetryableSessionError(message: string): boolean {
   return CONNECTION_ERROR_RE.test(message);
 }
 
-/** Backoff delay (ms) before the retry following a failed attempt N (1-indexed).
- *  1s, then 3s — the same exponential cadence iuFetch uses for transient IU errors. */
+const RETRY_BACKOFF_BASE_MS = 2000;
+const RETRY_BACKOFF_FACTOR = 3;
+const RETRY_BACKOFF_CAP_MS = 30_000;
+
+/** Backoff delay (ms) before the retry following a failed attempt N (1-indexed). Capped
+ *  exponential with full jitter — `random(0, min(cap, base * factor^(attempt-1)))` — rather
+ *  than a fixed 1s/3s cadence: a bounded set of workers retrying a shared transient IU
+ *  outage in lockstep re-hits the gateway at the same instant every time, which is exactly
+ *  what jitter exists to break up. `MAX_SESSION_ATTEMPTS` stays 3, so this only ever runs
+ *  for attempt 1 or 2. */
 export function retryBackoffMs(attempt: number): number {
-  return 1000 * 3 ** (attempt - 1);
+  const ceiling = Math.min(
+    RETRY_BACKOFF_CAP_MS,
+    RETRY_BACKOFF_BASE_MS * RETRY_BACKOFF_FACTOR ** (attempt - 1),
+  );
+  return Math.random() * ceiling;
 }
 
 // ── Runner ─────────────────────────────────────────────────────────────────────
@@ -1189,7 +1229,7 @@ async function runSessionAttempt<T = unknown>(
   }
 
   const emitAttribution = (
-    outcome: "ok" | "error" | "timeout",
+    outcome: "ok" | "error" | "timeout_idle" | "timeout_ceiling",
     extras: Record<string, unknown> = {},
   ): void => {
     writeAttribution({
@@ -1281,13 +1321,21 @@ async function runSessionAttempt<T = unknown>(
       }, HEARTBEAT_INTERVAL_MS)
     : null;
 
-  // Two-stage timeout: SIGTERM → wait 5s → SIGKILL
-  let timedOut = false;
+  // Idle watchdog (killed only once no stdout chunk has arrived for IDLE_TIMEOUT_MS) plus
+  // an absolute ceiling (Math.max(timeoutMs, CEILING_FLOOR_MS)) — see the module header
+  // comment on IDLE_TIMEOUT_MS for why a single wall-clock timer can't tell "still working"
+  // from "wedged". Same two-stage SIGTERM → wait 5s → SIGKILL as before either way.
+  let killReason: "idle" | "ceiling" | null = null;
+  let idleMsAtKill: number | null = null;
+  let lastChunkAt: number | null = null;
+  const spawnedAt = Date.now();
   let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
-  const timeoutHandle = setTimeout(() => {
-    timedOut = true;
+  const kill = (reason: "idle" | "ceiling"): void => {
+    if (killReason) return; // the other watchdog already fired
+    killReason = reason;
+    idleMsAtKill = Date.now() - (lastChunkAt ?? spawnedAt);
     runnerLogger().error(
-      { event: "session.timeout", project: cwd, ...errCtx },
+      { event: "session.timeout", project: cwd, ...errCtx, killReason, idleMsAtKill },
       "session timed out — SIGTERM",
     );
     proc.kill("SIGTERM");
@@ -1295,13 +1343,18 @@ async function runSessionAttempt<T = unknown>(
       sigkillTimer = null;
       if (proc.exitCode === null) {
         runnerLogger().error(
-          { event: "session.timeout", project: cwd, ...errCtx },
+          { event: "session.timeout", project: cwd, ...errCtx, killReason },
           "session still alive — SIGKILL",
         );
         proc.kill("SIGKILL");
       }
     }, 5000);
-  }, timeoutMs);
+  };
+  const idleWatchdog = setInterval(() => {
+    if (Date.now() - (lastChunkAt ?? spawnedAt) >= IDLE_TIMEOUT_MS) kill("idle");
+  }, IDLE_CHECK_INTERVAL_MS);
+  const ceilingMs = Math.max(timeoutMs, CEILING_FLOOR_MS);
+  const ceilingTimer = setTimeout(() => kill("ceiling"), ceilingMs);
 
   // stderr is buffered whole (it's small — diagnostics only); stdout is consumed as
   // a live NDJSON stream so we can track per-event activity and capture the result.
@@ -1402,6 +1455,7 @@ async function runSessionAttempt<T = unknown>(
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      lastChunkAt = Date.now(); // idle watchdog liveness — stderr never resets this
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split("\n");
       buf = lines.pop() ?? ""; // keep the trailing partial line
@@ -1434,7 +1488,8 @@ async function runSessionAttempt<T = unknown>(
   }
 
   const stderr = await stderrPromise;
-  clearTimeout(timeoutHandle);
+  clearInterval(idleWatchdog);
+  clearTimeout(ceilingTimer);
   if (sigkillTimer !== null) clearTimeout(sigkillTimer);
 
   const exitCode = await proc.exited;
@@ -1444,7 +1499,7 @@ async function runSessionAttempt<T = unknown>(
   // A failed worker's stderr is the post-mortem — at debug it was invisible in the
   // default log pass and every "why did check die at 03:00" ended in a shrug.
   if (stderrTrimmed) {
-    const failed = timedOut || exitCode !== 0 || !envelope || envelope.is_error === true;
+    const failed = killReason !== null || exitCode !== 0 || !envelope || envelope.is_error === true;
     const fields = {
       event: "session.stderr",
       project: cwd,
@@ -1456,13 +1511,26 @@ async function runSessionAttempt<T = unknown>(
     else runnerLogger().debug(fields, "session stderr");
   }
 
-  runnerLogger().debug({ exitCode, timedOut, turns, lastAction }, "session stream done");
+  runnerLogger().debug({ exitCode, killReason, turns, lastAction }, "session stream done");
 
   const durationMs = Math.round(performance.now() - startMs);
 
-  if (timedOut) {
-    emitAttribution("timeout", { durationMs, turns });
-    const error = `Session timed out after ${timeoutMs}ms`;
+  if (killReason) {
+    // Outcome distinguishes the two watchdogs — "idle" is a wedged worker that produced
+    // no stdout for IDLE_TIMEOUT_MS, "ceiling" is one that kept the stream alive (still
+    // emitting turns, however slowly) all the way to the absolute cap.
+    emitAttribution(killReason === "idle" ? "timeout_idle" : "timeout_ceiling", {
+      durationMs,
+      turns,
+      killReason,
+      idleMsAtKill,
+    });
+    // Both branches keep the "Session timed out" prefix `timedOutStuck` matches in
+    // `planNextAttempt` — only the detail differs.
+    const error =
+      killReason === "idle"
+        ? `Session timed out — idle ${idleMsAtKill}ms with no stdout (budget ${IDLE_TIMEOUT_MS}ms)`
+        : `Session timed out — hit its ${ceilingMs}ms ceiling`;
     // `classificationText` here is always this fixed string, which QUOTA_ERROR_RE never
     // matches, and a hang produces no `api_retry` event either — a Max quota exhaustion
     // that surfaces as a stall rather than a fast is_error/429 is invisible to both
@@ -1472,7 +1540,7 @@ async function runSessionAttempt<T = unknown>(
     // blind spot visible instead of silent.
     if (backend === "max" && !apiRetrySeen) {
       runnerLogger().warn(
-        { event: "session.timeout_unclassified", project: cwd, ...errCtx, turns },
+        { event: "session.timeout_unclassified", project: cwd, ...errCtx, turns, killReason },
         "max session timed out with no quota-classification signal — possible unseen quota exhaustion",
       );
     }
@@ -1535,6 +1603,19 @@ async function runSessionAttempt<T = unknown>(
     "envelope received",
   );
 
+  // What this attempt actually cost — spread into every attribution record below that has
+  // an `envelope` (success or failure alike; a call that errored after producing output
+  // still spent money). `JSON.stringify` in `writeAttribution` drops `undefined` keys on
+  // its own, so a field the envelope/backend genuinely doesn't expose (e.g. no
+  // `output_tokens_details` on some models) is omitted rather than written as a false zero.
+  const costFields = {
+    costUsd: envelope.total_cost_usd,
+    inputTokens: envelope.usage?.input_tokens,
+    outputTokens: envelope.usage?.output_tokens,
+    cacheReadTokens: envelope.usage?.cache_read_input_tokens,
+    thinkingTokens: envelope.usage?.output_tokens_details?.thinking_tokens,
+  };
+
   if (envelope.is_error) {
     // See `classifyErrorEnvelope`'s doc comment for the full reasoning: `errors` always
     // classifies safely; `result` only classifies in the zero-turn carve-out (the model
@@ -1565,7 +1646,7 @@ async function runSessionAttempt<T = unknown>(
       },
       "session is_error",
     );
-    emitAttribution("error", { durationMs, turns: turnsObserved, apiErrorStatus });
+    emitAttribution("error", { durationMs, turns: turnsObserved, apiErrorStatus, ...costFields });
     return {
       ok: false,
       error: errMsg,
@@ -1604,7 +1685,7 @@ async function runSessionAttempt<T = unknown>(
           { event: "session.invalid_output", project: cwd, ...errCtx, error: v.error },
           "session output failed validation",
         );
-        emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns });
+        emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns, ...costFields });
         // Carry the worker's output through as `rawText`, exactly as the unparseable
         // branches below do. A schema-validation failure means the session DID produce
         // something — it just did not fit the declared shape — so a handler salvaging a
@@ -1618,11 +1699,11 @@ async function runSessionAttempt<T = unknown>(
         return unclassifiedOutputFailure(v.error, asText, apiRetrySeen, backend, model);
       }
       logSessionEnd();
-      emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
+      emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns, ...costFields });
       return { ok: true, data: v.value, backend, model };
     }
     logSessionEnd();
-    emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns });
+    emitAttribution("ok", { durationMs, turns: envelope.num_turns ?? turns, ...costFields });
     return { ok: true, data: value, backend, model };
   };
 
@@ -1642,6 +1723,7 @@ async function runSessionAttempt<T = unknown>(
       durationMs,
       turns: envelope.num_turns ?? turns,
       reason: "json_parse",
+      ...costFields,
     });
     // No `classificationText`: `raw` is the model's own stdout (a check report, a
     // diff, …) — it can legitimately contain "429" or "quota" with no real quota
@@ -1675,7 +1757,12 @@ async function runSessionAttempt<T = unknown>(
     { event: "session.error", project: cwd, ...errCtx },
     "session no usable output",
   );
-  emitAttribution("error", { durationMs, turns: envelope.num_turns ?? turns, reason: "no_output" });
+  emitAttribution("error", {
+    durationMs,
+    turns: envelope.num_turns ?? turns,
+    reason: "no_output",
+    ...costFields,
+  });
   // The error text here is fixed/constructed, never the model's own stdout (that lives
   // separately in `rawText`) — safe to reuse as classification text.
   const noOutputError = "Session produced no output (empty structured_output and result)";

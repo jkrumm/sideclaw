@@ -609,10 +609,10 @@ async function routeExtraAngles(
     maxTurns: 8,
     timeoutMs: 3 * 60 * 1000,
     readOnly: true,
-    // Same CLASSIFY tier as check/overview, so it inherits glm-5.3-flash's measured habit of
-    // stalling after it has already emitted its answer. Safe here for the same reason it is
-    // safe there: the router has no tools and no side effects, so a re-run costs one session.
-    retryAfterOutput: true,
+    // No `retryAfterOutput`: same CLASSIFY tier as check/overview, and glm-5.3-flash
+    // defaulting to max reasoning effort reads as "stalling" when it is only slow. A
+    // timeout after it already emitted its answer used to re-lane mid-job on that alone;
+    // session-runner.ts's idle watchdog is the real stuck-detector now.
     settingSources: "project",
     validate: zodValidator(ROUTER_OUTPUT),
     onActivity: bump ? (p) => bump(`router: ${p.lastAction}`) : undefined,

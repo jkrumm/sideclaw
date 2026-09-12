@@ -388,9 +388,7 @@ export async function runOverview(
     maxTurns: 3,
     // The gateway tier (glm-5.3-flash) is slow and erratic on this prompt — measured
     // 2026-09-07: halves of the facts block took 34–149 s, the whole 10 KB prompt produced
-    // NO event in 480 s, and one run stalled after 2 assistant turns until the cap. Any
-    // timeout moves the job onto the route's fallback (Haiku on Max, session-runner.ts —
-    // `retryAfterOutput`, safe because this worker has no tools and no side effects).
+    // NO event in 480 s, and one run stalled after 2 assistant turns until the cap.
     // Re-measured 2026-09-10 on the 16 KB / 9-agent prompt: glm-iu answered in 139 s once
     // and produced nothing in 82 s the next time; haiku-max 58–60 s clean, but ONE
     // production attempt hit the 120 s cap exactly (job 9c5a7339, both lanes timed out,
@@ -398,7 +396,10 @@ export async function runOverview(
     // success with margin and haiku's variance. Worst case 6 min end to end, not 3.
     timeoutMs: 3 * 60 * 1000,
     readOnly: true,
-    retryAfterOutput: true,
+    // No `retryAfterOutput`: glm defaulting to max reasoning effort is slow, not stuck —
+    // a timeout after it already emitted turns used to re-lane onto Haiku mid-job on
+    // that alone. session-runner.ts's idle watchdog is the real stuck-detector now; a
+    // zero-output timeout is still the only one that moves lanes.
     // Disallow every tool `readOnly` doesn't already remove — the worker must reason over the
     // prompt alone, never read a live file (the same transcripts it was already given, this
     // time ungated by the caps/fence above) or shell out.

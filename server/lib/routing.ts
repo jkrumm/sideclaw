@@ -76,10 +76,40 @@ export const GLM_FLASH = "glm-5.3-flash";
 //
 // CLASSIFY: cheap mechanical work (check, overview, review's triage router) — glm-5.3-flash
 //   over IU with Haiku-on-Max as the reverse lane.
-// JUDGE: judgment-heavy work (review's angles/synthesis, dispatch, otel) — Sonnet over Max
-//   with the reactive quota fallback to IU.
-// PROSE: editorial/generative work (narrative, excalidraw) — Sonnet over IU with the same
-//   model on Max as the reverse lane.
+// AGENT: dispatch ONLY — owner decision 2026-09-11 (formerly a `SIDECLAW_MODEL_DISPATCH`
+//   override in `.env`; moved here so the default and the decision are the same place)
+//   to run dispatch's agentic worker episodes on glm-5.3-flash over IU, same model
+//   CLASSIFY already trusts: ccbench (modelpick, 2026-09-11) scored it 10/10 on the
+//   agentic coding suite at $0.048/suite, ahead of claude-sonnet-5 on DeepSWE (0.634 vs
+//   0.538) and leading the Anthropic-route field on the AA coding index. GLM dispatch
+//   episodes have been measured completing fine. claude-sonnet-5[1m] on Max is the
+//   reactive fallback — this is what moves dispatch off the Max subscription onto
+//   metered IU. Deliberately NOT extended to review or otel — see JUDGE below.
+// JUDGE: judgment-heavy work that stays on Max — review (angles/synthesis/router) and
+//   otel. Both excluded from AGENT, for different reasons, both dated 2026-09-11:
+//     - review: measured the same day with `SIDECLAW_MODEL_REVIEW=glm-5.3-flash`, a
+//       ~1000-line diff's senior-dev angle looped a single grep/sed for 17 minutes at
+//       80,000+ turns and never produced a synthesis — cancelled, route reverted. Multi-
+//       angle review over a large diff is a different workload shape from the 10-task
+//       coding suite AGENT's evidence came from, and it is the one tool where the cheap
+//       tier has actually been measured failing. A non-Claude model here would also drop
+//       the Max fallback entirely (Max only serves Claude ids), leaving a failing review
+//       with nowhere to go.
+//     - otel: sideclaw's one synchronous exception — it runs inline and returns to the
+//       caller instead of going through the job queue, so a worker that loops there
+//       blocks a human's interactive session, not a background ledger item. Never
+//       measured on a cheap model; the owner's rule is that attended/interactive work
+//       stays on Max (a flat subscription, free at the margin). No reason to gamble it.
+//   Do not "fix" this inconsistency with AGENT without new measured evidence.
+// PROSE: editorial/generative work (narrative, excalidraw) — re-tiered 2026-09-11 the
+//   other way: same model (claude-sonnet-5[1m]), but anchored on Max (a flat fee) instead
+//   of paying IU per-token for it — the one metered-premium lane worth eliminating, since
+//   Sonnet isn't the ccbench-winning model AGENT moved to. IU is the reverse fallback.
+//   gpt-5.6-luna was considered and rejected: the IU Anthropic route (`/anthropic/v1/
+//   messages`) that runSession requires 404s on it (checked 2026-09-11) — runSession
+//   spawns Claude Code, which speaks only the Anthropic protocol, so a model absent from
+//   that route can never be reached through it regardless of what the gateway serves
+//   elsewhere.
 // VISION: the IU OpenAI vision transport (read_image, read_drawing) — no runSession, no
 //   fallback.
 // adversary sits alone: its own model (gpt-5.6-terra), same iu-openai transport as VISION.
@@ -87,6 +117,12 @@ const CLASSIFY: ToolRoute = {
   model: GLM_FLASH,
   backend: "iu",
   fallback: { backend: "max", model: HAIKU },
+  transport: "session",
+};
+const AGENT: ToolRoute = {
+  model: GLM_FLASH,
+  backend: "iu",
+  fallback: { backend: "max", model: SONNET },
   transport: "session",
 };
 const JUDGE: ToolRoute = {
@@ -97,8 +133,8 @@ const JUDGE: ToolRoute = {
 };
 const PROSE: ToolRoute = {
   model: SONNET,
-  backend: "iu",
-  fallback: { backend: "max" },
+  backend: "max",
+  fallback: { backend: "iu" },
   transport: "session",
 };
 const VISION: ToolRoute = {
@@ -115,7 +151,7 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   narrative: PROSE,
   review: JUDGE,
   adversary: { model: "gpt-5.6-terra", backend: "iu", fallback: null, transport: "iu-openai" },
-  dispatch: JUDGE,
+  dispatch: AGENT,
   otel: JUDGE,
   excalidraw: PROSE,
   read_image: VISION,

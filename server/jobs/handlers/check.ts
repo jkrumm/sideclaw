@@ -134,9 +134,11 @@ export async function runCheck(
       maxTurns: cmdCount > 0 ? cmdCount + 6 : 30,
       timeoutMs: 10 * 60 * 1000,
       readOnly: true,
-      // Report-only worker (Write/Edit disallowed): a gateway stall after first output is
-      // still a stall, so any timeout may move onto the Haiku lane.
-      retryAfterOutput: true,
+      // No `retryAfterOutput`: glm-5.3-flash defaults to max reasoning effort and is
+      // genuinely slow on hard validation runs, not stuck — a timeout after it has
+      // already produced turns used to re-lane onto Haiku mid-job instead of just
+      // letting it finish. The idle watchdog in session-runner.ts is the real
+      // stuck-detector now; only a zero-output timeout still moves lanes.
       validate: zodValidator(CHECK_OUTPUT),
       onActivity: onProgress,
     });

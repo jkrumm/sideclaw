@@ -45,9 +45,19 @@ describe("isRetryableSessionError", () => {
 });
 
 describe("retryBackoffMs", () => {
-  test("backs off exponentially across the two retry gaps", () => {
-    expect(retryBackoffMs(1)).toBe(1000);
-    expect(retryBackoffMs(2)).toBe(3000);
+  test("full jitter — each delay is in [0, min(cap, base * factor^(attempt-1))]", () => {
+    for (let i = 0; i < 50; i++) {
+      const attempt1 = retryBackoffMs(1);
+      expect(attempt1).toBeGreaterThanOrEqual(0);
+      expect(attempt1).toBeLessThanOrEqual(2000);
+      const attempt2 = retryBackoffMs(2);
+      expect(attempt2).toBeGreaterThanOrEqual(0);
+      expect(attempt2).toBeLessThanOrEqual(6000);
+    }
+  });
+
+  test("caps at 30s regardless of how far the exponent would otherwise grow", () => {
+    expect(retryBackoffMs(10)).toBeLessThanOrEqual(30_000);
   });
 
   test("a client error the IU gateway re-wrapped as its own 503 is not retried", () => {

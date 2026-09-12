@@ -47,19 +47,28 @@ describe("buildRoutingTable defaults", () => {
     }
   });
 
-  test("narrative, excalidraw: Sonnet on iu, same model on max (the PROSE tier)", () => {
+  test("narrative, excalidraw: Sonnet on max, same model on iu as the reverse lane (the PROSE tier)", () => {
     for (const tool of ["narrative", "excalidraw"] as const) {
       expect(routes[tool]).toEqual({
         model: SONNET,
-        backend: "iu",
-        fallback: { backend: "max" },
+        backend: "max",
+        fallback: { backend: "iu" },
         transport: "session",
       });
     }
   });
 
-  test("review (angles/synthesis), dispatch, otel: Sonnet on max with the quota fallback to iu (the JUDGE tier)", () => {
-    for (const tool of ["review", "dispatch", "otel"] as const) {
+  test("dispatch: glm-5.3-flash on iu with the Sonnet-on-max quota fallback (the AGENT tier)", () => {
+    expect(routes.dispatch).toEqual({
+      model: GLM_FLASH,
+      backend: "iu",
+      fallback: { backend: "max", model: SONNET },
+      transport: "session",
+    });
+  });
+
+  test("review (angles/synthesis/router), otel: Sonnet on max with the quota fallback to iu (the JUDGE tier — deliberately NOT on glm, see routing.ts)", () => {
+    for (const tool of ["review", "otel"] as const) {
       expect(routes[tool]).toEqual({
         model: SONNET,
         backend: "max",
@@ -149,22 +158,22 @@ describe("buildRoutingTable env overrides", () => {
   });
 
   test("a gateway model override on a max route forces iu and keeps a fixed-model fallback only", () => {
-    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_DISPATCH: "glm-5.3-flash" });
-    expect(routes.dispatch.backend).toBe("iu");
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_REVIEW: "glm-5.3-flash" });
+    expect(routes.review.backend).toBe("iu");
     // The backend flip is the override's most consequential side effect (metered IU instead
     // of Max), so /api/routing lists it next to the model override that caused it.
     expect(overrides).toEqual([
-      { tool: "dispatch", field: "model", value: "glm-5.3-flash" },
+      { tool: "review", field: "model", value: "glm-5.3-flash" },
       {
-        tool: "dispatch",
+        tool: "review",
         field: "backend",
         value: "iu",
         implied: expect.stringContaining("forced by the glm-5.3-flash model override"),
       },
     ]);
-    // dispatch's declared fallback is same-model onto iu; with iu now primary and no fixed
-    // Claude fallback model there is nowhere Max-servable to go.
-    expect(routes.dispatch.fallback).toBeNull();
+    // review's declared fallback is same-model onto iu; with iu now primary there is
+    // nowhere Max-servable to go.
+    expect(routes.review.fallback).toBeNull();
     const narrative = buildRoutingTable({ SIDECLAW_MODEL_NARRATIVE: "glm-5.3-flash" }).routes
       .narrative;
     expect(narrative.fallback).toBeNull();
@@ -185,7 +194,7 @@ describe("withModel", () => {
   });
 
   test("a Claude override on a max route keeps max and the iu fallback", () => {
-    const r = withModel(routeFor("dispatch"), "claude-opus-5[1m]");
+    const r = withModel(routeFor("review"), "claude-opus-5[1m]");
     expect(r).toEqual({
       model: "claude-opus-5[1m]",
       backend: "max",
@@ -205,7 +214,7 @@ describe("withModel", () => {
   });
 
   test("a gateway override on a max route is forced onto iu with no Max-servable fallback", () => {
-    const r = withModel(routeFor("dispatch"), "DeepSeek-V4-Flash");
+    const r = withModel(routeFor("review"), "DeepSeek-V4-Flash");
     expect(r.backend).toBe("iu");
     expect(r.fallback).toBeNull();
   });
