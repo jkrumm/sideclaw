@@ -719,15 +719,15 @@ async function runAdversaryAngle(opts: {
       .replace("[CONTEXT_BLOCK]", opts.contextBlock || "");
 
     opts.bump?.("adversary: requesting");
+    // No explicit timeoutMs: textComplete streams and applies its own idle-watchdog default
+    // (IDLE_TIMEOUT_MS, 5 min of silence) — thinking on a near-200K-char diff being far slower
+    // than the ~50s a typical diff takes is not a problem once the call is judged on whether
+    // it is still producing tokens, not on total elapsed time.
     const result = await textComplete({
       prompt,
       model: ADVERSARY_MODEL,
       tool: "review:adversary",
       reasoningEffort: ADVERSARY_EFFORT,
-      // Generous: thinking on a near-200K-char diff is far slower than the ~50s
-      // a typical diff takes, and this is a single fail-soft call with no
-      // wall-time cost while the angle sessions run.
-      timeoutMs: 300_000,
     });
     opts.bump?.("adversary: parsing");
 

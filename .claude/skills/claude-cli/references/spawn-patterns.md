@@ -4,6 +4,15 @@ Battle-tested patterns extracted from ruflo/claude-flow and adapted for Bun.
 
 ## Bun.spawn — Complete Wrapper
 
+Agent workers have no turn limit and no wall-clock ceiling — the idle watchdog is the only
+kill rule (settled 2026-09-12, `~/.claude/rules/agent-limits.md`). A worker doing large work
+can legitimately run for a long time as long as it keeps producing stdout; a fixed `--max-turns`
+or a wall-clock `timeoutMs` kills it mid-turn on that alone, indistinguishable from a session
+that is actually wedged. The only liveness signal that means anything is "has stdout gone
+quiet" — see `isIdleTimedOut` / `IDLE_TIMEOUT_MS` in `server/mcp/session-runner.ts` for the
+reference implementation this wrapper mirrors. `maxBudgetUsd` is not a liveness control — it's
+a spend cap, and may stay as a real limit.
+
 ```typescript
 import { existsSync } from "fs";
 import { join } from "path";
@@ -12,6 +21,12 @@ const HOME = process.env.HOME ?? "";
 const CLAUDE_BIN = existsSync(join(HOME, ".local/bin/claude"))
   ? join(HOME, ".local/bin/claude")
   : "claude";
+
+// No stdout chunk for this long means "wedged", not "slow" — mirrors IDLE_TIMEOUT_MS in
+// server/mcp/session-runner.ts. Reuse that export directly if calling from within sideclaw
+// rather than redeclaring the number.
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const IDLE_CHECK_INTERVAL_MS = 5_000;
 
 interface SpawnResult {
   success: boolean;
@@ -28,9 +43,8 @@ async function spawnClaude(opts: {
   model?: "haiku" | "sonnet" | "opus";
   outputFormat?: "text" | "json" | "stream-json";
   jsonSchema?: object;
-  maxTurns?: number;
+  // Spend cap, not a liveness control — safe to keep as a real limit.
   maxBudgetUsd?: number;
-  timeoutMs?: number;
   appendSystemPrompt?: string;
   settingSources?: string;
 }): Promise<SpawnResult> {
@@ -39,7 +53,6 @@ async function spawnClaude(opts: {
   if (opts.model) args.push("--model", opts.model);
   if (opts.outputFormat) args.push("--output-format", opts.outputFormat);
   if (opts.jsonSchema) args.push("--json-schema", JSON.stringify(opts.jsonSchema));
-  if (opts.maxTurns) args.push("--max-turns", String(opts.maxTurns));
   if (opts.maxBudgetUsd) args.push("--max-budget-usd", String(opts.maxBudgetUsd));
   if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
   if (opts.settingSources) args.push("--setting-sources", opts.settingSources);
@@ -57,24 +70,42 @@ async function spawnClaude(opts: {
     env,
   });
 
-  // Timeout with two-stage kill
-  const timeoutMs = opts.timeoutMs ?? 120_000;
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    timedOut = true;
+  // Idle watchdog — killed only once no stdout chunk has arrived for IDLE_TIMEOUT_MS. No
+  // absolute ceiling: a session that keeps producing output can run past any fixed
+  // wall-clock duration without ever being killed. Two-stage SIGTERM → wait 5s → SIGKILL.
+  let idledOut = false;
+  let lastChunkAt = Date.now();
+  const idleWatchdog = setInterval(() => {
+    if (Date.now() - lastChunkAt < IDLE_TIMEOUT_MS) return;
+    idledOut = true;
     proc.kill("SIGTERM");
     setTimeout(() => {
       try { proc.kill("SIGKILL"); } catch { /* already dead */ }
     }, 5000);
-  }, timeoutMs);
+  }, IDLE_CHECK_INTERVAL_MS);
 
-  const stdout = await new Response(proc.stdout).text();
+  // Consume stdout as chunks (not a whole-body await) so lastChunkAt tracks real activity.
+  const stdoutChunks: Uint8Array[] = [];
+  const reader = proc.stdout.getReader();
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    lastChunkAt = Date.now();
+    stdoutChunks.push(value);
+  }
+  const stdout = new TextDecoder().decode(Buffer.concat(stdoutChunks));
+
   const stderr = await new Response(proc.stderr).text();
   const exitCode = await proc.exited;
-  clearTimeout(timeout);
+  clearInterval(idleWatchdog);
 
-  if (timedOut) {
-    return { success: false, output: stdout, error: `Timed out after ${timeoutMs}ms`, exitCode };
+  if (idledOut) {
+    return {
+      success: false,
+      output: stdout,
+      error: `Idle-timed-out after ${IDLE_TIMEOUT_MS}ms with no stdout`,
+      exitCode,
+    };
   }
 
   // Parse result based on format
@@ -210,7 +241,6 @@ server.tool(
       model: "haiku",
       outputFormat: "json",
       jsonSchema: { /* check output schema */ },
-      maxTurns: 30,
       settingSources: "user,project",
     });
 

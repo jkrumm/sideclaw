@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { appendFile, mkdir } from "node:fs/promises";
 import { z } from "zod";
 import { logger } from "../mcp/logger.ts";
+import { IDLE_TIMEOUT_MS } from "./idle-timeout.ts";
 
 // ── IU OpenAI transport ───────────────────────────────────────────────────────
 //
@@ -99,32 +100,62 @@ export async function getIuConfig(): Promise<IuConfig> {
 }
 
 interface FetchOpts {
-  timeoutMs?: number;
+  /** Idle-watchdog budget: aborted only once this long passes with no SSE token received
+   * (reset on every chunk) — not a wall-clock ceiling on the whole call. A reasoning model on
+   * a hard prompt can legitimately run past any fixed total-time budget as long as it keeps
+   * producing output; only silence for this long means "wedged". Defaults to the same
+   * IDLE_TIMEOUT_MS the session runner's subprocess watchdog uses. */
+  idleTimeoutMs?: number;
   attempts?: number;
 }
 
-/** POST JSON to the IU OpenAI transport with bounded retry. 503/429/5xx and
- * network errors back off (0.5s, 1.5s) and retry; 410 (dead model) fails fast. */
+interface IuStreamResult {
+  text: string;
+  usage?: IuUsage;
+  id?: string;
+  model?: string;
+}
+
+/** POST JSON to the IU OpenAI transport as an SSE stream (`stream: true`,
+ * `stream_options.include_usage: true` — confirmed live against the IU gateway: it forwards
+ * standard OpenAI chat-completion-chunk events and a final usage-only chunk before `[DONE]`)
+ * and accumulate the full text + usage. Idle-watchdog only, no wall-clock ceiling — see
+ * FetchOpts.idleTimeoutMs. 503/429/5xx and network errors on the initial request back off
+ * (0.5s, 1.5s) and retry; 410 (dead model) fails fast. */
 async function iuFetch(
   path: string,
   body: Record<string, unknown>,
   opts: FetchOpts = {},
-): Promise<unknown> {
+): Promise<IuStreamResult> {
   const { key, openaiBase } = await getIuConfig();
   const attempts = opts.attempts ?? 3;
-  const timeoutMs = opts.timeoutMs ?? 90_000;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? IDLE_TIMEOUT_MS;
+  const streamBody = { ...body, stream: true, stream_options: { include_usage: true } };
   let lastErr: Error | undefined;
 
   for (let i = 0; i < attempts; i++) {
+    const controller = new AbortController();
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let idledOut = false;
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        idledOut = true;
+        controller.abort();
+      }, idleTimeoutMs);
+    };
+
     let res: Response;
     try {
+      armIdle();
       res = await fetch(`${openaiBase}${path}`, {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(timeoutMs),
+        body: JSON.stringify(streamBody),
+        signal: controller.signal,
       });
     } catch (err) {
+      clearTimeout(idleTimer);
       lastErr = err instanceof Error ? err : new Error(String(err));
       if (i < attempts - 1) {
         await Bun.sleep(500 * 3 ** i);
@@ -133,23 +164,85 @@ async function iuFetch(
       throw lastErr ?? new Error("IU request failed after retries");
     }
 
-    if (res.ok) return res.json();
+    if (!res.ok) {
+      clearTimeout(idleTimer);
+      const text = await res.text().catch(() => "");
+      if (res.status === 410) {
+        throw new Error(
+          `Model deprecated (410). Use a current model (image gen: gpt-image-{1,1-mini,1.5,2}). Detail: ${text.slice(0, 200)}`,
+        );
+      }
+      if (RETRYABLE_STATUS.has(res.status) && i < attempts - 1) {
+        lastErr = new Error(`IU ${res.status}: ${text.slice(0, 200)}`);
+        await Bun.sleep(500 * 3 ** i);
+        continue;
+      }
+      throw new Error(`IU request failed (${res.status}): ${text.slice(0, 300)}`);
+    }
 
-    const text = await res.text().catch(() => "");
-    if (res.status === 410) {
-      throw new Error(
-        `Model deprecated (410). Use a current model (image gen: gpt-image-{1,1-mini,1.5,2}). Detail: ${text.slice(0, 200)}`,
-      );
+    try {
+      const result = await readSseStream(res, armIdle);
+      clearTimeout(idleTimer);
+      return result;
+    } catch (err) {
+      clearTimeout(idleTimer);
+      if (idledOut) {
+        throw new Error(`IU stream idle-timed-out after ${idleTimeoutMs}ms with no token`, {
+          cause: err,
+        });
+      }
+      lastErr = err instanceof Error ? err : new Error(String(err));
+      if (i < attempts - 1) {
+        await Bun.sleep(500 * 3 ** i);
+        continue;
+      }
+      throw lastErr ?? new Error("IU request failed after retries");
     }
-    if (RETRYABLE_STATUS.has(res.status) && i < attempts - 1) {
-      lastErr = new Error(`IU ${res.status}: ${text.slice(0, 200)}`);
-      await Bun.sleep(500 * 3 ** i);
-      continue;
-    }
-    throw new Error(`IU request failed (${res.status}): ${text.slice(0, 300)}`);
   }
 
   throw lastErr ?? new Error("IU request failed after retries");
+}
+
+/** Decode one OpenAI-style SSE response body into accumulated text + usage. Calls
+ * `onChunk()` after every decoded chunk so the caller's idle watchdog resets on each token,
+ * not just on the initial connect. */
+async function readSseStream(res: Response, onChunk: () => void): Promise<IuStreamResult> {
+  if (!res.body) throw new Error("IU stream response had no body");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  let text = "";
+  let usage: IuUsage | undefined;
+  let id: string | undefined;
+  let model: string | undefined;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    onChunk();
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const payload = trimmed.slice("data:".length).trim();
+      if (!payload || payload === "[DONE]") continue;
+      const chunk = JSON.parse(payload) as {
+        id?: string;
+        model?: string;
+        choices?: { delta?: { content?: string } }[];
+        usage?: unknown;
+      };
+      if (chunk.id) id = chunk.id;
+      if (chunk.model) model = chunk.model;
+      const delta = chunk.choices?.[0]?.delta?.content;
+      if (delta) text += delta;
+      if (chunk.usage) usage = normalizeUsage(chunk.usage);
+    }
+  }
+
+  return { text, usage, id, model };
 }
 
 /** Coerce a reported token count to a usable number; vendors occasionally omit
@@ -251,7 +344,9 @@ export interface VisionResult {
 }
 
 /** Single vision call: image (base64) + prompt → text. `model` comes from the caller's
- * route (server/lib/routing.ts) — no default here, so an env override cannot be bypassed. */
+ * route (server/lib/routing.ts) — no default here, so an env override cannot be bypassed.
+ * Streamed under the hood; `timeoutMs` is an idle-watchdog budget (no token for this long),
+ * not a ceiling on the whole call — see FetchOpts.idleTimeoutMs. */
 export async function visionRead(opts: {
   imageBase64: string;
   mimeType?: string;
@@ -264,7 +359,7 @@ export async function visionRead(opts: {
   const mimeType = opts.mimeType ?? "image/png";
   const t0 = performance.now();
 
-  const data = (await iuFetch(
+  const data = await iuFetch(
     "/chat/completions",
     {
       model,
@@ -282,26 +377,20 @@ export async function visionRead(opts: {
         },
       ],
     },
-    { timeoutMs: opts.timeoutMs ?? 90_000 },
-  )) as {
-    id?: string;
-    choices?: { message?: { content?: string } }[];
-    usage?: unknown;
-  };
+    { idleTimeoutMs: opts.timeoutMs },
+  );
 
-  const text = data.choices?.[0]?.message?.content ?? "";
-  if (!text) throw new Error("Vision call returned no content.");
-  const usage = normalizeUsage(data.usage);
+  if (!data.text) throw new Error("Vision call returned no content.");
   const latencyMs = Math.round(performance.now() - t0);
 
   await recordIuUsage({
     tool: opts.tool ?? "read_image",
     model,
-    usage,
+    usage: data.usage,
     requestId: data.id,
     latencyMs,
   });
-  return { text, model, latencyMs, usage };
+  return { text: data.text, model, latencyMs, usage: data.usage };
 }
 
 export interface TextCompleteResult {
@@ -327,7 +416,11 @@ export interface TextCompleteResult {
  * an unknown value, and non-reasoning models reject the parameter itself.
  * Omitting it on a gpt-5.x model is NOT a neutral default — it behaves as
  * "none", i.e. the reasoning model answers with no thinking at all while still
- * billing at its reasoning-tier rate. Set it explicitly to get what you pay for. */
+ * billing at its reasoning-tier rate. Set it explicitly to get what you pay for.
+ *
+ * Streamed under the hood; `timeoutMs` is an idle-watchdog budget (no token for this long,
+ * default IDLE_TIMEOUT_MS = 5 min), not a ceiling on the whole call — a slow-but-progressing
+ * reasoning completion is never killed for taking a long time, only for going silent. */
 export async function textComplete(opts: {
   prompt: string;
   model: string;
@@ -348,21 +441,17 @@ export async function textComplete(opts: {
   if (opts.reasoningEffort !== undefined) body.reasoning_effort = opts.reasoningEffort;
   if (opts.maxTokens) body.max_tokens = opts.maxTokens;
 
-  const data = (await iuFetch("/chat/completions", body, {
-    timeoutMs: opts.timeoutMs ?? 90_000,
-  })) as { id?: string; choices?: { message?: { content?: string } }[]; usage?: unknown };
+  const data = await iuFetch("/chat/completions", body, { idleTimeoutMs: opts.timeoutMs });
 
-  const text = data.choices?.[0]?.message?.content ?? "";
-  if (!text) throw new Error("Text completion returned no content.");
-  const usage = normalizeUsage(data.usage);
+  if (!data.text) throw new Error("Text completion returned no content.");
   const latencyMs = Math.round(performance.now() - t0);
 
   await recordIuUsage({
     tool: opts.tool ?? "text_complete",
     model,
-    usage,
+    usage: data.usage,
     requestId: data.id,
     latencyMs,
   });
-  return { text, model, latencyMs, usage };
+  return { text: data.text, model, latencyMs, usage: data.usage };
 }

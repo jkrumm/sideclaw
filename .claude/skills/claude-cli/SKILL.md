@@ -43,6 +43,14 @@ it. This skill is the pattern library behind it; when the two disagree,
 - **Never set `ANTHROPIC_API_KEY`** — switches Max subscription billing to
   API billing silently. IU routing instead injects
   `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` (`server/lib/routing.ts`).
+- **No `--max-turns`, no wall-clock kill — an idle watchdog on stdout is the
+  only kill rule** (settled 2026-09-12, `~/.claude/rules/agent-limits.md`).
+  A worker doing large work can legitimately run for a long time as long as
+  it keeps producing stdout; a turn cap or a fixed timeout kills it mid-turn
+  on that alone, indistinguishable from a session that is actually wedged.
+  `isIdleTimedOut()` / `IDLE_TIMEOUT_MS` in `server/mcp/session-runner.ts` is
+  the reference implementation — no stdout chunk for `IDLE_TIMEOUT_MS` (5 min)
+  means "wedged", checked on an interval, never a ceiling on total runtime.
 - **No `--resume` for HITL** — session IDs can change on resume, context is
   lost after API limits, and a killed mid-execution resume corrupts the
   session. Use a fresh session with prior context injected into the prompt
@@ -66,7 +74,6 @@ See `references/cli-flags.md` for the complete list.
 | `--dangerously-skip-permissions` | All tools auto-approved — the MCP server is the trust boundary |
 | `--disallowedTools "Write,Edit"` | Block specific tools — the only lever that works under skip-permissions |
 | `--model haiku\|sonnet\|opus` | Model selection |
-| `--max-turns N` | Limit agent loop iterations |
 | `--setting-sources user,project` | Load `~/.claude/settings.json` + target repo's CLAUDE.md/rules |
 | `--settings '{"disableAllHooks":true}'` | Block the target repo's own hooks from executing |
 | `--effort low\|medium\|high\|max` | Thinking depth |

@@ -7,6 +7,7 @@ import { logger as mcpLogger } from "./logger.ts";
 import { appLogger } from "../logger.ts";
 import { processKind } from "../lib/process-context.ts";
 import { getIuConfig } from "../lib/iu-openai.ts";
+import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
 import {
   isClaudeModel,
   withModel,
@@ -27,8 +28,10 @@ const CLAUDE_BIN = existsSync(join(homedir(), ".local/bin/claude"))
 // glm-5.3-flash defaults to max reasoning effort and is genuinely slow on hard work (minutes
 // per turn), and a caller's own timeout used to kill it mid-turn on that alone. Workers are
 // agents doing large work — the only liveness rule that matters is whether they are still
-// producing output.
-export const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+// producing output. Defined in ../lib/idle-timeout.ts and re-exported here (the historical
+// home of this constant) so server/lib/iu-openai.ts's own idle-guarded streaming calls reuse
+// the same number without a circular import back into this module.
+export { IDLE_TIMEOUT_MS };
 // How often the idle watchdog checks `lastChunkAt` — cheap enough to run every tick of a
 // multi-minute session without mattering to the measurement.
 const IDLE_CHECK_INTERVAL_MS = 5_000;
