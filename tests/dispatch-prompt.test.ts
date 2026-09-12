@@ -27,6 +27,7 @@ import {
   type DispatchTier,
 } from "../server/jobs/handlers/dispatch.ts";
 import { privateVerdictsRoot } from "../server/jobs/handlers/dispatch-git.ts";
+import { classifyExitFailure } from "../server/mcp/session-runner.ts";
 import { makeFixture } from "./git-fixture.ts";
 
 const NONCE = "0123456789ab";
@@ -214,6 +215,15 @@ describe("isSalvageable", () => {
       expect(isSalvageable(c.r)).toBe(false);
     });
   }
+
+  // Regression for job e7fd9175-…: `classifyExitFailure` (session-runner.ts) is what
+  // now actually produces the shape below for a max-turns exit — this proves the two
+  // functions agree, not just that isSalvageable's own regex/noOutput checks work in
+  // isolation.
+  test("retries: the exact shape classifyExitFailure now produces for a max-turns exit", () => {
+    const r = classifyExitFailure(1, { subtype: "error_max_turns" }, "irrelevant stderr", "");
+    expect(isSalvageable({ ok: false, error: r.error, noOutput: r.noOutput })).toBe(true);
+  });
 });
 
 // ── Artifact coherence and provenance ─────────────────────────────────────────

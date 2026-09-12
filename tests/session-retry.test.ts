@@ -9,6 +9,7 @@ import {
   resolveBackend,
   gatewayContextTokens,
   classifyErrorEnvelope,
+  classifyExitFailure,
   unclassifiedOutputFailure,
   backendFallbacksLastHour,
   recordFallback,
@@ -560,6 +561,66 @@ describe("classifyErrorEnvelope", () => {
       errMsg: "Unknown error",
       classificationText: undefined,
     });
+  });
+});
+
+// ── classifyExitFailure — the exitCode !== 0 branch of runSessionAttempt ────────────
+//
+// Regression coverage for job e7fd9175-…: an investigate-tier session hit its 25-turn
+// ceiling, the CLI exited 1 with a `result` envelope carrying `subtype: "error_max_turns"`,
+// and the runner used to report only "Session exited with code 1. stderr: …", burying the
+// real cause under the CLI's own benign `unrecognized_model` stderr noise and never
+// signaling `noOutput` so `isSalvageable` could retry it.
+
+describe("classifyExitFailure", () => {
+  test("an envelope with error_max_turns wins over stderr and sets noOutput", () => {
+    const r = classifyExitFailure(
+      1,
+      { subtype: "error_max_turns" },
+      '[claude-code:unrecognized_model] {"model":"glm-5.3-flash","query_source":"generate_session_title"}',
+      "",
+    );
+    expect(r.error).toContain("error_max_turns");
+    expect(r.error).not.toContain("unrecognized_model");
+    expect(r.noOutput).toBe(true);
+  });
+
+  test("an envelope with error_max_structured_output_retries also sets noOutput", () => {
+    const r = classifyExitFailure(1, { subtype: "error_max_structured_output_retries" }, "", "");
+    expect(r.error).toContain("error_max_structured_output_retries");
+    expect(r.noOutput).toBe(true);
+  });
+
+  test("a benign-only stderr line is stripped, leaving no noise in the error", () => {
+    const r = classifyExitFailure(
+      1,
+      undefined,
+      '[claude-code:unrecognized_model] {"model":"glm-5.3-flash","query_source":"generate_session_title"}',
+      "",
+    );
+    expect(r.error).toBe("Session exited with code 1");
+    expect(r.noOutput).toBe(false);
+  });
+
+  test("no envelope but real stderr: the real text survives stripping", () => {
+    const r = classifyExitFailure(1, undefined, "fetch failed: ECONNRESET", "");
+    expect(r.error).toBe("Session exited with code 1. stderr: fetch failed: ECONNRESET");
+  });
+
+  test("no envelope, no stderr, but the worker left assistant text: noOutput signals salvageable", () => {
+    const r = classifyExitFailure(1, undefined, "", "here is what I found before exiting");
+    expect(r.error).toBe("Session exited with code 1");
+    expect(r.noOutput).toBe(true);
+  });
+
+  test("no envelope, no stderr, no assistant text at all: not salvageable", () => {
+    const r = classifyExitFailure(1, undefined, "", "");
+    expect(r.noOutput).toBe(false);
+  });
+
+  test("an envelope's own errors[]/result text is appended as detail", () => {
+    const r = classifyExitFailure(1, { errors: ["boom"] }, "", "");
+    expect(r.error).toBe("Session exited with code 1 (unknown): boom");
   });
 });
 

@@ -945,6 +945,56 @@ function appendApiErrorStatus(text: string, status: number | undefined): string 
   return status !== undefined ? `${text} api_error_status=${status}` : text;
 }
 
+/** CLI stderr lines that are cosmetic noise, never the cause of a failure, and must
+ *  never leak into a constructed error string. `[claude-code:unrecognized_model]` is
+ *  the CLI's own `generate_session_title` helper warning about a non-Claude model
+ *  name — measured 2026-09-12 across 88 log lines including exit-0 jobs, i.e. it
+ *  prints on every session against a gateway model regardless of outcome. Stripped
+ *  only from text that becomes `error`/`classificationText`; the raw `session.stderr`
+ *  debug/warn log line below keeps the full, unstripped text for post-mortems. */
+const BENIGN_STDERR_PATTERNS: RegExp[] = [
+  /\[claude-code:unrecognized_model\].*"query_source":"generate_session_title"/,
+];
+
+function stripBenignStderr(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !BENIGN_STDERR_PATTERNS.some((re) => re.test(line)))
+    .join("\n")
+    .trim();
+}
+
+/** Build the failure result for `runSessionAttempt`'s `exitCode !== 0` branch. Pure —
+ *  extracted for direct unit coverage, same as `classifyErrorEnvelope`. Prefers the
+ *  result envelope's own `subtype` over stderr when one arrived (e.g. `error_max_turns`
+ *  when a worker hits its turn ceiling and the CLI exits 1) — the exit code alone never
+ *  said why, and raw stderr can carry nothing but `BENIGN_STDERR_PATTERNS` noise. `noOutput`
+ *  signals the episode ran and may have left real work behind: either the CLI's own
+ *  turn/retry ceiling fired (`error_max_turns`, `error_max_structured_output_retries`),
+ *  or no envelope arrived at all but the worker's last assistant turn left recoverable
+ *  text — see `SessionResult.noOutput`'s doc comment for what a handler does with it. */
+export function classifyExitFailure(
+  exitCode: number,
+  envelope: { subtype?: string; errors?: string[] } | undefined,
+  stderrTrimmed: string,
+  lastAssistantText: string,
+): { error: string; noOutput: boolean } {
+  if (envelope) {
+    // `errors[]` is CLI-sourced; `result` is the model's own final text and stays out of
+    // `error` — that string feeds the reactive fallback classifier and a needs_human card,
+    // and an episode's brief is attacker-influenceable.
+    const detail = envelope.errors?.join("; ") || undefined;
+    const error = `Session exited with code ${exitCode} (${envelope.subtype ?? "unknown"})${detail ? `: ${detail}` : ""}`;
+    const noOutput =
+      envelope.subtype === "error_max_turns" ||
+      envelope.subtype === "error_max_structured_output_retries";
+    return { error, noOutput };
+  }
+  const cleanStderr = stripBenignStderr(stderrTrimmed);
+  const error = `Session exited with code ${exitCode}${cleanStderr ? `. stderr: ${cleanStderr}` : ""}`;
+  return { error, noOutput: lastAssistantText.trim().length > 0 };
+}
+
 /** Classify an `is_error` result envelope for the reactive quota fallback. Pure —
  *  extracted so the zero-turn carve-out below is unit-testable without spawning a
  *  session.
@@ -1555,18 +1605,28 @@ async function runSessionAttempt<T = unknown>(
   }
 
   if (exitCode !== 0) {
-    emitAttribution("error", { durationMs, turns, exitCode, apiErrorStatus });
-    // exitCode + stderr are both transport/provider-sourced (CLI diagnostics, never
-    // model stdout) — safe to reuse verbatim as the classification text. The result
-    // event (if one arrived before the process exited) is parsed ahead of this check —
-    // see `apiErrorStatus`'s doc comment above — so append it here too, transport-sourced
-    // same as the rest of this string.
-    const error = `Session exited with code ${exitCode}${stderrTrimmed ? `. stderr: ${stderrTrimmed}` : ""}`;
+    emitAttribution("error", {
+      durationMs,
+      turns,
+      exitCode,
+      apiErrorStatus,
+      subtype: envelope?.subtype,
+    });
+    // exitCode + (the envelope's own subtype, when one arrived) are both
+    // transport/CLI-sourced — safe to reuse verbatim as the classification text. See
+    // `classifyExitFailure`'s doc comment for why the envelope wins over raw stderr.
+    const { error, noOutput } = classifyExitFailure(
+      exitCode,
+      envelope,
+      stderrTrimmed,
+      lastAssistantText,
+    );
     const classificationText = appendApiErrorStatus(error, apiErrorStatus);
     return {
       ok: false,
       error,
       classificationText,
+      ...(noOutput ? { noOutput: true as const } : {}),
       apiErrorStatus,
       hadApiRetry: apiRetrySeen,
       backend,
