@@ -128,6 +128,17 @@ export const REVIEW_INPUT = z.object({
     .describe(
       "Explicit reviewer angles to run, overriding the router. Valid: architect, senior-dev, frontend, backend, typescript, qa, security, performance, concurrency, data-migration, api-contract, resilience. Baseline architect + senior-dev are always included. Omit to let the router pick based on the diff.",
     ),
+  model: z
+    .string()
+    .optional()
+    .describe(
+      "Optional model override for the angle and synthesis sessions only (never the router or " +
+        "the adversary critic), e.g. 'claude-opus-5[1m]'. Defaults to the measured-good review " +
+        "route; overriding onto a non-Claude model also drops the Max fallback entirely — Max " +
+        "only ever serves Claude model ids — so a failing review on an overridden model has " +
+        "nowhere to fall back to (see the JUDGE block comment in server/lib/routing.ts for the " +
+        "measurement behind why review stays pinned by default).",
+    ),
 });
 
 export type ReviewParams = z.infer<typeof REVIEW_INPUT>;
@@ -604,6 +615,10 @@ async function routeExtraAngles(
     tool: "review:router",
     jobId,
     isCancelled,
+    // No `model` override here, deliberately: this is the cheap CLASSIFY tier
+    // (review_router), not the judgment work a caller's override is meant to re-route.
+    // Re-pointing the router along with the angle/synthesis override would silently widen
+    // what the knob does — don't "fix" this inconsistency.
     route: routeFor("review_router"),
     jsonSchema: ROUTER_JSON_SCHEMA,
     maxTurns: 8,
@@ -774,7 +789,7 @@ export async function runReview(
   jobId?: string,
   isCancelled?: (jobId: string) => boolean,
 ): Promise<ReviewOutput> {
-  const { cwd, scope, context, angles, pr, branch } = parseParams(REVIEW_INPUT, rawParams);
+  const { cwd, scope, context, angles, pr, branch, model } = parseParams(REVIEW_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
   if (pr != null && branch != null) {
@@ -999,6 +1014,7 @@ export async function runReview(
           jobId,
           isCancelled,
           route: routeFor("review"),
+          model,
           jsonSchema: ANGLE_JSON_SCHEMA,
           maxTurns: 60,
           timeoutMs: 15 * 60 * 1000,
@@ -1102,6 +1118,7 @@ export async function runReview(
         jobId,
         isCancelled,
         route: routeFor("review"),
+        model,
         jsonSchema: REVIEW_JSON_SCHEMA,
         maxTurns,
         timeoutMs: 10 * 60 * 1000,
