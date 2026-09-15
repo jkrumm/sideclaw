@@ -438,6 +438,18 @@ export interface DispatchWorktree {
   pushable: boolean;
 }
 
+/** The marker persisted as an in-place episode's `worktree_meta` — recognized by the
+ *  `workspace` key a real `DispatchWorktree` never carries (see `store.ts`'s `recover()` /
+ *  `protectedWorktreePaths`). `path` is the LIVE repo root, not a worktree directory. */
+export interface InPlaceWorktreeMarker {
+  path: string;
+  workspace: "in-place";
+}
+
+/** Everything `DispatchResumeContext.onWorktreeReady` may be called with: a worktree tier's
+ *  real `DispatchWorktree`, or an in-place episode's marker object. */
+export type DispatchWorktreeMeta = DispatchWorktree | InPlaceWorktreeMarker;
+
 /** Branch-safe slug from free text. Output is `[a-z0-9-]+`, so it cannot express any of
  *  git's ref-name hazards (`..`, `~`, `^`, `:`, a trailing `.lock`, a leading `-`). */
 export function slugify(text: string, max = 40): string {
@@ -1109,6 +1121,15 @@ export interface InPlaceSnapshot {
   untracked: string[];
 }
 
+/** Current HEAD OID and the branch name it points at. Shared by `snapshotInPlace` (the
+ *  pre-episode baseline) and `finishInPlace`'s post-episode check for whether either moved —
+ *  both need the identical pair of facts. */
+export async function currentHeadState(cwd: string): Promise<{ headOid: string; branch: string }> {
+  const headOid = await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
+  const branch = await gitOrThrow(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+  return { headOid, branch };
+}
+
 /**
  * Snapshot the live checkout before an in-place episode. Read-only — `git stash create`
  * writes a dangling commit object and touches no ref, no index and no working tree, which
@@ -1117,12 +1138,13 @@ export interface InPlaceSnapshot {
  * excluded from what the episode gets credited (or blamed) for.
  */
 export async function snapshotInPlace(cwd: string): Promise<InPlaceSnapshot> {
-  const headOid = await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
-  const branch = await gitOrThrow(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
-  const stashed = await git(["stash", "create"], cwd, 30_000);
-  const stashOid = stashed.ok ? stashed.stdout.trim() : "";
-  // `git stash create` on a clean tree prints nothing and exits 0 — the documented shape,
-  // not an error to distinguish.
+  const { headOid, branch } = await currentHeadState(cwd);
+  // `git stash create` on a clean tree prints nothing and exits 0 — the documented shape, not
+  // an error to distinguish. Any OTHER non-zero exit (a mid-merge conflict, a corrupt index)
+  // is a real failure and must not be silently read as "clean": `gitOrThrow` throws on it
+  // rather than mapping it to `""`, which used to be indistinguishable from a genuinely clean
+  // tree.
+  const stashOid = await gitOrThrow(["stash", "create"], cwd, 30_000);
   const listing = await gitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], cwd);
   return {
     headOid,

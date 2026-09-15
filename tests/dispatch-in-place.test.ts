@@ -18,10 +18,10 @@ import {
   releaseInPlaceLock,
   runDispatch,
   tryAcquireInPlaceLock,
-  type DispatchOutput,
 } from "../server/jobs/handlers/dispatch.ts";
 import { inPlaceChangedFiles, snapshotInPlace } from "../server/jobs/handlers/dispatch-git.ts";
-import { git as fixtureGit, Fixture, makeFixture } from "./git-fixture.ts";
+import { SessionCancelledError } from "../server/mcp/session-runner.ts";
+import { git as fixtureGit, run as fixtureRun, Fixture, makeFixture } from "./git-fixture.ts";
 
 /** Same seam tests/jobs-recover-dispatch.test.ts relies on: setup.ts points this at a
  *  throwaway sqlite file for the whole run. */
@@ -40,24 +40,6 @@ beforeEach(async () => {
 afterEach(() => {
   fx.cleanup();
 });
-
-/** A minimal, schema-valid implement-tier verdict — `finishInPlace` reads only the fields
- *  `depositBranch` does (none of the artifact logic reads the verdict text on this path). */
-function baseVerdict(overrides: Partial<DispatchOutput> = {}): DispatchOutput {
-  return {
-    verdict: "placeholder verdict",
-    confidence: "medium",
-    evidence: [],
-    recommendation: "placeholder recommendation",
-    nextAction: "none",
-    summary: "placeholder summary",
-    outcome: "verdict_only",
-    schemaVersion: DISPATCH_SCHEMA_VERSION,
-    prTitle: "",
-    prBody: "",
-    ...overrides,
-  };
-}
 
 async function passingCheck() {
   return { passed: true as const, steps: [], summary: "stub: passed" };
@@ -191,6 +173,25 @@ describe("snapshotInPlace / inPlaceChangedFiles", () => {
     expect(after).toBe(before);
     expect(await fixtureGit(["stash", "list"], fx.repo)).toBe("");
   });
+
+  test("a failing `git stash create` (mid-merge conflict) throws rather than being read as a clean tree", async () => {
+    // Measured shape: `git stash create` exits non-zero ("Cannot save the current index
+    // state") when the index carries unresolved conflicts. Built by merging two branches that
+    // both touch the same line — `fixtureGit` throws on ANY non-zero exit, including the
+    // conflicting merge itself, so the merge step uses the raw, non-throwing `run` helper.
+    await fixtureGit(["checkout", "-qb", "feature"], fx.repo);
+    fx.write("src/app.ts", "export const conflict = 1;\n");
+    await fixtureGit(["add", "-A"], fx.repo);
+    await fixtureGit(["commit", "-qm", "feature change"], fx.repo);
+    await fixtureGit(["checkout", "-q", "master"], fx.repo);
+    fx.write("src/app.ts", "export const conflict = 2;\n");
+    await fixtureGit(["add", "-A"], fx.repo);
+    await fixtureGit(["commit", "-qm", "master change"], fx.repo);
+    const merge = await fixtureRun(["git", "merge", "feature", "-q"], fx.repo);
+    expect(merge.code).not.toBe(0); // the conflict is the point of this fixture
+
+    await expect(snapshotInPlace(fx.repo)).rejects.toThrow(/git stash create failed/);
+  });
 });
 
 // ── finishInPlace — the handler-side outcome logic ──────────────────────────────
@@ -198,7 +199,7 @@ describe("snapshotInPlace / inPlaceChangedFiles", () => {
 describe("finishInPlace", () => {
   test("no changes → applied_in_place with an empty change set", async () => {
     const snap = await snapshotInPlace(fx.repo);
-    const result = await finishInPlace(fx.repo, snap, baseVerdict(), () => {}, {
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.outcome).toBe("applied_in_place");
@@ -209,7 +210,7 @@ describe("finishInPlace", () => {
   test("edits are reported uncommitted, no branch is created, no commit is made", async () => {
     const snap = await snapshotInPlace(fx.repo);
     fx.write("episode.txt", "the episode's work\n");
-    const result = await finishInPlace(fx.repo, snap, baseVerdict(), () => {}, {
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.outcome).toBe("applied_in_place");
@@ -226,7 +227,7 @@ describe("finishInPlace", () => {
   test("a failing check is reported in the note, and the outcome stays applied_in_place", async () => {
     const snap = await snapshotInPlace(fx.repo);
     fx.write("episode.txt", "the episode's work\n");
-    const result = await finishInPlace(fx.repo, snap, baseVerdict(), () => {}, {
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
       runCheckFn: async () => ({
         passed: false as const,
         steps: [{ name: "test", passed: false as const, errors: ["1 failing"] }],
@@ -241,7 +242,7 @@ describe("finishInPlace", () => {
   test("a CI-surface edit is a prominent warning, not a discard", async () => {
     const snap = await snapshotInPlace(fx.repo);
     fx.write(".github/workflows/evil.yml", "on: push\n");
-    const result = await finishInPlace(fx.repo, snap, baseVerdict(), () => {}, {
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.outcome).toBe("applied_in_place");
@@ -252,7 +253,7 @@ describe("finishInPlace", () => {
   test("a secret-shaped added line is a warning naming the pattern", async () => {
     const snap = await snapshotInPlace(fx.repo);
     fx.write("episode.txt", `${SECRET_BODY}\n`);
-    const result = await finishInPlace(fx.repo, snap, baseVerdict(), () => {}, {
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.outcome).toBe("applied_in_place");
@@ -266,7 +267,7 @@ describe("finishInPlace", () => {
     await fixtureGit(["add", "owner.txt"], fx.repo);
     const snap = await snapshotInPlace(fx.repo);
     fx.write("episode.txt", "harmless change\n");
-    const result = await finishInPlace(fx.repo, snap, baseVerdict(), () => {}, {
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.note).not.toMatch(/AWS access key id/);
@@ -278,11 +279,89 @@ describe("finishInPlace", () => {
     await fixtureGit(["commit", "-qm", "committed secret"], fx.repo);
     const snap = await snapshotInPlace(fx.repo);
     fx.write("config.txt", `${SECRET_BODY}\nharmless episode line\n`);
-    const result = await finishInPlace(fx.repo, snap, baseVerdict(), () => {}, {
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.changedFiles).toEqual(["config.txt"]);
     expect(result.note).not.toMatch(/AWS access key id/);
+  });
+
+  test("a cancellation thrown by runCheckFn propagates rather than being reported as a failed check", async () => {
+    const snap = await snapshotInPlace(fx.repo);
+    fx.write("episode.txt", "the episode's work\n");
+    await expect(
+      finishInPlace(fx.repo, snap, () => {}, {
+        jobId: "job-cancel-ip-1",
+        runCheckFn: async () => {
+          throw new SessionCancelledError("job-cancel-ip-1");
+        },
+      }),
+    ).rejects.toBeInstanceOf(SessionCancelledError);
+  });
+
+  test("isCancelled observed true after a passing check also propagates", async () => {
+    const snap = await snapshotInPlace(fx.repo);
+    fx.write("episode.txt", "the episode's work\n");
+    await expect(
+      finishInPlace(fx.repo, snap, () => {}, {
+        jobId: "job-cancel-ip-2",
+        isCancelled: () => true,
+        runCheckFn: passingCheck,
+      }),
+    ).rejects.toBeInstanceOf(SessionCancelledError);
+  });
+
+  test("a generic throw from the check tool is reported as a failed check, never re-thrown", async () => {
+    const snap = await snapshotInPlace(fx.repo);
+    fx.write("episode.txt", "the episode's work\n");
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
+      runCheckFn: async () => {
+        throw new Error("check tool exploded");
+      },
+    });
+    expect(result.outcome).toBe("applied_in_place");
+    expect(result.note).toMatch(/checks FAILED/);
+    expect(result.note).toMatch(/check tool exploded/);
+  });
+
+  test("a check that reformats an untouched tracked file is reflected in the post-check changedFiles", async () => {
+    const snap = await snapshotInPlace(fx.repo);
+    fx.write("episode.txt", "the episode's work\n");
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
+      // Stands in for the repo's own `format` script rewriting a file the episode never
+      // touched — this is exactly why the change set is computed AFTER the check runs, not
+      // before it.
+      runCheckFn: async () => {
+        writeFileSync(join(fx.repo, "README.md"), "# fixture (reformatted)\n");
+        return { passed: true as const, steps: [], summary: "stub: formatted" };
+      },
+    });
+    expect(result.changedFiles).toContain("README.md");
+    expect(result.changedFiles).toContain("episode.txt");
+  });
+
+  test("HEAD moving during the episode (a worker that committed anyway) is a prominent WARNING", async () => {
+    const snap = await snapshotInPlace(fx.repo);
+    fx.write("episode.txt", "the episode's work\n");
+    await fixtureGit(["add", "-A"], fx.repo);
+    await fixtureGit(["commit", "-qm", "a worker committed despite the prompt"], fx.repo);
+    const result = await finishInPlace(fx.repo, snap, () => {}, { runCheckFn: passingCheck });
+    expect(result.note).toMatch(/WARNING: HEAD\/branch moved during the episode/);
+    expect(result.note).toContain(snap.headOid.slice(0, 12));
+  });
+
+  test("a secret hit forces forceHuman: true", async () => {
+    const snap = await snapshotInPlace(fx.repo);
+    fx.write("episode.txt", `${SECRET_BODY}\n`);
+    const result = await finishInPlace(fx.repo, snap, () => {}, { runCheckFn: passingCheck });
+    expect(result.forceHuman).toBe(true);
+  });
+
+  test("a clean change set is forceHuman: false", async () => {
+    const snap = await snapshotInPlace(fx.repo);
+    fx.write("episode.txt", "harmless change\n");
+    const result = await finishInPlace(fx.repo, snap, () => {}, { runCheckFn: passingCheck });
+    expect(result.forceHuman).toBe(false);
   });
 });
 

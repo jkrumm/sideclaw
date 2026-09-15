@@ -129,6 +129,27 @@ describe("depositBranch outcomes", () => {
     expect(result.note).toMatch(/lint/);
   });
 
+  test("a mixed failure (lint AND fallow) is checks_failed — fallow's advisory text is not required for that", async () => {
+    const wt = await createWorktree(fx.repo, key(), "mixed-failure", "master");
+    fx.write("added.txt", "content\n", wt.path);
+    await commitPendingWork(wt, "work worth pushing");
+    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+      runCheckFn: async () => ({
+        passed: false as const,
+        steps: [
+          { name: "lint", passed: false as const, errors: ["unexpected any at foo.ts:12"] },
+          { name: "fallow", passed: false as const, errors: ["runDispatch CRITICAL complexity"] },
+        ],
+        summary: "2/2 steps failed: lint, fallow",
+      }),
+    });
+    expect(result.outcome).toBe("checks_failed");
+    expect(result.branch).toBe(wt.branch);
+    expect(result.artifactUrl).toBeUndefined();
+    expect(result.note).toMatch(/NO pull request was opened/);
+    expect(result.note).toMatch(/lint/);
+  });
+
   test("a fallow-only failure is advisory — pushed and reported, never checks_failed", async () => {
     const wt = await createWorktree(fx.repo, key(), "fallow-only", "master");
     fx.write("added.txt", "content\n", wt.path);

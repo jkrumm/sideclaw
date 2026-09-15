@@ -16,6 +16,7 @@ import {
   artifactText,
   assertSensitiveTierAllowed,
   buildPrompt,
+  IN_PLACE_ADDENDUM,
   isSalvageable,
   loadSkillPrompt,
   newFenceNonce,
@@ -91,6 +92,20 @@ describe("buildPrompt — structure", () => {
     for (const empty of [undefined, "", "   ", "\n\t "]) {
       expect(buildPrompt(SKILL, "b", empty, NONCE)).not.toContain("CONTEXT_");
     }
+  });
+});
+
+describe("buildPrompt — the in-place workspace addendum", () => {
+  test("included before the brief fence when passed", () => {
+    const p = buildPrompt(SKILL, "b", undefined, NONCE, IN_PLACE_ADDENDUM);
+    expect(p).toContain(IN_PLACE_ADDENDUM);
+    expect(p.indexOf(IN_PLACE_ADDENDUM)).toBeLessThan(p.indexOf(`<<<BRIEF_${NONCE}_BEGIN>>>`));
+  });
+
+  test("absent when omitted — the default worktree episode's prompt is unchanged", () => {
+    const p = buildPrompt(SKILL, "b", undefined, NONCE);
+    expect(p).not.toContain("Workspace: in-place");
+    expect(p).not.toContain(IN_PLACE_ADDENDUM);
   });
 });
 

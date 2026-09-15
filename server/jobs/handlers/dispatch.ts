@@ -27,6 +27,7 @@ import {
   commitPendingWork,
   createReadWorktree,
   createWorktree,
+  currentHeadState,
   diffRefusalReason,
   GIT_DENY_CREDENTIALS_ENV,
   inPlaceChangedFiles,
@@ -45,6 +46,7 @@ import {
   summarizeDiff,
   writeWithheldVerdict,
   type DispatchWorktree,
+  type DispatchWorktreeMeta,
   type InPlaceSnapshot,
   type RepoIdentity,
 } from "./dispatch-git.ts";
@@ -219,6 +221,11 @@ const PR_FIELDS = {
 // implement tier gained a workspace mode that edits the live checkout and publishes
 // nothing. `changedFiles` is absent on every other outcome, so a consumer that ignores it
 // degrades gracefully, but the new outcome must not be silently misclassified.
+//
+// Also true as of this version, with no field-shape change to warrant its own bump: a
+// fallow-only check failure on the implement tier's push path no longer yields
+// "checks_failed" — fallow audits whole touched files and its findings are advisory, so they
+// ride along in the opened PR instead of withholding it (see `checksBlockPush`, below).
 export const DISPATCH_SCHEMA_VERSION = 3;
 
 /** Machine-readable classification of how this episode ended — the thirteen ways `runDispatch`
@@ -624,8 +631,26 @@ export function tryAcquireInPlaceLock(
   return { ok: true };
 }
 
+/** Best effort by construction: called from `runDispatch`'s `finally`, where a throw would
+ *  replace whatever the try/catch already decided to report. Falls back to the raw `cwd`
+ *  string as the map key if the path can no longer be resolved (the repo was moved or
+ *  deleted mid-episode) — better to leak one stale map entry than to throw out of a
+ *  cleanup path. */
 export function releaseInPlaceLock(cwd: string): void {
-  const key = realpathSync(cwd);
+  let key: string;
+  try {
+    key = realpathSync(cwd);
+  } catch (err) {
+    logger.warn(
+      {
+        event: "dispatch.in_place_lock_release_failed",
+        project: cwd,
+        error: String(err),
+      },
+      "could not resolve the real path to release the in-place lock — falling back to the raw cwd",
+    );
+    key = cwd;
+  }
   inPlaceLocks.delete(key);
 }
 
@@ -740,7 +765,7 @@ export function applySensitiveScan(
 export interface DispatchResumeContext {
   resume?: { sessionId: string; worktreeMeta: Record<string, unknown> };
   onSessionId?: (sessionId: string) => void;
-  onWorktreeReady?: (meta: DispatchWorktree) => void;
+  onWorktreeReady?: (meta: DispatchWorktreeMeta) => void;
 }
 
 /** Reconstruct a `DispatchWorktree` from the JSON round-trip through `jobs.worktree_meta`
@@ -814,20 +839,6 @@ export async function runDispatch(
   const skill = await loadSkillPrompt(tier);
   const nonce = newFenceNonce();
   const prompt = buildPrompt(skill, brief, context, nonce, inPlace ? IN_PLACE_ADDENDUM : undefined);
-  // Taken here rather than at the refusals above so every fallible call between refusal and
-  // session sits inside the try below — a throw before it would leak the lock with no
-  // finally to clear it. The lock still precedes the snapshot and the session, which is the
-  // actual critical section: from here on, this episode owns the live checkout.
-  if (inPlace) {
-    const lock = tryAcquireInPlaceLock(cwd, jobKey);
-    if (!lock.ok) {
-      throw new Error(
-        `dispatch refused: an in-place episode is already running in this repo (job ` +
-          `${lock.holder}) — in-place runs serialize per repo because their edits would ` +
-          `interleave in one live checkout.`,
-      );
-    }
-  }
 
   logger.info(
     {
@@ -895,8 +906,22 @@ export async function runDispatch(
   const resumingWorktree = resuming && !inPlace;
   let worktree: DispatchWorktree | undefined;
   let snapshot: InPlaceSnapshot | undefined;
+  // True only once `tryAcquireInPlaceLock` below actually succeeds for THIS invocation — the
+  // finally must release the lock it took, never a lock another job holds. Taken inside the
+  // try (rather than before it, as before) so a throw between acquiring it and setting this
+  // flag is impossible by construction: the two happen on the same line.
+  let lockHeld = false;
   try {
     if (inPlace) {
+      const lock = tryAcquireInPlaceLock(cwd, jobKey);
+      if (!lock.ok) {
+        throw new Error(
+          `dispatch refused: an in-place episode is already running in this repo (job ` +
+            `${lock.holder}) — in-place runs serialize per repo because their edits would ` +
+            `interleave in one live checkout.`,
+        );
+      }
+      lockHeld = true;
       // Recorded before the session starts — the snapshot is the in-place run's only
       // attribution baseline, exactly what `onWorktreeReady`'s persisted metadata is for a
       // worktree run. It is NOT persisted as worktree metadata (the store would then
@@ -928,18 +953,37 @@ export async function runDispatch(
     // An in-place run records a marker object instead: the store needs SOMETHING durable to
     // distinguish the row (it refuses to resume one), and no worktree metadata could lie
     // about a worktree that does not exist.
-    resumeCtx?.onWorktreeReady?.(
-      inPlace ? { path: cwd, workspace: "in-place" } : (worktree as DispatchWorktree),
-    );
-    // In-place: session cwd IS the repo root the policy resolved. No strip/restore — deleting
-    // the repo's `.claude/settings.json` here would mutate a live tree other sessions use.
-    // The trade is explicit: `disableAllHooks` still holds (a `--settings` flag, not a file
-    // delete), but a project settings file's `env` block DOES apply inside the session —
-    // accepted because in-place is the owner opting their own audited repo into a writable
-    // episode, and the policy ceiling still decides which repos are reachable. Everything
-    // else (`GIT_DENY_CREDENTIALS_ENV`, the fence, the read-only profile) is unchanged.
-    const sessionCwd = inPlace ? cwd : (worktree as DispatchWorktree).path;
-    const strippedSettings = inPlace ? [] : stripProjectSettings(worktree as DispatchWorktree);
+    //
+    // Narrowed once, here, rather than cast at each of the three read-tiers-only uses below:
+    // every branch above that is NOT `if (inPlace)` assigns `worktree`, so a plain tier
+    // (`!inPlace`) reaching this point with no worktree is an internal invariant violation,
+    // not a normal runtime condition — refused loudly with a runtime guard instead of three
+    // separate `as DispatchWorktree` casts papering over the same assumption.
+    let worktreeMeta: DispatchWorktreeMeta;
+    let sessionCwd: string;
+    let strippedSettings: string[];
+    if (inPlace) {
+      // In-place: session cwd IS the repo root the policy resolved. No strip/restore —
+      // deleting the repo's `.claude/settings.json` here would mutate a live tree other
+      // sessions use. The trade is explicit: `disableAllHooks` still holds (a `--settings`
+      // flag, not a file delete), but a project settings file's `env` block DOES apply inside
+      // the session — accepted because in-place is the owner opting their own audited repo
+      // into a writable episode, and the policy ceiling still decides which repos are
+      // reachable. Everything else (`GIT_DENY_CREDENTIALS_ENV`, the fence, the read-only
+      // profile) is unchanged.
+      worktreeMeta = { path: cwd, workspace: "in-place" };
+      sessionCwd = cwd;
+      strippedSettings = [];
+    } else {
+      if (!worktree) throw new Error("internal: worktree missing for a non-in-place tier");
+      worktreeMeta = worktree;
+      sessionCwd = worktree.path;
+      strippedSettings = stripProjectSettings(worktree);
+    }
+    // Recorded the instant the worktree exists — well before the worker session starts — so a
+    // process killed before the FIRST stream event still leaves this on the job row (see the
+    // comment above this block for the "in-place run records a marker instead" reasoning).
+    resumeCtx?.onWorktreeReady?.(worktreeMeta);
     if (strippedSettings.length > 0) note(`stripped ${strippedSettings.join(", ")}`);
     const runEpisode = (p: string, opts: { resumeSessionId?: string } = {}) =>
       runSession<DispatchOutput>({
@@ -1046,6 +1090,12 @@ export async function runDispatch(
     // check alone, so a future tier added to DispatchTier without a matching case here fails
     // typecheck on the field, not on a "used before assigned" surprise.
     let outcome: DispatchOutcome = "verdict_only";
+    // Set only by the in-place branch below, when its CI-path/secret scan hit something. Same
+    // "wins over the worker's own nextAction" treatment `checks_failed` already gets — nothing
+    // was published for a red check to gate here either, but a flagged change set in a LIVE
+    // checkout is exactly the kind of thing that must not be waved through as "no human
+    // needed" just because the worker's own verdict said so.
+    let forceHumanInPlace = false;
 
     // A switch with an exhaustiveness check, not a pair of ifs: TIERS and WORKER_OUTPUT are
     // both `Record<DispatchTier, …>` and force a compile error when a tier is added, and the
@@ -1089,13 +1139,14 @@ export async function runDispatch(
       }
       case "implement": {
         if (inPlace) {
-          const applied = await finishInPlace(cwd, snapshot as InPlaceSnapshot, data, note, {
+          const applied = await finishInPlace(cwd, snapshot as InPlaceSnapshot, note, {
             jobId,
             isCancelled,
           });
           changedFiles = applied.changedFiles;
           artifactNote = applied.note;
           outcome = applied.outcome;
+          forceHumanInPlace = applied.forceHuman;
           break;
         }
         if (!identity || !worktree) {
@@ -1144,10 +1195,11 @@ export async function runDispatch(
       ...(artifactNote ? { verdict: data.verdict + artifactNote } : {}),
       // A red check is never a PR, and a consumer must not read this as the worker's own
       // "no human needed" verdict — forced the same way `applySensitiveScan` forces it for
-      // `withheld`. In-place deliberately does NOT force it: nothing was published that a
-      // red check gates, the edits sit uncommitted for a human either way, and the
-      // `applied_in_place` doc comment says so.
-      ...(outcome === "checks_failed" ? { nextAction: "human" as const } : {}),
+      // `withheld`. `forceHumanInPlace` is the in-place equivalent: nothing was published
+      // that a red CHECK gates (edits sit uncommitted for a human either way), but a
+      // CI-path/secret hit in the change set is a different, standalone reason the worker's
+      // own "no human needed" verdict must not stand.
+      ...(outcome === "checks_failed" || forceHumanInPlace ? { nextAction: "human" as const } : {}),
     };
     return applySensitiveScan(finalOutput, {
       sensitive: effectiveSensitive,
@@ -1176,46 +1228,32 @@ export async function runDispatch(
     // agents are using never held this work in the first place, and the isolated copy does
     // not outlive the episode. In-place tears down nothing — its edits are deliberately
     // left uncommitted in the live checkout for the owner — and releases the per-repo lock
-    // its whole admission rested on.
+    // its whole admission rested on, but ONLY if this invocation is the one that actually
+    // acquired it: a refused acquisition (another job already holds it) must never release
+    // that other job's lock.
     if (worktree) await removeWorktree(cwd, worktree);
-    if (inPlace) releaseInPlaceLock(cwd);
+    if (inPlace && lockHeld) releaseInPlaceLock(cwd);
   }
 }
 
-/** The in-place half of the implement tier: attribute the episode's edits against the
- *  pre-episode snapshot, run the repo's own check (reported, never gating a push — there is
- *  no push), scan the change set, and report. Never reverts, stashes or discards anything.
- *
- *  `checkCtx.runCheckFn` is injectable for the same reason `depositBranch`'s is. */
-export async function finishInPlace(
+/** Run the repo's own `check` tool, handling the two failure shapes `depositBranch` and
+ *  `finishInPlace` both need identically: a cancellation must propagate as exactly that
+ *  (never as a failed check, which would push or report as if the episode ran to
+ *  completion), and any OTHER throw becomes a synthetic failed check step rather than an
+ *  unhandled rejection — a broken check tool may only make an episode MORE cautious, never
+ *  silently wave a red run through. Re-checked for cancellation after the check returns too:
+ *  the race a cancel arriving while the check itself was still running, which the try/catch
+ *  above can't observe. */
+async function runRepoCheck(
   cwd: string,
-  snapshot: InPlaceSnapshot,
-  data: DispatchOutput,
   note: (s: string) => void,
   checkCtx: {
     jobId?: string;
     isCancelled?: (jobId: string) => boolean;
     runCheckFn?: typeof runCheck;
-  } = {},
-): Promise<{ outcome: DispatchOutcome; changedFiles: string[]; note: string }> {
+  },
+): Promise<CheckOutput> {
   const { jobId, isCancelled, runCheckFn = runCheck } = checkCtx;
-
-  note("attributing changes");
-  const changedFiles = await inPlaceChangedFiles(cwd, snapshot);
-
-  if (changedFiles.length === 0) {
-    return {
-      outcome: "applied_in_place",
-      changedFiles: [],
-      note: " Nothing was changed: the episode left the live checkout as it found it.",
-    };
-  }
-
-  // The repo's own checks, run mechanically against the live checkout after the episode —
-  // same reasoning as the push path's check (a check the worker was merely TOLD to run is
-  // not a check), one deliberate difference: a failure here gates nothing, because nothing
-  // is pushed. It is reported in the verdict and the owner reads it next to the diff.
-  note("checking");
   let checkOutput: CheckOutput;
   try {
     checkOutput = await runCheckFn(
@@ -1225,8 +1263,6 @@ export async function finishInPlace(
       isCancelled,
     );
   } catch (err) {
-    // Same shape as `depositBranch`'s catch: a cancellation is the outer job ending, never
-    // a failed check.
     if (err instanceof SessionCancelledError) throw err;
     checkOutput = {
       passed: false,
@@ -1243,6 +1279,58 @@ export async function finishInPlace(
   if (jobId && isCancelled?.(jobId)) {
     throw new SessionCancelledError(jobId);
   }
+  return checkOutput;
+}
+
+/** The in-place half of the implement tier: attribute the episode's edits against the
+ *  pre-episode snapshot, run the repo's own check (reported, never gating a push — there is
+ *  no push), scan the change set, and report. Never reverts, stashes or discards anything.
+ *
+ *  The check runs BEFORE the final attribution: the repo's own `format` script can rewrite
+ *  files in place, so the live checkout can still be changing while the check runs, and the
+ *  reported `changedFiles`/CI-path/secret scan must reflect the tree as it stands AFTER the
+ *  check, not a snapshot taken before it. A pre-check pass over the same diff decides only
+ *  the zero-changes early return, cheaply, without running a check for an episode that edited
+ *  nothing.
+ *
+ *  `checkCtx.runCheckFn` is injectable for the same reason `depositBranch`'s is. */
+export async function finishInPlace(
+  cwd: string,
+  snapshot: InPlaceSnapshot,
+  note: (s: string) => void,
+  checkCtx: {
+    jobId?: string;
+    isCancelled?: (jobId: string) => boolean;
+    runCheckFn?: typeof runCheck;
+  } = {},
+): Promise<{
+  outcome: DispatchOutcome;
+  changedFiles: string[];
+  note: string;
+  forceHuman: boolean;
+}> {
+  note("attributing changes");
+  const preCheckChangedFiles = await inPlaceChangedFiles(cwd, snapshot);
+
+  if (preCheckChangedFiles.length === 0) {
+    return {
+      outcome: "applied_in_place",
+      changedFiles: [],
+      note: " Nothing was changed: the episode left the live checkout as it found it.",
+      forceHuman: false,
+    };
+  }
+
+  // The repo's own checks, run mechanically against the live checkout after the episode —
+  // same reasoning as the push path's check (a check the worker was merely TOLD to run is
+  // not a check), one deliberate difference: a failure here gates nothing, because nothing
+  // is pushed. It is reported in the verdict and the owner reads it next to the diff.
+  note("checking");
+  const checkOutput = await runRepoCheck(cwd, note, checkCtx);
+
+  // Recomputed AFTER the check, not reused from the pre-check pass above — see the doc
+  // comment on why the check can move the tree.
+  const changedFiles = await inPlaceChangedFiles(cwd, snapshot);
 
   // CI-path and added-secret scans over the episode's change set. Nothing is published, so
   // a hit is a prominent warning in the verdict, never a discard — the edits sit
@@ -1276,7 +1364,39 @@ export async function finishInPlace(
     );
   }
 
-  return { outcome: "applied_in_place", changedFiles, note: notes.join("") };
+  // HEAD/branch are re-read, not assumed unchanged — the addendum prompt tells the worker
+  // never to commit, checkout or switch branches, but "told not to" is not a guarantee, and a
+  // worker that did anyway means `changedFiles`' diff-against-snapshot attribution may now
+  // include committed work rather than purely the live tree's uncommitted edits.
+  const after = await currentHeadState(cwd);
+  if (after.headOid !== snapshot.headOid || after.branch !== snapshot.branch) {
+    notes.push(
+      ` WARNING: HEAD/branch moved during the episode (snapshot ${snapshot.headOid.slice(0, 12)} ` +
+        `on ${snapshot.branch}, now ${after.headOid.slice(0, 12)} on ${after.branch}) — ` +
+        `changedFiles attribution may include committed work.`,
+    );
+    logger.warn(
+      {
+        event: "dispatch.in_place_head_moved",
+        project: cwd,
+        snapshotHeadOid: snapshot.headOid,
+        snapshotBranch: snapshot.branch,
+        headOid: after.headOid,
+        branch: after.branch,
+      },
+      "in-place dispatch HEAD/branch moved during the episode",
+    );
+  }
+
+  return {
+    outcome: "applied_in_place",
+    changedFiles,
+    note: notes.join(""),
+    // Same "wins over the worker's own verdict" treatment `checks_failed` gets on the push
+    // path — a CI-path edit or an added-line secret match in a LIVE checkout is not something
+    // the worker's own nextAction gets to wave off as "no human needed".
+    forceHuman: refusal !== null,
+  };
 }
 
 /** Failing check steps rendered into `artifactNote`-sized text: step name + its first few
@@ -1288,6 +1408,18 @@ function renderFailedChecks(steps: CheckOutput["steps"]): string {
     .map((s) => `${s.name}: ${(s.errors ?? []).slice(0, 3).join(" | ") || "(no error detail)"}`)
     .join("; ");
   return rendered.length > 1500 ? `${rendered.slice(0, 1500)}…` : rendered;
+}
+
+/** Whether a failed check should block the push. fallow findings are advisory (see the
+ *  comment at its call site) — a `passed: false` result whose only failing steps are fallow
+ *  does not block. Every other shape does, INCLUDING a `passed: false` with no failing step
+ *  recorded at all: that shape means the check tool itself is confused, not that it found
+ *  nothing wrong, and treating it as passing would be the one silent failure mode this
+ *  function exists to rule out — fail-safe, not fail-open. */
+function checksBlockPush(check: CheckOutput): boolean {
+  const failedSteps = check.steps.filter((s) => !s.passed);
+  const advisorySteps = failedSteps.filter((s) => s.name === "fallow");
+  return !check.passed && (failedSteps.length === 0 || advisorySteps.length < failedSteps.length);
 }
 
 /** Commit, bound-check, push and open the draft PR. Returns what actually landed — a tier
@@ -1308,7 +1440,6 @@ export async function depositBranch(
     runCheckFn?: typeof runCheck;
   } = {},
 ): Promise<{ artifactUrl?: string; branch?: string; outcome: DispatchOutcome; note: string }> {
-  const { jobId, isCancelled, runCheckFn = runCheck } = checkCtx;
   const text = artifactText(data.prTitle, data.prBody);
   const subject = text?.title ?? `chore: dispatched change on ${worktree.branch}`;
 
@@ -1355,44 +1486,7 @@ export async function depositBranch(
   // secret-bearing diff to avoid exposing further — by spawning a check session against it
   // first.
   note("checking");
-  let checkOutput: CheckOutput;
-  try {
-    checkOutput = await runCheckFn(
-      { cwd: worktree.path },
-      (p) => note(`check: ${p.lastAction}`),
-      jobId,
-      isCancelled,
-    );
-  } catch (err) {
-    // A cancellation is NOT a failed check — it is the outer job ending, and it must
-    // propagate as exactly that. Folding it into `checkOutput.passed = false` would push the
-    // branch below and report `checks_failed`, i.e. treat a job the caller cancelled as one
-    // that ran to completion. `runSession`'s retry loop throws this specific type for a
-    // `POST /api/jobs/:id/cancel` mid-session — never retried, never wrapped, rethrown as-is
-    // so `runDispatch`'s own catch (and ultimately `server/jobs/store.ts`'s `execute()`) sees
-    // the same cancellation shape it would have seen had the OUTER episode session itself
-    // been the one cancelled.
-    if (err instanceof SessionCancelledError) throw err;
-    checkOutput = {
-      passed: false,
-      steps: [
-        {
-          name: "check",
-          passed: false,
-          errors: [err instanceof Error ? err.message : String(err)],
-        },
-      ],
-      summary: "check tool failed to run",
-    };
-  }
-
-  // Belt and suspenders against the race the catch above can't cover: a cancel observed
-  // AFTER `runCheckFn` already returned a real (possibly passing) result. Checked before any
-  // push, same as the throw above — nothing below this point may run once cancellation has
-  // been requested for this job.
-  if (jobId && isCancelled?.(jobId)) {
-    throw new SessionCancelledError(jobId);
-  }
+  const checkOutput = await runRepoCheck(worktree.path, note, checkCtx);
 
   // fallow is advisory on this path, never a gate: it audits whole touched files, so any
   // episode that edits an already-complex or clone-carrying file inherits that debt as a
@@ -1401,14 +1495,12 @@ export async function depositBranch(
   // gate; fallow's findings ride along in it instead of withholding it.
   const failedSteps = checkOutput.steps.filter((s) => !s.passed);
   const advisorySteps = failedSteps.filter((s) => s.name === "fallow");
-  const checksBlock =
-    !checkOutput.passed && (failedSteps.length === 0 || advisorySteps.length < failedSteps.length);
   const advisory =
     advisorySteps.length > 0
       ? ` fallow flagged findings (advisory, not a gate): ${renderFailedChecks(advisorySteps)}`
       : "";
 
-  if (checksBlock) {
+  if (checksBlockPush(checkOutput)) {
     note(`pushing ${worktree.branch} (checks failed)`);
     await pushBranch(worktree, identity);
     logger.warn(

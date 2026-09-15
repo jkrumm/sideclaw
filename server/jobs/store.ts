@@ -828,19 +828,21 @@ function recover(): void {
       continue;
     }
     if ((row.tool as JobTool) === "dispatch") {
+      // Parsed once: `worktree_meta` is read for both the in-place marker check and the
+      // worktree path below, and re-parsing the same column twice invited the two reads to
+      // silently drift if only one were ever updated.
+      const meta =
+        row.worktree_meta !== null
+          ? (JSON.parse(row.worktree_meta) as { path?: unknown; workspace?: unknown })
+          : null;
       // An in-place episode is never auto-resumed: it has no worktree to reconstruct, its
       // snapshot and per-repo lock were process-local, and a `--resume` against the live
       // checkout could not attribute a re-run's edits against a snapshot nobody kept. Its
       // persisted metadata is the marker object `{ path, workspace: "in-place" }` (see
       // dispatch.ts's `onWorktreeReady`), recognized by the `workspace` key a real
       // `DispatchWorktree` can never carry.
-      const metaIsInPlace =
-        row.worktree_meta !== null &&
-        (JSON.parse(row.worktree_meta) as { workspace?: unknown }).workspace === "in-place";
-      const worktreePath =
-        row.worktree_meta !== null
-          ? ((JSON.parse(row.worktree_meta) as { path?: unknown }).path ?? null)
-          : null;
+      const metaIsInPlace = meta?.workspace === "in-place";
+      const worktreePath = meta?.path ?? null;
       const decision = metaIsInPlace
         ? ("interrupted" as const)
         : dispatchRecoveryStatusFor(
@@ -854,6 +856,21 @@ function recover(): void {
           [now, row.id],
         );
         interrupted++;
+        if (metaIsInPlace) {
+          // Named explicitly rather than left to be found by grepping — an in-place episode
+          // interrupted mid-run leaves its edits sitting UNCOMMITTED in the repo's live
+          // checkout (the one other agents and the owner both use), and nothing else about
+          // this row's `interrupted` status says which repo that is.
+          logger.warn(
+            {
+              event: "job.recover_in_place_interrupted",
+              jobId: row.id,
+              cwd: typeof worktreePath === "string" ? worktreePath : undefined,
+            },
+            "an in-place dispatch was interrupted by a restart — its edits, if any, are " +
+              "still uncommitted in the repo's live checkout",
+          );
+        }
         continue;
       }
       if (decision === "resume") {
