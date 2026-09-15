@@ -268,6 +268,23 @@ context. One episode, one verdict, no steering (mid-run redirection is
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
 + GitHub issue), `implement` (write → verdict + branch + **draft** PR).
 
+**Workspace** (implement only): `worktree` (default) = the isolated-worktree
+path above. `in-place` = the episode edits the repo's **live checkout**
+directly; the handler creates no branch, no commit, no push, no PR and
+resolves no GitHub identity — the result carries outcome `applied_in_place`
+and `changedFiles` (uncommitted, for the owner to review and commit). Refused
+for any tier but `implement` and for `sensitive: true`; at most one in-place
+episode per repo at a time. What it gives up: no worktree isolation and no
+settings strip (the repo's `.claude/settings.json` `env` **does** apply —
+accepted for the owner's own audited repos; `disableAllHooks` still holds).
+What still holds: `GIT_DENY_CREDENTIALS_ENV`, the fence, the CI-path and
+added-secret scans (a hit is a warning in the verdict, not a discard — nothing
+is published), the repo's own `check` before the verdict (reported, never
+gating). Pre-existing uncommitted work is snapshotted before the episode and
+excluded from `changedFiles`; never reverted, stashed or committed by the
+handler. Never auto-resumed on boot (`interrupted` instead) — no worktree to
+reconstruct and no durable snapshot to attribute a re-run against.
+
 **`sensitive`** opens `investigate` for secret-bearing repos (`dotfiles-private`,
 `homelab-private`) — refused outright at any other tier, before a worktree
 exists, since a filed issue or pushed branch has no safe artifact path there.
@@ -313,7 +330,10 @@ boundary for a sensitive episode, not the permission profile.
   audited repo's hooks/`env` must never execute inside the episode.
 - `implement` refuses `.github/workflows` diffs and added lines matching
   `SECRET_PATTERNS`; commits `--no-verify`; opens a **draft** PR from the
-  API's `default_branch`.
+  API's `default_branch`. The repo's `check` runs before the push; a red
+  format/lint/typecheck/test withholds the PR (`checks_failed`), a red
+  `fallow` step alone never does — it audits whole touched files, so it rides
+  along in the PR body as advisory instead.
 - The brief is untrusted and fenced with per-run nonce delimiters, re-asserted
   after the data block.
 - Salvage retries only a serialization failure (fresh session, no `--resume`)

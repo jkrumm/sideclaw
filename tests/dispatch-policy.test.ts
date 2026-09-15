@@ -66,10 +66,7 @@ describe("resolveDispatchTarget — accepts within ceiling", () => {
 
   test("sideclaw / warden / dotfiles at implement — no longer pinned, the permissive default applies", () => {
     for (const repo of ["sideclaw", "warden", "dotfiles"]) {
-      const r = resolveDispatchTarget(
-        { cwd: join(ROOT, repo), tier: "implement" },
-        DEFAULT_POLICY,
-      );
+      const r = resolveDispatchTarget({ cwd: join(ROOT, repo), tier: "implement" }, DEFAULT_POLICY);
       expect(r).toEqual({ ok: true, repo, root: ROOT, sensitive: false });
     }
   });
@@ -125,7 +122,6 @@ describe("resolveDispatchTarget — refuses on ceiling", () => {
       reason: "tier 'implement' exceeds the ceiling 'investigate' for repo 'homelab-private'",
     });
   });
-
 });
 
 describe("resolveDispatchTarget — path shape", () => {
@@ -492,7 +488,6 @@ describe("an override named after a prototype key cannot reshape the table", () 
       expect(({} as Record<string, unknown>).sensitive).toBeUndefined();
     });
   }
-
 });
 
 describe("marking a repo sensitive clamps its ceiling", () => {

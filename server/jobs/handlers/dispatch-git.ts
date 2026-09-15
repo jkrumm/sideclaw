@@ -1086,6 +1086,138 @@ export async function restoreStrippedSettings(
   await gitOrThrow(["checkout", wt.base, "--", ...restorable], wt.path);
 }
 
+// ── In-place workspace ─────────────────────────────────────────────────────────
+//
+// The in-place implement mode edits the repo's LIVE checkout and publishes nothing: no
+// branch, no commit, no push, no PR. What replaces the worktree's isolation is a snapshot
+// taken before the episode runs — pre-existing dirty state and untracked files are
+// recorded so the post-episode change set can attribute exactly the episode's own edits
+// and nothing else. Nothing here reverts, stashes or discards anything: the owner's
+// uncommitted work is untouchable by construction.
+
+/** What the live checkout looked like before an in-place episode. `headOid` and `branch`
+ *  are recorded so the post-episode report can say whether either moved (a worker that
+ *  committed, checked out or switched despite the prompt) rather than silently diffing
+ *  against the wrong base. `stashOid` is `git stash create`'s commit-ish of the dirty
+ *  state — empty output means the tree was clean, in which case HEAD is the snapshot
+ *  base. `untracked` is the pre-existing untracked file list, excluded from the change
+ *  set so a file that already sat there is never reported as the episode's work. */
+export interface InPlaceSnapshot {
+  headOid: string;
+  branch: string;
+  stashOid: string;
+  untracked: string[];
+}
+
+/**
+ * Snapshot the live checkout before an in-place episode. Read-only — `git stash create`
+ * writes a dangling commit object and touches no ref, no index and no working tree, which
+ * is exactly why it is used here instead of `stash push`. Pre-existing uncommitted
+ * changes are normal and are never a refusal; the snapshot exists so they can be
+ * excluded from what the episode gets credited (or blamed) for.
+ */
+export async function snapshotInPlace(cwd: string): Promise<InPlaceSnapshot> {
+  const headOid = await gitOrThrow(["rev-parse", "--verify", "HEAD^{commit}"], cwd);
+  const branch = await gitOrThrow(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+  const stashed = await git(["stash", "create"], cwd, 30_000);
+  const stashOid = stashed.ok ? stashed.stdout.trim() : "";
+  // `git stash create` on a clean tree prints nothing and exits 0 — the documented shape,
+  // not an error to distinguish.
+  const listing = await gitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], cwd);
+  return {
+    headOid,
+    branch,
+    stashOid,
+    untracked: listing.split("\0").filter(Boolean),
+  };
+}
+
+/**
+ * The episode's own change set, vs a pre-episode snapshot: tracked paths that differ
+ * between the snapshot base and the working tree (staged or not), plus untracked files
+ * the episode added. Pre-existing dirty state and pre-existing untracked files are
+ * excluded by construction — they are inside the snapshot, not against it.
+ *
+ * Read-only on the repo: it diffs and lists, it never adds, stashes or resets.
+ */
+export async function inPlaceChangedFiles(cwd: string, snap: InPlaceSnapshot): Promise<string[]> {
+  // Untracked now, minus untracked then — the rest are the episode's new files. (A file
+  // the snapshot listed and the episode deleted disappears from both lists; a deletion of
+  // a TRACKED file is captured by the diff below. Deleting a pre-existing untracked file
+  // is owner-work loss we cannot attribute and do not report — the snapshot never
+  // promised to restore anything.)
+  const nowListing = await gitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], cwd);
+  const nowUntracked = new Set(nowListing.split("\0").filter(Boolean));
+  const before = new Set(snap.untracked);
+  const added: string[] = [...nowUntracked].filter((p) => !before.has(p));
+
+  const base = snap.stashOid || snap.headOid;
+  const out = await gitOrThrow(["diff", "--no-renames", "--numstat", base, "--"], cwd);
+  const modified: string[] = [];
+  for (const line of out.split("\n")) {
+    if (!line.trim()) continue;
+    const path = line.split("\t").slice(2).join("\t");
+    if (path) modified.push(path);
+  }
+  return [...new Set([...modified, ...added])].sort();
+}
+
+/**
+ * Why the episode's change set should be flagged to the owner, or null if it is clean.
+ * Same two scans the push path runs (`diffRefusalReason`), re-worded for a path that
+ * publishes nothing: a hit is a prominent warning in the verdict, never a discard — the
+ * edits sit uncommitted in the owner's own checkout and a human reviews them either way.
+ *
+ * The content scan covers the change set's ADDED lines only (patch against the snapshot
+ * base, untracked files read whole), so pre-existing secret-shaped text in the repo is
+ * not this episode's doing — same added-lines-only stance as `addedSecrets`.
+ */
+export async function inPlaceRefusalReason(
+  cwd: string,
+  snap: InPlaceSnapshot,
+  changedFiles: string[],
+): Promise<{ warnings: string[] } | null> {
+  const warnings: string[] = [];
+  const forbidden = changedFiles.filter((f) => FORBIDDEN_PATH_RE.test(f));
+  if (forbidden.length > 0) {
+    warnings.push(
+      `the episode edited the CI execution surface (${forbidden.join(", ")}) — review before committing`,
+    );
+  }
+
+  const base = snap.stashOid || snap.headOid;
+  const patch = await gitOrThrow(["diff", "--no-renames", "-U0", base, "--"], cwd);
+  const addedLines = patch
+    .split("\n")
+    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+    .join("\n");
+  // Untracked files the episode added are read whole: they have no base to diff against,
+  // so every line in them is an added line.
+  // Only files that are untracked NOW and were not before — a modified tracked file is already
+  // covered line-by-line by the patch above, and reading it whole would blame the episode for
+  // secret-shaped text the file carried before it ran.
+  const nowListing = await gitOrThrow(["ls-files", "--others", "--exclude-standard", "-z"], cwd);
+  const nowUntracked = new Set(nowListing.split("\0").filter(Boolean));
+  let untrackedText = "";
+  for (const f of changedFiles) {
+    if (!nowUntracked.has(f) || snap.untracked.includes(f)) continue;
+    try {
+      untrackedText += `\n${readFileSync(join(cwd, f), "utf8")}`;
+    } catch {
+      // Gone, unreadable or a directory between listing and read — the diff already
+      // covers everything tracked, and this is a warning path, not a gate.
+    }
+  }
+  const secrets = scanForSecrets(`${addedLines}\n${untrackedText}`);
+  if (secrets.length > 0) {
+    warnings.push(
+      `the episode's added lines match ${secrets.join(", ")} — review before committing`,
+    );
+  }
+
+  return warnings.length > 0 ? { warnings } : null;
+}
+
 // ── Diff inspection and commit ────────────────────────────────────────────────
 
 export interface DiffSummary {

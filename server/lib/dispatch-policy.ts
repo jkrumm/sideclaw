@@ -43,6 +43,22 @@ export type DispatchTier = (typeof DISPATCH_TIERS)[number];
  *  about which tier an omitting call gets are not belt and suspenders, they are a gap. */
 export const DEFAULT_DISPATCH_TIER: DispatchTier = "investigate";
 
+/** Where an `implement` episode writes — not a tier, a re-shaping of the implement tier's
+ *  workspace alone. Enum rather than boolean so a future mode fits without another schema
+ *  migration. Same single-source pattern as `DISPATCH_TIERS` above: `DISPATCH_INPUT`'s zod
+ *  enum is built from this array.
+ *
+ *  - `worktree` (default): the throwaway worktree on a fresh `dispatch/…` branch; the
+ *    handler commits, pushes and opens a draft PR.
+ *  - `in-place`: the episode edits the repo's LIVE checkout directly and the handler
+ *    creates no branch, no commit, no push and no PR — the result carries `changedFiles`
+ *    and the owner reviews and commits the uncommitted edits themselves. Valid only with
+ *    tier `implement`, never with `sensitive`, one per repo at a time (enforced in
+ *    dispatch.ts, which owns the why). */
+export const DISPATCH_WORKSPACES = ["worktree", "in-place"] as const;
+export type DispatchWorkspace = (typeof DISPATCH_WORKSPACES)[number];
+export const DEFAULT_DISPATCH_WORKSPACE: DispatchWorkspace = "worktree";
+
 export interface RepoRule {
   ceiling: DispatchTier;
   sensitive: boolean;

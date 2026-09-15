@@ -12,6 +12,59 @@ issue), `implement` (write → verdict + branch + **draft** PR). Prompts are
 `skills/dispatch/_common.md` + one tier file; the shared injection-hardening
 preamble lives in `_common.md` precisely so three copies cannot drift apart.
 
+## In-place workspace — implement without a worktree
+
+`workspace: "in-place"` re-shapes the implement tier for the owner's dominant
+workflow — "make these edits in my repo, I review and commit" — where the
+worktree → branch → draft-PR path is friction, especially in direct-to-master
+repos. The episode edits the LIVE checkout; the handler creates no branch, no
+commit, no push, no PR, and resolves no GitHub identity at all.
+
+- **What it gives up, and why that is acceptable.** No worktree isolation (the
+  episode's edits land in the checkout other sessions may be using — that is
+  the point, and the per-repo lock below is what keeps two episodes from
+  interleaving), and no settings strip: deleting the repo's
+  `.claude/settings.json` would itself mutate a live tree, so its `env` block
+  DOES apply inside the session. Accepted deliberately — in-place is the owner
+  opting their own audited repo into a writable episode, and the repo policy
+  still decides which repos are reachable at `implement` at all.
+  `disableAllHooks` still holds (it is a `--settings` flag, not the file
+  delete), and `GIT_DENY_CREDENTIALS_ENV`, the nonce fence and the read-only
+  profile of every other tier are unchanged.
+- **Refusals before anything runs** (`assertInPlaceAllowed`): any tier but
+  `implement`, and any `sensitive` episode — the same "no safe artifact path"
+  reasoning as `assertSensitiveTierAllowed`, applied to a mode whose whole
+  contract is "no artifact". Concurrency: at most one in-place episode per
+  repo (`tryAcquireInPlaceLock`, an in-process map keyed on the canonical
+  root, released in `runDispatch`'s `finally`) — exact for the single-process
+  server launchd guarantees, cleared by a crash with the process.
+- **Attribution, not isolation.** Pre-existing dirty state is normal and never
+  a refusal: `snapshotInPlace` records HEAD, the branch, `git stash create`'s
+  commit-ish of the dirty tree (dangling object, touches nothing — clean tree
+  → empty → HEAD is the base) and the untracked list before the session
+  starts. `inPlaceChangedFiles` diffs the snapshot base against the working
+  tree and adds untracked files the episode created, so the owner's uncommitted
+  work never appears in `changedFiles`. Nothing is ever reverted, stashed or
+  discarded; if HEAD or the branch moved mid-episode, the snapshot is what
+  makes that detectable rather than silently diffed wrong.
+- **The checks still run; nothing gates on them.** The repo's own `check` runs
+  after the episode exactly as the push path runs it (mechanical, handler-run,
+  injectable in tests) and is REPORTED in the verdict — a failure gates
+  nothing because nothing is pushed, so unlike `checks_failed` the outcome
+  stays `applied_in_place` with the worker's own `nextAction`. The CI-path and
+  added-secret scans run on the change set (added lines of the tracked diff,
+  whole content of episode-added untracked files); a hit is a prominent
+  WARNING in the verdict, never a discard — the edits sit uncommitted in the
+  owner's own checkout and a human reviews them either way.
+- **Never auto-resumed.** A worktree episode resumes on boot by reopening its
+  persisted worktree; an in-place episode has neither worktree nor a durable
+  snapshot (process-local) to attribute a re-run against, so `recover()` marks
+  an interrupted in-place row `interrupted` (dispatch's persisted metadata is
+  the `{ path, workspace: "in-place" }` marker, which the store recognizes and
+  refuses to resume) and its partial edits sit in the owner's tree like any
+  other uncommitted work. Outcome on the success path: `applied_in_place` +
+  `changedFiles`; schema version bumped 2 → 3.
+
 ## Sensitive dispatch — opening secret-bearing repos at `investigate` only
 
 `dotfiles-private` and `homelab-private` carry live credentials and were
@@ -237,6 +290,15 @@ base already carried does not disable the tier in the repo that needs fixing;
 the corollary limit is that a secret merely *moved* between files is
 invisible. The CI-path check runs before the content scan, so the patch text
 is never materialized for a diff the structural check already refuses.
+
+The repo's own `check` runs after the refusal ladder and before the push. A
+failed format/lint/typecheck/test step pushes the branch without a PR
+(`checks_failed`); a failed `fallow` step alone does not. fallow audits whole
+touched files, so an episode that edits an already-complex file inherits its
+debt as a `fail` — the first real in-place-workspace dispatch (2026-09-15)
+ended `checks_failed` with every test, tsc and lint green for exactly that
+reason. Its findings go into the PR body and the verdict as advisory; the
+draft PR is the review gate.
 
 ## Brief hardening and salvage
 

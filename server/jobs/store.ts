@@ -695,6 +695,11 @@ export function updateJobWorktreeMeta(id: string, meta: Record<string, unknown>)
  * worktree but no session id yet is going to be recovered "fresh" (worktree discarded), so
  * protecting its directory from the sweep would just leave it for `discardWorktree` to remove
  * one call later instead of the sweep doing it now.
+ *
+ * An in-place row's metadata is the `{ path, workspace: "in-place" }` marker, and its `path`
+ * is the LIVE repo root — never a worktree-root directory, and never something the sweep
+ * should treat as its own. Excluded here so the sweep's contract ("every directory under the
+ * worktree root is abandoned or protected") stays about worktrees only.
  */
 export function protectedWorktreePaths(): string[] {
   const rows = db
@@ -707,7 +712,8 @@ export function protectedWorktreePaths(): string[] {
   const paths: string[] = [];
   for (const row of rows) {
     try {
-      const meta = JSON.parse(row.worktree_meta) as { path?: unknown };
+      const meta = JSON.parse(row.worktree_meta) as { path?: unknown; workspace?: unknown };
+      if (meta.workspace === "in-place") continue;
       if (typeof meta.path === "string") paths.push(meta.path);
     } catch {
       /* a malformed row protects nothing rather than throwing at boot */
@@ -822,15 +828,26 @@ function recover(): void {
       continue;
     }
     if ((row.tool as JobTool) === "dispatch") {
+      // An in-place episode is never auto-resumed: it has no worktree to reconstruct, its
+      // snapshot and per-repo lock were process-local, and a `--resume` against the live
+      // checkout could not attribute a re-run's edits against a snapshot nobody kept. Its
+      // persisted metadata is the marker object `{ path, workspace: "in-place" }` (see
+      // dispatch.ts's `onWorktreeReady`), recognized by the `workspace` key a real
+      // `DispatchWorktree` can never carry.
+      const metaIsInPlace =
+        row.worktree_meta !== null &&
+        (JSON.parse(row.worktree_meta) as { workspace?: unknown }).workspace === "in-place";
       const worktreePath =
         row.worktree_meta !== null
           ? ((JSON.parse(row.worktree_meta) as { path?: unknown }).path ?? null)
           : null;
-      const decision = dispatchRecoveryStatusFor(
-        row.attempts,
-        row.session_id !== null,
-        typeof worktreePath === "string" && existsSync(worktreePath),
-      );
+      const decision = metaIsInPlace
+        ? ("interrupted" as const)
+        : dispatchRecoveryStatusFor(
+            row.attempts,
+            row.session_id !== null,
+            typeof worktreePath === "string" && existsSync(worktreePath),
+          );
       if (decision === "interrupted") {
         db.run(
           "UPDATE jobs SET status = 'interrupted', error = 'HTTP server restarted while job was running', finished_at = ? WHERE id = ?",
