@@ -40,8 +40,8 @@ function sections(overrides: Partial<NarrativeSections> = {}): NarrativeSections
 
 function facts(overrides: Partial<NarrativeFacts> = {}): NarrativeFacts {
   return {
-    project: "meteo",
-    cwd: "/Users/jkrumm/SourceRoot/meteo",
+    project: "weatherorb",
+    cwd: "/Users/jkrumm/SourceRoot/weatherorb",
     since: null,
     sinceUsed: "2026-03-10T00:00:00.000Z",
     previousPage: null,
@@ -148,7 +148,7 @@ describe("clampWhatItIs", () => {
 
 describe("clampToWordBoundary", () => {
   test("text within the cap is returned untouched, no ellipsis", () => {
-    const text = "meteo blends forecast models into one product.";
+    const text = "weatherorb blends forecast models into one product.";
     expect(clampToWordBoundary(text, 160)).toBe(text);
   });
 
@@ -157,7 +157,7 @@ describe("clampToWordBoundary", () => {
   // one over the cap.
   test("cuts at the last word boundary and appends an ellipsis, never mid-word", () => {
     const text =
-      "meteo blends multiple weather and wave forecast models into one single product " +
+      "weatherorb blends multiple weather and wave forecast models into one single product " +
       "served from a tileserver on the home mini network";
     const out = clampToWordBoundary(text, 60);
     expect(out.length).toBeLessThanOrEqual(60);
@@ -175,7 +175,7 @@ describe("stripInventedLinks", () => {
   // `[[...]]` syntax would survive into the rendered page, which the vault lint flags as an
   // ERROR for a target page that doesn't exist.
   test("unwraps a bare [[wikilink]] to its target text", () => {
-    expect(stripInventedLinks("See [[meteo]] for details.")).toBe("See meteo for details.");
+    expect(stripInventedLinks("See [[weatherorb]] for details.")).toBe("See weatherorb for details.");
   });
 
   test("unwraps a [[target|display]] link to its display text", () => {
@@ -298,7 +298,7 @@ describe("buildNarrativePrompt", () => {
     const p = buildNarrativePrompt(
       SKILL,
       VOICE,
-      facts({ previousPage: "# meteo\n\nExisting page body." }),
+      facts({ previousPage: "# weatherorb\n\nExisting page body." }),
       NONCE,
     );
     expect(p).toContain("Existing page body.");
@@ -309,8 +309,8 @@ describe("buildNarrativePrompt", () => {
 
 describe("renderNarrativePage", () => {
   const base = {
-    project: "meteo",
-    cwd: "/Users/jkrumm/SourceRoot/meteo",
+    project: "weatherorb",
+    cwd: "/Users/jkrumm/SourceRoot/weatherorb",
     since: "2026-03-01T00:00:00.000Z" as string | null,
     timestamp: "2026-03-10",
   };
@@ -318,11 +318,11 @@ describe("renderNarrativePage", () => {
   test("frontmatter carries required + recommended fields", () => {
     const page = renderNarrativePage({ ...base, sections: sections() });
     expect(page).toMatch(/^---\n/);
-    expect(page).toContain('title: "meteo"');
+    expect(page).toContain('title: "weatherorb"');
     expect(page).toContain("type: project-narrative");
     expect(page).toContain("tags: [project, engineering, narrative]");
     expect(page).toContain("timestamp: 2026-03-10");
-    expect(page).toContain('repo: "meteo"');
+    expect(page).toContain('repo: "weatherorb"');
     expect(page).toContain("generated_by: sideclaw/narrative");
   });
 
@@ -347,7 +347,7 @@ describe("renderNarrativePage", () => {
 
   test("body contains whatItIs, Where it stands, and How it got here with dated bullets", () => {
     const page = renderNarrativePage({ ...base, sections: sections() });
-    expect(page).toContain("# meteo");
+    expect(page).toContain("# weatherorb");
     expect(page).toContain(
       "A weather service that aggregates forecasts for a handful of surf spots.",
     );

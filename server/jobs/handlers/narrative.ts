@@ -47,7 +47,7 @@ const DESCRIPTION_MAX_CHARS = 160;
 
 export const NARRATIVE_INPUT = z.object({
   cwd: z.string().describe("Absolute path to the target repo."),
-  project: z.string().describe('Vault page name for this project, e.g. "meteo".'),
+  project: z.string().describe('Vault page name for this project, e.g. "weatherorb".'),
   previousPage: z
     .string()
     .nullable()

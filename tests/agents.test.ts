@@ -487,13 +487,13 @@ describe("mergeAgents", () => {
     const projects = mergeAgents({
       herdrAgents: [],
       herdrWorkspaces: [],
-      claudeAgents: [claudeAgent({ cwd: "/Users/jkrumm/SourceRoot/meteo" })],
+      claudeAgents: [claudeAgent({ cwd: "/Users/jkrumm/SourceRoot/weatherorb" })],
       dispatchJobs: [],
       transcripts: new Map(),
       now: NOW,
       staleAfterMs: 24 * HOUR_MS,
     });
-    expect(projects[0]?.name).toBe("meteo");
+    expect(projects[0]?.name).toBe("weatherorb");
   });
 
   test("a dispatch job becomes its own entry, keyed separately from any sessionId", () => {
