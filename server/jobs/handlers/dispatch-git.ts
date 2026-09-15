@@ -41,6 +41,13 @@ import { appLogger as logger } from "../../logger.ts";
  *  the push step (rather than instructing the worker not to) is what makes it a bound. */
 const FORBIDDEN_PATH_RE = /^\.github\/(workflows|actions)\//;
 
+/** The changed files that land in the CI execution surface. Both refusal paths
+ *  (worktree push and in-place warning) run the same anchored filter over their
+ *  change set; the callers own the wording of what a hit means. */
+function forbiddenCiPaths(files: string[]): string[] {
+  return files.filter((f) => FORBIDDEN_PATH_RE.test(f));
+}
+
 const SECRETS_RUN = join(homedir(), ".local", "bin", "secrets-run");
 const GITHUB_TOKEN_REF = "op://mini/github/token";
 
@@ -1192,7 +1199,7 @@ export async function inPlaceChangedFiles(cwd: string, snap: InPlaceSnapshot): P
  *
  * The content scan covers the change set's ADDED lines only (patch against the snapshot
  * base, untracked files read whole), so pre-existing secret-shaped text in the repo is
- * not this episode's doing — same added-lines-only stance as `addedSecrets`.
+ * not this episode's doing — same added-lines-only stance as `addedLineSecrets`.
  */
 export async function inPlaceRefusalReason(
   cwd: string,
@@ -1200,7 +1207,7 @@ export async function inPlaceRefusalReason(
   changedFiles: string[],
 ): Promise<{ warnings: string[] } | null> {
   const warnings: string[] = [];
-  const forbidden = changedFiles.filter((f) => FORBIDDEN_PATH_RE.test(f));
+  const forbidden = forbiddenCiPaths(changedFiles);
   if (forbidden.length > 0) {
     warnings.push(
       `the episode edited the CI execution surface (${forbidden.join(", ")}) — review before committing`,
@@ -1208,11 +1215,6 @@ export async function inPlaceRefusalReason(
   }
 
   const base = snap.stashOid || snap.headOid;
-  const patch = await gitOrThrow(["diff", "--no-renames", "-U0", base, "--"], cwd);
-  const addedLines = patch
-    .split("\n")
-    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
-    .join("\n");
   // Untracked files the episode added are read whole: they have no base to diff against,
   // so every line in them is an added line.
   // Only files that are untracked NOW and were not before — a modified tracked file is already
@@ -1230,7 +1232,7 @@ export async function inPlaceRefusalReason(
       // covers everything tracked, and this is a warning path, not a gate.
     }
   }
-  const secrets = scanForSecrets(`${addedLines}\n${untrackedText}`);
+  const secrets = await addedLineSecrets(cwd, base, untrackedText);
   if (secrets.length > 0) {
     warnings.push(
       `the episode's added lines match ${secrets.join(", ")} — review before committing`,
@@ -1300,16 +1302,21 @@ export async function commitCount(wt: DispatchWorktree): Promise<number> {
  *
  * Checks short-circuit on the cheap structural scan (forbidden paths) before the content
  * scan, which reads the whole patch into memory.
+ *
+ * This is the handler's scan and not the repo's `pre-commit` hook — which is also why the
+ * commit is made with `--no-verify`. A hook is repo-controlled code, and an implement
+ * episode may be running in a repo whose hook it has just rewritten; a check the audited
+ * party supplies is not a check.
  */
 export async function diffRefusalReason(
   wt: DispatchWorktree,
   diff: DiffSummary,
 ): Promise<string | null> {
-  const forbidden = diff.files.filter((f) => FORBIDDEN_PATH_RE.test(f));
+  const forbidden = forbiddenCiPaths(diff.files);
   if (forbidden.length > 0) {
     return `the change touches the CI execution surface (${forbidden.join(", ")}), which a dispatched episode may never modify`;
   }
-  const secrets = await addedSecrets(wt);
+  const secrets = await addedLineSecrets(wt.path, `${wt.base}...HEAD`);
   if (secrets.length > 0) {
     return `the change adds text matching ${secrets.join(", ")} — a dispatched episode must never commit a credential or an internal address to a branch that becomes a public, permanent artifact`;
   }
@@ -1317,7 +1324,7 @@ export async function diffRefusalReason(
 }
 
 /**
- * Secret-shaped strings the episode ADDED, by pattern name.
+ * Secret-shaped strings among a change set's ADDED lines, by pattern name.
  *
  * The artifact scan (`assertNoSecrets`) covers the issue and PR *bodies*. It says nothing
  * about the code, and the code is the durable half: a branch pushed to a public repo is in
@@ -1325,23 +1332,22 @@ export async function diffRefusalReason(
  * it cannot be edited away. An episode that "fixes" a broken config by inlining the value it
  * read is the ordinary, non-adversarial way this happens.
  *
- * It is the handler's scan and not the repo's `pre-commit` hook — which is also why the
- * commit is made with `--no-verify`. A hook is repo-controlled code, and an implement
- * episode may be running in a repo whose hook it has just rewritten; a check the audited
- * party supplies is not a check.
- *
- * ADDED lines only. A credential already committed in this repo is not this episode's doing,
+ * `base` is whatever diff range the caller's path uses — the worktree path scans
+ * `${base}...HEAD` (committed work), the in-place path scans a snapshot base (uncommitted
+ * edits). `extraText` is appended to the added lines before scanning (the in-place path
+ * adds the whole content of newly untracked files, which have no base to diff against).
+ * Added lines only: a credential already committed in this repo is not this episode's doing,
  * and refusing on it would disable the tier in precisely the repo that needs a fix. The
  * corollary is a real limit: a secret this episode merely MOVES between files is invisible
  * here, because the addition matches something the base already contained.
  */
-async function addedSecrets(wt: DispatchWorktree): Promise<string[]> {
-  const patch = await gitOrThrow(["diff", "--no-renames", "-U0", `${wt.base}...HEAD`], wt.path);
+async function addedLineSecrets(cwd: string, base: string, extraText?: string): Promise<string[]> {
+  const patch = await gitOrThrow(["diff", "--no-renames", "-U0", base, "--"], cwd);
   const added = patch
     .split("\n")
     .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
     .join("\n");
-  return scanForSecrets(added);
+  return scanForSecrets(extraText === undefined ? added : `${added}\n${extraText}`);
 }
 
 /**
