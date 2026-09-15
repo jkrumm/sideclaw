@@ -18,7 +18,7 @@ WHEN NOT TO CALL: to mutate infrastructure. No tier restarts, redeploys or recon
 TIERS (pick the least powerful one that produces the artifact you actually need):
   investigate  read-only session → a verdict. Default. Cannot lose anything.
   author       read-only session → a verdict + a filed GitHub issue.
-  implement    WRITE session in an isolated git worktree → a verdict + a pushed branch + a DRAFT pull request. Never merges. Never pushes to a default branch, in any repo, including direct-to-master ones. Refuses to touch .github/workflows|actions, and refuses a diff over 40 files / 2000 lines.
+  implement    WRITE session in an isolated git worktree → a verdict + a pushed branch + a DRAFT pull request. Never merges. Never pushes to a default branch, in any repo, including direct-to-master ones. Refuses to touch .github/workflows|actions, and refuses a diff that adds credential-shaped text.
 
 The artifact is created by the tool, not by the session — the session holds no credentials, which is why an untrusted brief cannot reach GitHub through it.
 
@@ -27,7 +27,7 @@ SENSITIVE: pass \`sensitive: true\` (default false) to run inside a secret-beari
 ASYNC: returns { jobId }. Then call job_wait({ jobId }) to block until it finishes and read the result, or job_status for a one-shot poll. An implement episode can run 30 minutes.
 OUTPUT: \`summary\` (one line, read this first), \`verdict\`, \`confidence\` (high | medium | low), \`evidence[]\`, \`nextAction\` (none | issue | implement | human), \`artifactUrl\` (the issue or PR, absent if the episode concluded none was warranted), \`branch\`, and \`degraded\` — true only when the tool itself failed to produce a structured verdict, so treat that as "retry me", not as a finding about the repo.
 CWD: absolute path of the repo to work in — not necessarily this session's CWD. It must be a repo directly under a configured dispatch root.
-POLICY: a repo/tier allowlist is enforced before anything runs, so a submission can come back \`dispatch refused: ...\` instead of a verdict — either the repo sits outside every dispatch root, or the tier exceeds that repo's ceiling. Secret-bearing repos (dotfiles-private, homelab-private) and sideclaw/warden themselves are capped at 'investigate'; \`sensitive\` is derived from the same policy, so omitting the flag does not opt a marked repo out of the outbound scan. \`GET /api/dispatch-policy\` is the effective table.
+POLICY: a repo/tier allowlist is enforced before anything runs, so a submission can come back \`dispatch refused: ...\` instead of a verdict — either the repo sits outside every dispatch root, or the tier exceeds that repo's ceiling. Secret-bearing repos (dotfiles-private, homelab-private) are capped at 'investigate'; \`sensitive\` is derived from the same policy, so omitting the flag does not opt a marked repo out of the outbound scan. \`GET /api/dispatch-policy\` is the effective table.
 MODEL: ${describeRoute(routeFor("dispatch"))}; per-job model param overrides it — see GET /api/routing.`,
   });
 }

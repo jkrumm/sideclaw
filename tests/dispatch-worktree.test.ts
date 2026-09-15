@@ -708,19 +708,14 @@ describe("diffRefusalReason", () => {
     expect(await refusal(wt)).toBeNull();
   });
 
-  test("refuses above the 40-file ceiling and allows at it", async () => {
-    const at = await createWorktree(fx.repo, key(), "at-ceiling", "master");
-    for (let i = 0; i < 40; i++) fx.write(`f${i}.txt`, `${i}\n`, at.path);
-    await commitPendingWork(at, "40 files");
-    expect(await refusal(at)).toBeNull();
-
-    const over = await createWorktree(fx.repo, key(), "over-ceiling", "master");
-    for (let i = 0; i < 41; i++) fx.write(`f${i}.txt`, `${i}\n`, over.path);
-    await commitPendingWork(over, "41 files");
-    expect(await refusal(over)).toMatch(/touches 41 files, over the 40-file ceiling/);
+  test("does not refuse a diff touching many files", async () => {
+    const wt = await createWorktree(fx.repo, key(), "many-files", "master");
+    for (let i = 0; i < 41; i++) fx.write(`f${i}.txt`, `${i}\n`, wt.path);
+    await commitPendingWork(wt, "41 files");
+    expect(await refusal(wt)).toBeNull();
   });
 
-  test("refuses above the 2000-line ceiling", async () => {
+  test("does not refuse a diff with many changed lines", async () => {
     const wt = await createWorktree(fx.repo, key(), "huge", "master");
     fx.write(
       "big.txt",
@@ -728,7 +723,7 @@ describe("diffRefusalReason", () => {
       wt.path,
     );
     await commitPendingWork(wt, "a wall of text");
-    expect(await refusal(wt)).toMatch(/is 2001 lines, over the 2000-line ceiling/);
+    expect(await refusal(wt)).toBeNull();
   });
 
   test("refuses a diff that ADDS a credential", async () => {
@@ -751,15 +746,15 @@ describe("diffRefusalReason", () => {
     expect(await refusal(wt)).toBeNull();
   });
 
-  test("checks cheapest-first: the CI path beats the file ceiling", async () => {
+  test("checks cheapest-first: the CI path beats the content scan", async () => {
     const wt = await createWorktree(fx.repo, key(), "both", "master");
-    for (let i = 0; i < 41; i++) fx.write(`f${i}.txt`, `${i}\n`, wt.path);
     fx.write(".github/workflows/ci.yml", "on: push\n", wt.path);
+    fx.write("leak.txt", "op://mini/github/token\n", wt.path);
     await commitPendingWork(wt, "everything at once");
     expect(await refusal(wt)).toMatch(/CI execution surface/);
   });
 
-  test("checks cheapest-first: the size ceiling beats the content scan", async () => {
+  test("still catches an added secret in a large diff", async () => {
     const wt = await createWorktree(fx.repo, key(), "big-and-leaky", "master");
     fx.write(
       "big.txt",
@@ -768,9 +763,7 @@ describe("diffRefusalReason", () => {
     );
     fx.write("leak.txt", "op://mini/github/token\n", wt.path);
     await commitPendingWork(wt, "large and leaky");
-    // The content scan reads the whole patch into memory; it must not run for a diff the
-    // size ceiling is about to reject anyway.
-    expect(await refusal(wt)).toMatch(/over the 2000-line ceiling/);
+    expect(await refusal(wt)).toMatch(/adds text matching 1Password reference/);
   });
 });
 

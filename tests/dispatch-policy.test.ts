@@ -64,10 +64,10 @@ describe("resolveDispatchTarget — accepts within ceiling", () => {
     expect(r).toEqual({ ok: true, repo: "hermes-agent", root: ROOT, sensitive: false });
   });
 
-  test("sideclaw / warden at investigate — the one tier their pinned ceiling allows", () => {
-    for (const repo of ["sideclaw", "warden"]) {
+  test("sideclaw / warden / dotfiles at implement — no longer pinned, the permissive default applies", () => {
+    for (const repo of ["sideclaw", "warden", "dotfiles"]) {
       const r = resolveDispatchTarget(
-        { cwd: join(ROOT, repo), tier: "investigate" },
+        { cwd: join(ROOT, repo), tier: "implement" },
         DEFAULT_POLICY,
       );
       expect(r).toEqual({ ok: true, repo, root: ROOT, sensitive: false });
@@ -91,15 +91,6 @@ describe("resolveDispatchTarget — refuses on ceiling", () => {
     );
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toContain("exceeds the ceiling 'investigate'");
-  });
-
-  test("dotfiles at author", () => {
-    const r = resolveDispatchTarget(
-      { cwd: join(ROOT, "dotfiles"), tier: "author" },
-      DEFAULT_POLICY,
-    );
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("dotfiles");
   });
 
   test("brain at implement", () => {
@@ -135,19 +126,6 @@ describe("resolveDispatchTarget — refuses on ceiling", () => {
     });
   });
 
-  test("sideclaw at implement and at author", () => {
-    for (const tier of ["implement", "author"] as const) {
-      const r = resolveDispatchTarget({ cwd: join(ROOT, "sideclaw"), tier }, DEFAULT_POLICY);
-      expect(r.ok).toBe(false);
-    }
-  });
-
-  test("warden at implement and at author", () => {
-    for (const tier of ["implement", "author"] as const) {
-      const r = resolveDispatchTarget({ cwd: join(ROOT, "warden"), tier }, DEFAULT_POLICY);
-      expect(r.ok).toBe(false);
-    }
-  });
 });
 
 describe("resolveDispatchTarget — path shape", () => {
@@ -258,30 +236,28 @@ describe("buildDispatchPolicy env overrides — ceilings", () => {
 
   test("raising a ceiling is refused with a reason, default stays", () => {
     const { rules, overrides } = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_CEILINGS: "dotfiles:implement",
+      SIDECLAW_DISPATCH_CEILINGS: "hermes-agent:implement",
     });
-    expect(rules.dotfiles).toEqual({ ceiling: "investigate", sensitive: false });
+    expect(rules["hermes-agent"]).toEqual({ ceiling: "investigate", sensitive: false });
     expect(overrides).toHaveLength(1);
     expect(overrides[0]?.applied).toBe(false);
     expect(overrides[0]?.reason).toContain("does not lower");
   });
 
-  test("naming sideclaw is refused, whatever the value", () => {
+  test("narrowing sideclaw's ceiling via env is applied — no longer pinned", () => {
     const { rules, overrides } = buildDispatchPolicy({
       SIDECLAW_DISPATCH_CEILINGS: "sideclaw:investigate",
     });
     expect(rules.sideclaw).toEqual({ ceiling: "investigate", sensitive: false });
-    expect(overrides[0]?.applied).toBe(false);
-    expect(overrides[0]?.reason).toContain("pinned");
+    expect(overrides[0]?.applied).toBe(true);
   });
 
-  test("naming warden is refused, whatever the value", () => {
+  test("narrowing warden's ceiling via env is applied — no longer pinned", () => {
     const { rules, overrides } = buildDispatchPolicy({
       SIDECLAW_DISPATCH_CEILINGS: "warden:author",
     });
-    expect(rules.warden).toEqual({ ceiling: "investigate", sensitive: false });
-    expect(overrides[0]?.applied).toBe(false);
-    expect(overrides[0]?.reason).toContain("pinned");
+    expect(rules.warden).toEqual({ ceiling: "author", sensitive: false });
+    expect(overrides[0]?.applied).toBe(true);
   });
 
   test("an unknown tier in the ceiling string is refused", () => {
@@ -314,11 +290,12 @@ describe("buildDispatchPolicy env overrides — sensitive", () => {
     ]);
   });
 
-  test("naming a pinned repo is refused — the pinned merge would silently discard it anyway", () => {
+  test("marking sideclaw sensitive is applied — no longer pinned", () => {
     const { rules, overrides } = buildDispatchPolicy({ SIDECLAW_DISPATCH_SENSITIVE: "sideclaw" });
-    expect(rules.sideclaw).toEqual({ ceiling: "investigate", sensitive: false });
-    expect(overrides[0]?.applied).toBe(false);
-    expect(overrides[0]?.reason).toContain("pinned");
+    expect(rules.sideclaw).toEqual({ ceiling: "investigate", sensitive: true });
+    expect(overrides).toEqual([
+      { key: "SIDECLAW_DISPATCH_SENSITIVE", value: "sideclaw", applied: true },
+    ]);
   });
 });
 
@@ -476,12 +453,14 @@ describe("an env override is normalized, not taken literally", () => {
     expect(r.ok).toBe(false);
   });
 
-  test("a pinned repo named in mixed case is still refused", () => {
+  test("a mixed-case sideclaw ceiling override normalizes and is refused only for raising it", () => {
+    // sideclaw's default ceiling is already `implement` (DEFAULT_RULE, no longer pinned), so
+    // naming it at `implement` is a no-op raise, refused on that basis rather than a pin.
     const policy = buildDispatchPolicy({ SIDECLAW_DISPATCH_CEILINGS: "SideClaw:implement" });
     const o = policy.overrides.find((x) => x.value === "SideClaw:implement");
     expect(o?.applied).toBe(false);
-    expect(o?.reason).toContain("pinned");
-    expect(policy.rules.sideclaw).toEqual({ ceiling: "investigate", sensitive: false });
+    expect(o?.reason).toContain("does not lower");
+    expect(policy.rules.sideclaw).toBeUndefined();
   });
 });
 
@@ -514,14 +493,6 @@ describe("an override named after a prototype key cannot reshape the table", () 
     });
   }
 
-  test("the pinned entries survive every one of those writes", () => {
-    const policy = buildDispatchPolicy({
-      SIDECLAW_DISPATCH_CEILINGS: "__proto__:investigate",
-      SIDECLAW_DISPATCH_SENSITIVE: "constructor",
-    });
-    expect(policy.rules.sideclaw).toEqual({ ceiling: "investigate", sensitive: false });
-    expect(policy.rules.warden).toEqual({ ceiling: "investigate", sensitive: false });
-  });
 });
 
 describe("marking a repo sensitive clamps its ceiling", () => {
@@ -563,14 +534,14 @@ describe("POST /api/jobs refuses at submit, before a job row exists", () => {
     expect(listJobs().length).toBe(before);
   });
 
-  test("a tier above a pinned repo's ceiling is a 400 and creates nothing", async () => {
+  test("a tier above a ruled repo's ceiling is a 400 and creates nothing", async () => {
     // Against the SINGLETON policy, whose roots are the temp root tests/setup.ts seeds — so
-    // the pinned repo has to exist under THAT root, not under the real ~/SourceRoot, or this
+    // the ruled repo has to exist under THAT root, not under the real ~/SourceRoot, or this
     // would refuse for being outside every root and never reach the ceiling check at all.
     const testRoot = (process.env.SIDECLAW_DISPATCH_ROOTS ?? "").split(",")[0]?.trim() ?? "";
     expect(testRoot).not.toBe("");
-    const pinned = join(testRoot, "sideclaw");
-    mkdirSync(pinned, { recursive: true });
+    const ruled = join(testRoot, "hermes-agent");
+    mkdirSync(ruled, { recursive: true });
     const before = listJobs().length;
     const res = await jobsRoutes.handle(
       new Request("http://localhost/api/jobs", {
@@ -578,7 +549,7 @@ describe("POST /api/jobs refuses at submit, before a job row exists", () => {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           tool: "dispatch",
-          params: { cwd: pinned, tier: "implement", brief: "x" },
+          params: { cwd: ruled, tier: "implement", brief: "x" },
         }),
       }),
     );
@@ -586,7 +557,7 @@ describe("POST /api/jobs refuses at submit, before a job row exists", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).toContain("exceeds the ceiling 'investigate'");
     expect(listJobs().length).toBe(before);
-    rmSync(pinned, { recursive: true, force: true });
+    rmSync(ruled, { recursive: true, force: true });
   });
 
   test("a non-string cwd falls through to the handler's own validation, unrefused here", async () => {
@@ -620,8 +591,8 @@ describe("GET /api/dispatch-policy", () => {
     expect(body.ok).toBe(true);
     expect(Array.isArray(body.roots)).toBe(true);
     expect(Array.isArray(body.overrides)).toBe(true);
-    // The two pins are the whole reason a reader checks this endpoint.
-    expect(body.rules.sideclaw).toEqual({ ceiling: "investigate", sensitive: false });
-    expect(body.rules.warden).toEqual({ ceiling: "investigate", sensitive: false });
+    // The sensitive, secret-bearing repos are the whole reason a reader checks this endpoint.
+    expect(body.rules["dotfiles-private"]).toEqual({ ceiling: "investigate", sensitive: true });
+    expect(body.rules["homelab-private"]).toEqual({ ceiling: "investigate", sensitive: true });
   });
 });

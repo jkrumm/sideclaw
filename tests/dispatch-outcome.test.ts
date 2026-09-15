@@ -98,12 +98,9 @@ describe("depositBranch outcomes", () => {
 
   test("diff_refused — the diff trips a bound and the branch is discarded", async () => {
     const wt = await createWorktree(fx.repo, key(), "oversized", "master");
-    // One file over the per-run ceiling (40 files) is the cheapest bound to trip without
-    // building a huge diff.
-    for (let i = 0; i < 41; i++) {
-      fx.write(`generated/file-${i}.txt`, `content ${i}\n`, wt.path);
-    }
-    await commitPendingWork(wt, "too many files");
+    // A workflow-file change is the cheapest bound to trip.
+    fx.write(".github/workflows/ci.yml", "on: push\n", wt.path);
+    await commitPendingWork(wt, "smuggle a workflow");
     const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
       runCheckFn: passingCheck,
     });

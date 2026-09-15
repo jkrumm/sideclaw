@@ -287,9 +287,11 @@ boundary for a sensitive episode, not the permission profile.
 - **Repo policy** (`server/lib/dispatch-policy.ts`, `GET /api/dispatch-policy`)
   gates every submission before it costs anything: `cwd` must resolve to a
   repo directly under a configured root, at or under that repo's tier
-  ceiling. `sideclaw`/`warden` are pinned to `investigate` and cannot be
-  overridden by env; `SIDECLAW_DISPATCH_CEILINGS`/`_SENSITIVE` can only
-  narrow, never widen, any other repo's rule (marking a repo sensitive
+  ceiling. Only `dotfiles-private`/`homelab-private` (sensitive) and
+  `brain`/`hermes-agent` default below `implement`; every other repo,
+  including `sideclaw`, `warden` and `dotfiles` themselves, is
+  `implement`-reachable by default. `SIDECLAW_DISPATCH_CEILINGS`/`_SENSITIVE`
+  can only narrow, never widen, any repo's rule (marking a repo sensitive
   clamps its ceiling with it). **`SIDECLAW_DISPATCH_ROOTS` is the exception
   — it REPLACES the roots rather than narrowing them**, so a new tree there
   is dispatch-reachable at the permissive default. Checked in both
@@ -309,9 +311,9 @@ boundary for a sensitive episode, not the permission profile.
   `.claude/settings{,.local}.json` are stripped from the throwaway worktree
   before the episode and restored **from the pinned base** after — an
   audited repo's hooks/`env` must never execute inside the episode.
-- `implement` refuses `.github/workflows` diffs, >40 files/2000 lines, or
-  added lines matching `SECRET_PATTERNS`; commits `--no-verify`; opens a
-  **draft** PR from the API's `default_branch`.
+- `implement` refuses `.github/workflows` diffs and added lines matching
+  `SECRET_PATTERNS`; commits `--no-verify`; opens a **draft** PR from the
+  API's `default_branch`.
 - The brief is untrusted and fenced with per-run nonce delimiters, re-asserted
   after the data block.
 - Salvage retries only a serialization failure (fresh session, no `--resume`)

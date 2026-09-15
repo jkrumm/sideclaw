@@ -224,20 +224,19 @@ both were tested and neither holds.
 
 Worktree cut from the API's authoritative `default_branch` (not the stale
 local `origin/HEAD`); refuses any diff touching `.github/workflows|actions`;
-refuses over 40 files or 2000 lines; refuses a diff whose **added lines**
-match `SECRET_PATTERNS`; PR opened as a **draft**. A refused diff is discarded
-and the verdict says so — it is a successful run with no artifact, not a
-failure. The secret check is on the diff and not just on the PR body
-(`assertNoSecrets`) because the code is the durable half: a pushed branch is
-permanent and unlike a description cannot be edited away. It is the handler's
-scan and never the repo's `pre-commit` hook — which is also why the commit is
-`--no-verify` — since an implement episode may be running in a repo whose
-hook it just wrote, and a check the audited party supplies is not a check.
-Added lines only, so a credential the base already carried does not disable
-the tier in the repo that needs fixing; the corollary limit is that a secret
-merely *moved* between files is invisible. Refusal checks are ordered
-cheapest-first so the patch text is never materialized for a diff the size
-ceiling rejects.
+refuses a diff whose **added lines** match `SECRET_PATTERNS`; PR opened as a
+**draft**. A refused diff is discarded and the verdict says so — it is a
+successful run with no artifact, not a failure. The secret check is on the
+diff and not just on the PR body (`assertNoSecrets`) because the code is the
+durable half: a pushed branch is permanent and unlike a description cannot be
+edited away. It is the handler's scan and never the repo's `pre-commit`
+hook — which is also why the commit is `--no-verify` — since an implement
+episode may be running in a repo whose hook it just wrote, and a check the
+audited party supplies is not a check. Added lines only, so a credential the
+base already carried does not disable the tier in the repo that needs fixing;
+the corollary limit is that a secret merely *moved* between files is
+invisible. The CI-path check runs before the content scan, so the patch text
+is never materialized for a diff the structural check already refuses.
 
 ## Brief hardening and salvage
 

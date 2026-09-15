@@ -61,22 +61,9 @@ function tierRank(tier: string): number {
   return TIER_RANK[tier as DispatchTier] ?? 99;
 }
 
-/** The rule for any repo with no entry in `DEFAULT_RULES`/`PINNED_RULES` — full reach,
- *  policy-neutral. Named so a caller can see the fallback without re-deriving it. */
+/** The rule for any repo with no entry in `DEFAULT_RULES` — full reach, policy-neutral.
+ *  Named so a caller can see the fallback without re-deriving it. */
 export const DEFAULT_RULE: RepoRule = { ceiling: "implement", sensitive: false };
-
-// Un-overridable. `sideclaw` is the executor itself and `warden` is the control plane that
-// drives it — letting either be `implement`-reachable through its own dispatch surface closes
-// a loop with no outside observer left to catch a bad episode. Env can LOWER a ceiling
-// (SIDECLAW_DISPATCH_CEILINGS) or ADD sensitivity (SIDECLAW_DISPATCH_SENSITIVE) for any other
-// repo, but never for these two: an attempt to raise, remove, or otherwise touch a pinned
-// entry is refused and logged, never applied — see applyCeilingOverrides/
-// applySensitiveOverrides below, and note PINNED_RULES is merged into the table LAST in
-// buildDispatchPolicy so it always wins regardless of what ran before it.
-const PINNED_RULES: Record<string, RepoRule> = Object.freeze({
-  sideclaw: { ceiling: "investigate", sensitive: false },
-  warden: { ceiling: "investigate", sensitive: false },
-});
 
 // Overridable, but only in the stricter direction. Mirrors
 // ~/SourceRoot/hermes-agent/config/dispatch-repos.json, which is the policy this re-asserts
@@ -84,7 +71,6 @@ const PINNED_RULES: Record<string, RepoRule> = Object.freeze({
 const DEFAULT_RULES: Record<string, RepoRule> = Object.freeze({
   "dotfiles-private": { ceiling: "investigate", sensitive: true },
   "homelab-private": { ceiling: "investigate", sensitive: true },
-  dotfiles: { ceiling: "investigate", sensitive: false },
   brain: { ceiling: "investigate", sensitive: false },
   "hermes-agent": { ceiling: "investigate", sensitive: false },
 });
@@ -144,9 +130,8 @@ function buildRoots(
 
 /** `SIDECLAW_DISPATCH_CEILINGS=repo:tier,repo:tier` — applied ONLY when it lowers the
  *  effective ceiling for that repo. Raising (or leaving it unchanged) is refused and logged;
- *  so is any entry naming a `PINNED_RULES` repo, or an unknown tier name. This is the whole
- *  security value of the env surface — an override can only ever narrow what dispatch is
- *  allowed to do to a repo, never widen it. */
+ *  so is an unknown tier name. This is the whole security value of the env surface — an
+ *  override can only ever narrow what dispatch is allowed to do to a repo, never widen it. */
 function applyCeilingOverrides(
   env: Record<string, string | undefined>,
   rules: Record<string, RepoRule>,
@@ -171,18 +156,8 @@ function applyCeilingOverrides(
       });
       continue;
     }
-    // Normalized and own-property-checked for the same two reasons `lookupRule` is — the
-    // table is keyed lowercase, and `in` walks the prototype chain.
+    // Normalized for the same reason `lookupRule` is — the table is keyed lowercase.
     const repo = repoRaw.toLowerCase();
-    if (Object.hasOwn(PINNED_RULES, repo)) {
-      overrides.push({
-        key,
-        value: entry,
-        applied: false,
-        reason: `'${repoRaw}' ceiling is pinned and cannot be overridden by env`,
-      });
-      continue;
-    }
     if (tierRank(tierRaw) === 99) {
       overrides.push({ key, value: entry, applied: false, reason: `unknown tier '${tierRaw}'` });
       continue;
@@ -204,10 +179,7 @@ function applyCeilingOverrides(
 }
 
 /** `SIDECLAW_DISPATCH_SENSITIVE=repo,repo` — adds only. There is no syntax to un-mark a repo
- *  sensitive; an entry naming an already-sensitive repo is a no-op recorded as applied. An
- *  entry naming a `PINNED_RULES` repo is refused, same reasoning as the ceiling override:
- *  PINNED_RULES is merged in last regardless, so silently accepting it here would report
- *  `applied: true` for a change the merge below immediately discards. */
+ *  sensitive; an entry naming an already-sensitive repo is a no-op recorded as applied. */
 function applySensitiveOverrides(
   env: Record<string, string | undefined>,
   rules: Record<string, RepoRule>,
@@ -223,15 +195,6 @@ function applySensitiveOverrides(
     .filter((s) => s.length > 0);
   for (const entry of entries) {
     const repo = entry.toLowerCase();
-    if (Object.hasOwn(PINNED_RULES, repo)) {
-      overrides.push({
-        key,
-        value: entry,
-        applied: false,
-        reason: `'${entry}' is pinned and its sensitivity cannot be overridden by env`,
-      });
-      continue;
-    }
     const current = lookupRule(rules, repo);
     // Marking a repo sensitive CLAMPS its ceiling to `investigate` rather than leaving the two
     // to be set independently. `sensitive` already means "investigate only" everywhere else in
@@ -268,11 +231,6 @@ export function buildDispatchPolicy(env: Record<string, string | undefined>): Di
   }
   applyCeilingOverrides(env, rules, overrides);
   applySensitiveOverrides(env, rules, overrides);
-  // Merged in LAST, unconditionally — so a pinned entry always wins regardless of what ran
-  // above, and an env attempt to touch one (already refused above) can never have applied.
-  for (const [repo, rule] of Object.entries(PINNED_RULES)) {
-    rules[repo] = { ...rule };
-  }
 
   return { roots, rules, overrides };
 }

@@ -41,12 +41,6 @@ import { appLogger as logger } from "../../logger.ts";
  *  the push step (rather than instructing the worker not to) is what makes it a bound. */
 const FORBIDDEN_PATH_RE = /^\.github\/(workflows|actions)\//;
 
-/** Review-burden ceilings. An unattended episode that rewrites half a repo produces a PR
- *  nobody will read, which is indistinguishable from no PR at all — except that it also
- *  cost Max quota. These are deliberately low: a dispatch is a bounded change. */
-const MAX_CHANGED_FILES = 40;
-const MAX_CHANGED_LINES = 2000;
-
 const SECRETS_RUN = join(homedir(), ".local", "bin", "secrets-run");
 const GITHUB_TOKEN_REF = "op://mini/github/token";
 
@@ -585,8 +579,8 @@ export async function createReadWorktree(
 // ── Untracked-file materialization (read tiers only) ──────────────────────────
 
 /** Total-bytes and file-count ceilings on the untracked-content copy. Purely a cost bound —
- *  unlike the diff-review ceilings above, there is no review burden here to protect, just the
- *  time and disk this copy is allowed to spend before it stops being "near-free". */
+ *  there is no review burden here to protect, just the time and disk this copy is allowed to
+ *  spend before it stops being "near-free". */
 const MAX_COPY_BYTES = 100 * 1024 * 1024;
 const MAX_COPY_FILES = 5_000;
 
@@ -1108,8 +1102,8 @@ export interface DiffSummary {
  * `src/thing.ts => .github/workflows/evil.yml`. `FORBIDDEN_PATH_RE` is anchored at the start
  * of the string, so it does not match that form — meaning `git mv anything .github/workflows/x.yml`
  * walked straight through the CI-path bound. Measured, not theorised. Turning rename
- * detection off yields the two real paths (and honest per-file line counts, which also makes
- * the size ceilings accurate rather than reporting a rename as 0 changed lines).
+ * detection off yields the two real paths (and honest per-file line counts in the reported
+ * verdict, rather than a rename showing up as 0 changed lines).
  */
 export async function summarizeDiff(wt: DispatchWorktree): Promise<DiffSummary> {
   const out = await gitOrThrow(["diff", "--no-renames", "--numstat", `${wt.base}...HEAD`], wt.path);
@@ -1150,9 +1144,8 @@ export async function commitCount(wt: DispatchWorktree): Promise<number> {
  * Why this diff may not be pushed, or null if it may. Separated from the push so the handler
  * can report the reason in the verdict instead of failing the whole episode.
  *
- * Checks are ordered cheapest-first and short-circuit, which is not merely tidy: the content
- * scan reads the whole patch into memory, and it must not run for a diff the size ceiling is
- * about to reject anyway.
+ * Checks short-circuit on the cheap structural scan (forbidden paths) before the content
+ * scan, which reads the whole patch into memory.
  */
 export async function diffRefusalReason(
   wt: DispatchWorktree,
@@ -1161,13 +1154,6 @@ export async function diffRefusalReason(
   const forbidden = diff.files.filter((f) => FORBIDDEN_PATH_RE.test(f));
   if (forbidden.length > 0) {
     return `the change touches the CI execution surface (${forbidden.join(", ")}), which a dispatched episode may never modify`;
-  }
-  if (diff.files.length > MAX_CHANGED_FILES) {
-    return `the change touches ${diff.files.length} files, over the ${MAX_CHANGED_FILES}-file ceiling for an unattended episode`;
-  }
-  const lines = diff.insertions + diff.deletions;
-  if (lines > MAX_CHANGED_LINES) {
-    return `the change is ${lines} lines, over the ${MAX_CHANGED_LINES}-line ceiling for an unattended episode`;
   }
   const secrets = await addedSecrets(wt);
   if (secrets.length > 0) {
