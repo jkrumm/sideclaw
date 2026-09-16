@@ -178,7 +178,7 @@ describe("fetch-ref cleanup on a throw before the worktree exists", () => {
     await git(["checkout", "-q", "master"], fx.repo);
 
     await expect(runReview({ cwd: fx.repo, branch: "feature-y" })).rejects.toThrow(
-      /not a GitHub remote/,
+      /neither a GitHub nor a GitLab remote/,
     );
 
     const leftover = await git(

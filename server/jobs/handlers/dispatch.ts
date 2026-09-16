@@ -580,11 +580,11 @@ export function assertSensitiveTierAllowed(tier: DispatchTier, sensitive: boolea
   }
 }
 
-/** `sensitive` episodes must never reach a GitHub call path. `assertSensitiveTierAllowed`
- *  already refuses any non-investigate tier before a worktree exists, so in normal operation
- *  this never fires — it exists so a future change to `TIERS` or the switch in `runDispatch`
- *  cannot silently reopen `resolveRepoIdentity`/`openIssue`/`openPullRequest` for a sensitive
- *  episode without a loud, checked failure. */
+/** `sensitive` episodes must never reach an artifact call path (GitHub or GitLab).
+ * `assertSensitiveTierAllowed` already refuses any non-investigate tier before a worktree
+ * exists, so in normal operation this never fires — it exists so a future change to `TIERS`
+ * or the switch in `runDispatch` cannot silently reopen `resolveRepoIdentity`/`openIssue`/
+ * `openPullRequest` for a sensitive episode without a loud, checked failure. */
 function assertNoGithubForSensitive(sensitive: boolean, where: string): void {
   if (sensitive) {
     throw new Error(`internal: a sensitive dispatch must never reach ${where}`);
@@ -870,10 +870,11 @@ export async function runDispatch(
   const note = (lastAction: string): void =>
     onProgress?.({ turns: turnOffset, lastAction, lastActivityAt: Date.now() });
 
-  // Tiers that produce an artifact need the GitHub identity before the session runs — an
-  // implement episode must not spend 30 minutes only to discover its remote is not on
-  // GitHub, and the worktree has to be cut from the authoritative default branch. In-place
-  // publishes nothing, so it needs no identity and no GitHub call at all.
+  // Tiers that produce an artifact need the forge identity (GitHub or GitLab, resolved by
+  // the remote URL's host) before the session runs — an implement episode must not spend 30
+  // minutes only to discover its remote is on neither, and the worktree has to be cut from
+  // the authoritative default branch. In-place publishes nothing, so it needs no identity
+  // and no forge call at all.
   let identity: RepoIdentity | undefined;
   if (tier !== "investigate" && !inPlace) {
     assertNoGithubForSensitive(effectiveSensitive, "resolveRepoIdentity");

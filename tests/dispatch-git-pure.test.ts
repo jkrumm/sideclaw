@@ -1,6 +1,6 @@
 // Pure-function bounds of the dispatch tool: the secret scanner that decides whether text
 // may become a durable public artifact, the slug that becomes a git ref name, and the remote
-// parser that decides which GitHub repo an episode is allowed to talk to.
+// parsers that decide which forge (GitHub or GitLab) an episode is allowed to talk to.
 //
 // Shape follows hermes-agent/tests/*.py — attack shapes must be caught, real material must
 // pass untouched, and both directions are fuzzed. The second half matters as much as the
@@ -12,6 +12,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   parseGithubRemote,
+  parseGitlabRemote,
+  parseSymrefHead,
   scanForSecrets,
   slugify,
 } from "../server/jobs/handlers/dispatch-git.ts";
@@ -279,13 +281,11 @@ describe("parseGithubRemote", () => {
   }
 
   const rejected = [
-    "https://gitlab.com/jkrumm/sideclaw.git",
     "https://github.com.evil.example/jkrumm/sideclaw.git",
     "https://github.com/jkrumm",
     "https://github.com/",
     "/var/folders/tmp/origin.git",
     "file:///var/folders/tmp/origin.git",
-    "git@gitlab.com:jkrumm/sideclaw.git",
     "http://github.com/jkrumm/sideclaw.git",
     "",
   ];
@@ -294,4 +294,56 @@ describe("parseGithubRemote", () => {
       expect(parseGithubRemote(url)).toBeNull();
     });
   }
+});
+
+// ── parseGitlabRemote ─────────────────────────────────────────────────────────
+
+describe("parseGitlabRemote", () => {
+  // GitLab projects may sit in a NESTED namespace — the lazy namespace group keeps the
+  // full path in `owner`, so `owner/repo` is always the project path the API expects.
+  const accepted: ReadonlyArray<[string, string, string]> = [
+    ["https://gitlab.com/jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
+    ["https://gitlab.com/jkrumm/sideclaw", "jkrumm", "sideclaw"],
+    ["https://gitlab.com/jkrumm/sideclaw/", "jkrumm", "sideclaw"],
+    ["git@gitlab.com:jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
+    ["git@gitlab.com:jkrumm/sideclaw", "jkrumm", "sideclaw"],
+    ["ssh://git@gitlab.com/jkrumm/sideclaw.git", "jkrumm", "sideclaw"],
+    ["https://gitlab.com/group/sub/repo.with.dots.git", "group/sub", "repo.with.dots"],
+  ];
+  for (const [url, owner, repo] of accepted) {
+    test(`parses ${url}`, () => {
+      expect(parseGitlabRemote(url)).toEqual({ owner, repo });
+    });
+  }
+
+  const rejected = [
+    "https://github.com/jkrumm/sideclaw.git",
+    "https://gitlab.example.com/jkrumm/sideclaw.git",
+    "https://gitlab.com.evil.example/jkrumm/sideclaw.git",
+    "https://gitlab.com/jkrumm",
+    "https://gitlab.com/",
+    "/var/folders/tmp/origin.git",
+    "file:///var/folders/tmp/origin.git",
+    "http://gitlab.com/jkrumm/sideclaw.git",
+    "",
+  ];
+  for (const url of rejected) {
+    test(`refuses ${url || "(empty)"}`, () => {
+      expect(parseGitlabRemote(url)).toBeNull();
+    });
+  }
+});
+
+// ── parseSymrefHead ───────────────────────────────────────────────────────────
+
+describe("parseSymrefHead", () => {
+  test("parses the ls-remote --symref HEAD line", () => {
+    const out = "ref: refs/heads/main\tHEAD\nd08c2c4fa0e04539885bd53485056c2509d70bee\tHEAD\n";
+    expect(parseSymrefHead(out)).toBe("main");
+  });
+
+  test("returns null when the server reports no symref", () => {
+    const out = "d08c2c4fa0e04539885bd53485056c2509d70bee\tHEAD\n";
+    expect(parseSymrefHead(out)).toBeNull();
+  });
 });
