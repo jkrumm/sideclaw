@@ -17,7 +17,7 @@ import {
 // server/lib/overview-payload.ts (folded into the same 45 s cache window as the agents
 // snapshot) and rendered by server/lib/agents.ts's `renderText`. warden is the control plane
 // on this box — a loopback-only, unauthenticated, read-only HTTP API at
-// `http://127.0.0.1:7734` (`~/SourceRoot/warden`, docs/api.md's `### GET /board`). Never
+// `http://127.0.0.1:7735` (`~/SourceRoot/warden`, docs/api.md's `### GET /board`). Never
 // throws: an unreachable/misconfigured/schema-mismatched warden degrades to `{ ok: false }`,
 // never a 500 or a delayed overview.
 
@@ -150,7 +150,7 @@ export interface FetchWardenBoardOptions {
  *  `updated_at DESC` from warden, so capping to the first `WARDEN_ITEMS_CAP` keeps that order. */
 export async function fetchWardenBoard(opts?: FetchWardenBoardOptions): Promise<WardenBoard> {
   const fetchedAt = Date.now();
-  const baseUrl = (opts?.baseUrl ?? process.env.WARDEN_API_URL ?? "http://127.0.0.1:7734").replace(
+  const baseUrl = (opts?.baseUrl ?? process.env.WARDEN_API_URL ?? "http://127.0.0.1:7735").replace(
     /\/+$/,
     "",
   );
