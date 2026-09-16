@@ -624,6 +624,45 @@ describe("classifyExitFailure", () => {
     const r = classifyExitFailure(1, { errors: ["boom"] }, "", "");
     expect(r.error).toBe("Session exited with code 1 (unknown): boom");
   });
+
+  // Regression for job 32118606: the exit branch used to drop lastAssistantText, so the
+  // review salvage branch published the constructed error — ending in the contradictory
+  // "Session exited with code 1 (success)" — as the "preserved raw synthesizer output".
+  test("recoverable assistant text is carried through as rawText in every exit shape", () => {
+    // Success envelope followed by a process exit 1: the text must survive for salvage.
+    const success = classifyExitFailure(
+      1,
+      { subtype: "success" },
+      "",
+      "the synthesizer's actual final text",
+    );
+    expect(success.rawText).toBe("the synthesizer's actual final text");
+    expect(success.noOutput).toBe(false);
+    // Max-turns envelope: same carry-through.
+    const maxTurns = classifyExitFailure(
+      1,
+      { subtype: "error_max_turns" },
+      "",
+      "turn-ceiling text",
+    );
+    expect(maxTurns.rawText).toBe("turn-ceiling text");
+    expect(maxTurns.noOutput).toBe(true);
+    // No envelope at all: same carry-through.
+    const noEnvelope = classifyExitFailure(1, undefined, "", "pre-exit assistant text");
+    expect(noEnvelope.rawText).toBe("pre-exit assistant text");
+    // Nothing said: rawText stays undefined, not an empty string.
+    expect(classifyExitFailure(1, undefined, "", "").rawText).toBeUndefined();
+    expect(classifyExitFailure(1, { subtype: "success" }, "", "").rawText).toBeUndefined();
+  });
+
+  test("a non-error subtype is not printed as a parenthetical verdict", () => {
+    // "(success)" after "exited with code 1" reads as a contradiction and was published
+    // verbatim in a stored verdict; reword the non-error case, keep the error_* shapes.
+    const r = classifyExitFailure(1, { subtype: "success" }, "", "");
+    expect(r.error).toBe("Session exited with code 1 after a success result envelope");
+    const maxTurns = classifyExitFailure(1, { subtype: "error_max_turns" }, "", "");
+    expect(maxTurns.error).toBe("Session exited with code 1 (error_max_turns)");
+  });
 });
 
 // ── unclassifiedOutputFailure — hadApiRetry must survive the schema/parse branches ──

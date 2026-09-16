@@ -318,7 +318,8 @@ export interface SessionResult<T = unknown> {
   noOutput?: boolean;
   /**
    * The worker's raw final text when output could not be parsed/validated into `T`
-   * (set alongside `noOutput`). Untruncated, unlike the truncated copy in `error`.
+   * (set alongside `noOutput`; the non-zero-exit branch also sets it, with or without
+   * `noOutput`). Untruncated, unlike the truncated copy in `error`.
    * Lets a handler salvage a degraded-but-non-empty result (e.g. a synthesis that
    * emitted prose instead of JSON) instead of discarding minutes of work.
    */
@@ -1013,27 +1014,41 @@ function stripBenignStderr(text: string): string {
  *  signals the episode ran and may have left real work behind: either the CLI's own
  *  turn/retry ceiling fired (`error_max_turns`, `error_max_structured_output_retries`),
  *  or no envelope arrived at all but the worker's last assistant turn left recoverable
- *  text — see `SessionResult.noOutput`'s doc comment for what a handler does with it. */
+ *  text — see `SessionResult.noOutput`'s doc comment for what a handler does with it.
+ *  `rawText` carries the worker's last assistant text through for the same reason the
+ *  sibling failure paths set it (schema-validation, JSON-parse, no-output): a non-zero
+ *  exit does not un-write what the model already said, and a salvaging handler reads
+ *  `rawText`, not the constructed `error`. It never feeds `classificationText` — that
+ *  stays built from the transport-sourced `error` string only, so model stdout can
+ *  never quota-classify. */
 export function classifyExitFailure(
   exitCode: number,
   envelope: { subtype?: string; errors?: string[] } | undefined,
   stderrTrimmed: string,
   lastAssistantText: string,
-): { error: string; noOutput: boolean } {
+): { error: string; noOutput: boolean; rawText: string | undefined } {
+  const rawText = lastAssistantText || undefined;
   if (envelope) {
     // `errors[]` is CLI-sourced; `result` is the model's own final text and stays out of
     // `error` — that string feeds the reactive fallback classifier and a needs_human card,
     // and an episode's brief is attacker-influenceable.
     const detail = envelope.errors?.join("; ") || undefined;
-    const error = `Session exited with code ${exitCode} (${envelope.subtype ?? "unknown"})${detail ? `: ${detail}` : ""}`;
-    const noOutput =
+    const errorSubtype =
       envelope.subtype === "error_max_turns" ||
       envelope.subtype === "error_max_structured_output_retries";
-    return { error, noOutput };
+    // A present non-error subtype (a `success` envelope followed by a process exit 1)
+    // reads self-contradictory in the parenthetical form — "(success)" was published as
+    // part of a verdict (job 32118606) — so word those differently. Absent and `error_*`
+    // subtypes keep the original shape.
+    const error =
+      !envelope.subtype || errorSubtype
+        ? `Session exited with code ${exitCode} (${envelope.subtype ?? "unknown"})${detail ? `: ${detail}` : ""}`
+        : `Session exited with code ${exitCode} after a ${envelope.subtype} result envelope${detail ? `: ${detail}` : ""}`;
+    return { error, noOutput: errorSubtype, rawText };
   }
   const cleanStderr = stripBenignStderr(stderrTrimmed);
   const error = `Session exited with code ${exitCode}${cleanStderr ? `. stderr: ${cleanStderr}` : ""}`;
-  return { error, noOutput: lastAssistantText.trim().length > 0 };
+  return { error, noOutput: lastAssistantText.trim().length > 0, rawText };
 }
 
 /** Classify an `is_error` result envelope for the reactive quota fallback. Pure —
@@ -1654,7 +1669,7 @@ async function runSessionAttempt<T = unknown>(
     // exitCode + (the envelope's own subtype, when one arrived) are both
     // transport/CLI-sourced — safe to reuse verbatim as the classification text. See
     // `classifyExitFailure`'s doc comment for why the envelope wins over raw stderr.
-    const { error, noOutput } = classifyExitFailure(
+    const { error, noOutput, rawText } = classifyExitFailure(
       exitCode,
       envelope,
       stderrTrimmed,
@@ -1666,6 +1681,7 @@ async function runSessionAttempt<T = unknown>(
       error,
       classificationText,
       ...(noOutput ? { noOutput: true as const } : {}),
+      rawText,
       apiErrorStatus,
       hadApiRetry: apiRetrySeen,
       backend,
