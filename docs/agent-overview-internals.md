@@ -166,7 +166,7 @@ is already assembled into the prompt by the handler.
 ## Warden block — the ledger, folded into the overview
 
 `server/lib/warden-board.ts`'s `fetchWardenBoard()` normalizes warden's
-`GET /board` (`http://127.0.0.1:7734`, loopback-only, unauthenticated,
+`GET /board` (`http://127.0.0.1:7735`, loopback-only, unauthenticated,
 read-only — `~/SourceRoot/warden/docs/api.md`) into the shape
 `overview-payload.ts` and `renderText` consume: `counts` per non-terminal
 chain state, `open` (the sum of those counts), and up to 20 items
