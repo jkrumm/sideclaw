@@ -7,8 +7,10 @@ when touching `server/jobs/handlers/dispatch.ts`, `dispatch-git.ts`, or the
 
 ## Tiers
 
-`investigate` (read-only → verdict), `author` (read-only → verdict + GitHub
-issue), `implement` (write → verdict + branch + **draft** PR). Prompts are
+`investigate` (read-only → verdict), `author` (read-only → verdict + issue),
+`implement` (write → verdict + branch + **draft** PR). The artifact follows the
+origin: a `github.com` remote goes through Octokit, a `gitlab.com` remote
+through `glab`; any other host is refused before a worktree exists. Prompts are
 `skills/dispatch/_common.md` + one tier file; the shared injection-hardening
 preamble lives in `_common.md` precisely so three copies cannot drift apart.
 
@@ -82,7 +84,7 @@ the caller.
   BEFORE a worktree is created — a writable or issue-filing episode in a
   secret-bearing repo has no safe artifact path, so this refuses rather than
   silently downgrading the tier the caller asked for.
-- **The GitHub call paths are a checked invariant, not an incidental one.**
+- **The artifact call paths are a checked invariant, not an incidental one.**
   `assertNoGithubForSensitive` guards `resolveRepoIdentity`, `openIssue` and
   the `implement` branch's `openPullRequest` path — all three are already
   unreachable for `investigate` today, but the guard exists so a future

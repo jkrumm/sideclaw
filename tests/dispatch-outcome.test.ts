@@ -35,7 +35,12 @@ afterEach(() => {
   fx.cleanup();
 });
 
-const ID: RepoIdentity = { owner: "jkrumm", repo: "fixture", defaultBranch: "master" };
+const ID: RepoIdentity = {
+  owner: "jkrumm",
+  repo: "fixture",
+  defaultBranch: "master",
+  kind: "github",
+};
 
 function key(): string {
   return randomUUID();
