@@ -19,9 +19,10 @@ import { appLogger as logger } from "../../logger.ts";
 //
 // That split is the security argument for the write tiers. The worker's prompt is assembled
 // from untrusted material (a Slack message, a GitHub issue body), so anything it can reach,
-// an injected brief can reach. So the tool hands it nothing: the GitHub token is resolved
-// here, the commit is made here, the push refspec is built here, the pull request is opened
-// here. The worker's only job is to leave a working tree in a state worth committing.
+// an injected brief can reach. So the tool hands it nothing: the forge credential (the
+// GitHub token, or glab's own pre-existing auth for a GitLab origin) is resolved here, the
+// commit is made here, the push refspec is built here, the pull request is opened here. The
+// worker's only job is to leave a working tree in a state worth committing.
 //
 // The corollary — and the precise claim, which is narrower than it first reads — is that
 // "never merges, never pushes to a default branch" is a property of THIS FILE rather than a
@@ -320,10 +321,18 @@ function describeGithubFailure(err: unknown, what: string): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
+/**
+ * Which forge an origin names. Decides the artifact path: GitHub goes through Octokit,
+ * GitLab through `glab` — the push is plain git for both (the host's ambient git credential
+ * helper covers gitlab.com as well).
+ */
+export type RemoteKind = "github" | "gitlab";
+
 export interface RepoIdentity {
   owner: string;
   repo: string;
   defaultBranch: string;
+  kind: RemoteKind;
 }
 
 /** Parse `owner/repo` out of a GitHub remote URL, in either the https or ssh spelling. */
@@ -337,33 +346,207 @@ export function parseGithubRemote(url: string): { owner: string; repo: string } 
 }
 
 /**
- * Identify the GitHub repo behind a checkout, and its default branch.
+ * The GitLab spelling of `parseGithubRemote`. One deliberate difference: a GitLab project
+ * may sit in a NESTED namespace (`group/sub/repo`), which GitHub orgs cannot — the lazy
+ * namespace group keeps the full namespace in `owner` and only the project name in `repo`,
+ * so `owner/repo` is always the project path the API and the web URL expect. Host-anchored
+ * to gitlab.com only: a self-hosted GitLab has its own token story in glab and stays
+ * refused by `resolveRepoIdentity` rather than guessed at.
+ */
+export function parseGitlabRemote(url: string): { owner: string; repo: string } | null {
+  const m =
+    url.match(/^https:\/\/gitlab\.com\/(.+?)\/([^/]+?)(?:\.git)?\/?$/) ??
+    url.match(/^git@gitlab\.com:(.+?)\/([^/]+?)(?:\.git)?\/?$/) ??
+    url.match(/^ssh:\/\/git@gitlab\.com\/(.+?)\/([^/]+?)(?:\.git)?\/?$/);
+  if (!m?.[1] || !m[2]) return null;
+  return { owner: m[1], repo: m[2] };
+}
+
+/**
+ * Parse the default branch out of `git ls-remote --symref origin HEAD` output. The first
+ * line is `ref: refs/heads/<branch>\tHEAD`; a server that does not report symrefs omits it
+ * and the first line is a bare OID, which parses as null. Callers refuse on null rather
+ * than guess, because everything the write tiers refuse to do is defined relative to this
+ * value.
+ */
+export function parseSymrefHead(output: string): string | null {
+  const first = output.split("\n")[0] ?? "";
+  return first.match(/^ref:\s+refs\/heads\/(\S+)\t/)?.[1] ?? null;
+}
+
+/**
+ * Refuse a default branch a forge reported before it reaches `git fetch`/`git push` argv.
  *
- * The default branch comes from the GitHub API rather than from `origin/HEAD`, because the
+ * The value is remote-controlled on BOTH paths now (GitHub API for github, `ls-remote`
+ * output for gitlab) and `createWorktree` splices it into a git argv. The spawn is an
+ * argv array — no shell — so `;`/`$()` are inert; what remains is argument injection (a
+ * `-`-leading branch read as a flag) and range/refname surprises (`..`). Same positive
+ * allowlist as review.ts's `validateBranchRef` — that one guards the review path's
+ * `bash -c` splices and lives there because importing it from this file would be a cycle;
+ * if the two ever need to converge, lift both into a shared lib.
+ */
+function assertSafeDefaultBranchName(branch: string): void {
+  if (!branch || branch.length > 200 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) {
+    throw new Error(`refusing an unusable default branch reported by the remote: ${branch}`);
+  }
+  if (branch.includes("..")) {
+    throw new Error(`refusing a default branch containing '..': ${branch}`);
+  }
+}
+
+/**
+ * Identify the forge repo behind a checkout (GitHub or GitLab), and its default branch.
+ *
+ * GitHub: the default branch comes from the GitHub API rather than from `origin/HEAD`, because the
  * local symbolic ref is a cached guess: it is written at clone time and never updated, so a
  * repo whose default branch was renamed reports the old one indefinitely. Everything the
  * write tiers refuse to do is defined relative to this value ("never push to a default
  * branch"), so it has to be the authoritative one, and the API call is needed anyway to
  * open the artifact.
+ *
+ * GitLab: no API call at all — the default branch comes from `git ls-remote --symref`,
+ * which asks the remote what HEAD points at (the same authority class as the GitHub API
+ * call) over the SAME credential path the later push uses. That symmetry is the point: an
+ * episode must fail here, before a session runs, rather than pass identity on one
+ * credential and fail its push on another. A remote that does not report the symref is a
+ * refusal, not a guess.
  */
 export async function resolveRepoIdentity(cwd: string): Promise<RepoIdentity> {
-  const url = await gitOrThrow(["remote", "get-url", "origin"], cwd);
-  const parsed = parseGithubRemote(url);
-  if (!parsed) {
+  // The DECLARED url, not `git remote get-url` (which applies insteadOf rewrites): the
+  // rewrite is a transport detail — this host's headless gitconfig rewrites git@ ssh
+  // spellings to https — while which forge an origin names is identity. Reading raw also
+  // keeps both parsers' spellings meaningful and the GitLab path testable against a local
+  // bare origin.
+  const url = await gitOrThrow(["config", "--get", "remote.origin.url"], cwd);
+  const gh = parseGithubRemote(url);
+  if (gh) {
+    const octo = await octokit();
+    const { data } = await octo.repos.get({ owner: gh.owner, repo: gh.repo });
+    assertSafeDefaultBranchName(data.default_branch);
+    return { ...gh, defaultBranch: data.default_branch, kind: "github" };
+  }
+  const gl = parseGitlabRemote(url);
+  if (gl) {
+    let listed: string;
+    try {
+      listed = await gitOrThrow(["ls-remote", "--symref", "origin", "HEAD"], cwd);
+    } catch (err) {
+      throw new Error(
+        `could not read the default branch from the GitLab remote (${url}): ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+    const defaultBranch = parseSymrefHead(listed);
+    if (!defaultBranch) {
+      throw new Error(
+        `the GitLab remote (${url}) did not report a HEAD symref — cannot determine the default branch`,
+      );
+    }
+    assertSafeDefaultBranchName(defaultBranch);
+    return { ...gl, defaultBranch, kind: "gitlab" };
+  }
+  throw new Error(
+    `origin is neither a GitHub nor a GitLab remote (${url}) — the author and implement tiers need one to deposit their artifact`,
+  );
+}
+
+// ── GitLab ────────────────────────────────────────────────────────────────────
+
+/**
+ * GitLab artifact calls go through `glab` rather than raw REST: glab is already
+ * authenticated on this host, so no second credential path is introduced — the token REST
+ * would need exists only inside glab's own config, and reading it from sideclaw would be
+ * exactly the credential reach this file otherwise avoids. `--hostname gitlab.com` is
+ * pinned because `parseGitlabRemote` only accepts gitlab.com, so glab's cwd-based host
+ * sniffing (it reads the git remote of the directory it runs in) never gets a vote.
+ *
+ * Fields go as `--raw-field` argv pairs rather than a JSON body: `run()` spawns without a
+ * shell, so worker-authored titles/bodies carrying newlines and quotes survive intact, and
+ * there is no stdin plumbing to stub around.
+ */
+async function glabApi(
+  endpoint: string,
+  fields: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const args = ["api", "--hostname", "gitlab.com", endpoint, "--method", "POST"];
+  for (const [key, value] of Object.entries(fields)) {
+    args.push("--raw-field", `${key}=${value}`);
+  }
+  let r: RunResult;
+  try {
+    r = await run(["glab", ...args], { timeoutMs: 60_000 });
+  } catch (err) {
     throw new Error(
-      `origin is not a GitHub remote (${url}) — the author and implement tiers need one to deposit their artifact`,
+      `could not run the glab CLI (is it installed and on PATH?): ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
     );
   }
-  const gh = await octokit();
-  const { data } = await gh.repos.get({ owner: parsed.owner, repo: parsed.repo });
-  return { ...parsed, defaultBranch: data.default_branch };
+  if (!r.ok) {
+    throw new Error(`glab ${endpoint} failed (${r.code}): ${r.stderr.trim().slice(0, 400)}`);
+  }
+  try {
+    return JSON.parse(r.stdout) as Record<string, unknown>;
+  } catch {
+    throw new Error(`glab ${endpoint} returned non-JSON output: ${r.stdout.trim().slice(0, 200)}`);
+  }
+}
+
+/** `group/sub/repo` percent-encoded for a GitLab API path — a nested namespace keeps its
+ *  slashes, encoded. */
+function gitlabProjectEndpoint(id: RepoIdentity, resource: string): string {
+  return `projects/${encodeURIComponent(`${id.owner}/${id.repo}`)}/${resource}`;
+}
+
+function gitlabWebUrl(data: Record<string, unknown>, what: string): string {
+  if (typeof data.web_url === "string") return data.web_url;
+  throw new Error(`glab ${what} returned no web_url: ${JSON.stringify(data).slice(0, 200)}`);
+}
+
+async function openGitlabIssue(
+  id: RepoIdentity,
+  opts: { title: string; body: string },
+): Promise<string> {
+  const data = await glabApi(gitlabProjectEndpoint(id, "issues"), {
+    title: opts.title,
+    description: opts.body,
+  });
+  logger.info(
+    { event: "dispatch.issue", repo: `${id.owner}/${id.repo}`, number: data.iid },
+    "dispatch opened issue",
+  );
+  return gitlabWebUrl(data, "issue create");
+}
+
+/**
+ * Open a GitLab merge request, draft-marked. The marker is the title prefix GitLab itself
+ * renders ("Draft: ") rather than an API boolean — it is understood by every GitLab
+ * version and shown in the MR list, and it is what `glab mr create --draft` produces.
+ */
+async function openGitlabMergeRequest(
+  id: RepoIdentity,
+  opts: { title: string; body: string; head: string },
+): Promise<string> {
+  const data = await glabApi(gitlabProjectEndpoint(id, "merge_requests"), {
+    source_branch: opts.head,
+    target_branch: id.defaultBranch,
+    title: `Draft: ${opts.title}`,
+    description: opts.body,
+  });
+  logger.info(
+    { event: "dispatch.pr", repo: `${id.owner}/${id.repo}`, number: data.iid },
+    "dispatch opened merge request",
+  );
+  return gitlabWebUrl(data, "mr create");
 }
 
 export async function openIssue(
   id: RepoIdentity,
   opts: { title: string; body: string },
 ): Promise<string> {
-  assertNoSecrets(`${opts.title}\n${opts.body}`, "a GitHub issue");
+  assertNoSecrets(`${opts.title}\n${opts.body}`, "an issue");
+  if (id.kind === "gitlab") return openGitlabIssue(id, opts);
   const gh = await octokit();
   const { data } = await gh.issues
     .create({
@@ -395,6 +578,7 @@ export async function openPullRequest(
     throw new Error(`refusing to open a PR whose head is the default branch (${opts.head})`);
   }
   assertNoSecrets(`${opts.title}\n${opts.body}`, "a pull request");
+  if (id.kind === "gitlab") return openGitlabMergeRequest(id, opts);
   const gh = await octokit();
   const { data } = await gh.pulls
     .create({

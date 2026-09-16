@@ -55,7 +55,12 @@ afterEach(() => {
   fx.cleanup();
 });
 
-const ID: RepoIdentity = { owner: "jkrumm", repo: "fixture", defaultBranch: "master" };
+const ID: RepoIdentity = {
+  owner: "jkrumm",
+  repo: "fixture",
+  defaultBranch: "master",
+  kind: "github",
+};
 
 function key(): string {
   return randomUUID();
@@ -833,13 +838,55 @@ describe("pushBranch", () => {
 // ── Identity and artifacts ────────────────────────────────────────────────────
 
 describe("resolveRepoIdentity", () => {
-  test("refuses a non-GitHub origin before it ever reaches the API", async () => {
-    await expect(resolveRepoIdentity(fx.repo)).rejects.toThrow(/origin is not a GitHub remote/);
+  test("refuses a non-GitHub, non-GitLab origin before it ever reaches the API", async () => {
+    await expect(resolveRepoIdentity(fx.repo)).rejects.toThrow(
+      /neither a GitHub nor a GitLab remote/,
+    );
   });
 
   test("refuses a checkout with no origin at all", async () => {
     await git(["remote", "remove", "origin"], fx.repo);
-    await expect(resolveRepoIdentity(fx.repo)).rejects.toThrow(/git remote get-url origin failed/);
+    await expect(resolveRepoIdentity(fx.repo)).rejects.toThrow(
+      /git config --get remote\.origin\.url failed/,
+    );
+  });
+
+  test("resolves a GitLab origin's identity over plain git, no API call", async () => {
+    // ls-remote against the fixture's local bare origin needs no network and no credential,
+    // which is what keeps this testable: a repo-local insteadOf points the gitlab.com URL
+    // at the bare origin (identity reads the DECLARED url, so it still parses as gitlab;
+    // the rewrite only redirects the transport), and the GitLab path's only remote
+    // interaction is the same git plumbing the push already uses.
+    await git(["remote", "set-url", "origin", "git@gitlab.com:jkrumm/fixture.git"], fx.repo);
+    await git(
+      ["config", `url.${fx.origin}.insteadOf`, "git@gitlab.com:jkrumm/fixture.git"],
+      fx.repo,
+    );
+    const id = await resolveRepoIdentity(fx.repo);
+    expect(id).toEqual({
+      owner: "jkrumm",
+      repo: "fixture",
+      defaultBranch: "master",
+      kind: "gitlab",
+    });
+  });
+
+  test("refuses a GitLab remote whose HEAD symref is missing", async () => {
+    // A bare repo HEAD normally reports a symref, so this shape needs plumbing: repoint
+    // origin's HEAD at a raw OID (detached), which ls-remote --symref reports without a
+    // `ref:` line.
+    await git(["remote", "set-url", "origin", "git@gitlab.com:jkrumm/fixture.git"], fx.repo);
+    await git(
+      ["config", `url.${fx.origin}.insteadOf`, "git@gitlab.com:jkrumm/fixture.git"],
+      fx.repo,
+    );
+    const master = await git(["rev-parse", "master"], fx.origin);
+    await git(["update-ref", "--no-deref", "HEAD", master], fx.origin);
+    try {
+      await expect(resolveRepoIdentity(fx.repo)).rejects.toThrow(/did not report a HEAD symref/);
+    } finally {
+      await git(["symbolic-ref", "HEAD", "refs/heads/master"], fx.origin);
+    }
   });
 });
 
@@ -849,13 +896,13 @@ describe("artifact refusals", () => {
   test("an issue body carrying a credential is never filed", async () => {
     await expect(
       openIssue(ID, { title: "Fix the gateway", body: "set op://hermes/gateway/api-server-key" }),
-    ).rejects.toThrow(/refusing to publish a GitHub issue.*1Password reference/s);
+    ).rejects.toThrow(/refusing to publish an issue.*1Password reference/s);
   });
 
   test("an issue TITLE carrying a credential is never filed", async () => {
     await expect(
       openIssue(ID, { title: "100.101.102.103 is unreachable", body: "see the monitor" }),
-    ).rejects.toThrow(/refusing to publish a GitHub issue.*Tailscale IP/s);
+    ).rejects.toThrow(/refusing to publish an issue.*Tailscale IP/s);
   });
 
   test("a pull request body carrying a credential is never opened", async () => {
