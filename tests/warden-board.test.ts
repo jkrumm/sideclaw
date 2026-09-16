@@ -193,6 +193,30 @@ describe("fetchWardenBoard — failure modes", () => {
   });
 });
 
+// ── the no-options default path — the URL drift that rotted to 7734 when warden moved ───────
+
+describe("fetchWardenBoard — default baseUrl", () => {
+  const savedEnv = process.env.WARDEN_API_URL;
+
+  afterAll(() => {
+    if (savedEnv === undefined) delete process.env.WARDEN_API_URL;
+    else process.env.WARDEN_API_URL = savedEnv;
+  });
+
+  test("with only fetchImpl injected, requests warden's loopback default (7735)", async () => {
+    delete process.env.WARDEN_API_URL;
+    const urls: string[] = [];
+    const board = await fetchWardenBoard({
+      fetchImpl: (async (input: RequestInfo | URL) => {
+        urls.push(String(input));
+        return jsonResponse(rawBoard());
+      }) as typeof fetch,
+    });
+    expect(board.ok).toBe(true);
+    expect(urls[0]?.startsWith("http://127.0.0.1:7735")).toBe(true);
+  });
+});
+
 // ── cachedFetchWardenBoard (server/lib/overview-payload.ts) — the 45 s TTL ──────────────────
 
 describe("cachedFetchWardenBoard", () => {
