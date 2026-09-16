@@ -266,7 +266,11 @@ context. One episode, one verdict, no steering (mid-run redirection is
 `rd bg` + `rd say`, not this).
 
 **Tiers.** `investigate` (read-only → verdict), `author` (read-only → verdict
-+ GitHub issue), `implement` (write → verdict + branch + **draft** PR).
++ issue), `implement` (write → verdict + branch + **draft** PR). The artifact
+follows the origin: a `github.com` remote gets the GitHub API path, a
+`gitlab.com` remote gets `glab` (draft MR = "Draft: " title prefix, issues via
+`glab api`); any other host is refused ~25 ms into the episode, before a
+worktree exists.
 
 **Workspace** (implement only): `worktree` (default) = the isolated-worktree
 path above. `in-place` = the episode edits the repo's **live checkout**
@@ -319,8 +323,9 @@ boundary for a sensitive episode, not the permission profile.
 - Read tiers also materialize untracked/gitignored files (bounded, symlinks
   never followed) — the read exposure was never about copying files *in*.
 - Boot sweeps every stale worktree/branch left by a SIGKILL.
-- The GitHub artifact (issue/branch/PR) is created by the **handler**, never
-  by the worker session — the session holds no GitHub credential.
+- The artifact (issue/branch/PR, on the origin's forge) is created by the
+  **handler**, never by the worker session — the session holds no forge
+  credential.
 - `GIT_DENY_CREDENTIALS_ENV` at every tier — this host's `~/.gitconfig`
   wires a credential helper any process can use, and a read-only session
   still has `Bash`.
@@ -329,8 +334,9 @@ boundary for a sensitive episode, not the permission profile.
   before the episode and restored **from the pinned base** after — an
   audited repo's hooks/`env` must never execute inside the episode.
 - `implement` refuses `.github/workflows` diffs and added lines matching
-  `SECRET_PATTERNS`; commits `--no-verify`; opens a **draft** PR from the
-  API's `default_branch`. The repo's `check` runs before the push; a red
+  `SECRET_PATTERNS`; commits `--no-verify`; opens a **draft** PR (GitHub) or
+  a "Draft: " MR (GitLab) against the forge-resolved `default_branch`. The
+  repo's `check` runs before the push; a red
   format/lint/typecheck/test withholds the PR (`checks_failed`), a red
   `fallow` step alone never does — it audits whole touched files, so it rides
   along in the PR body as advisory instead.
