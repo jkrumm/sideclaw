@@ -175,7 +175,9 @@ describe("stripInventedLinks", () => {
   // `[[...]]` syntax would survive into the rendered page, which the vault lint flags as an
   // ERROR for a target page that doesn't exist.
   test("unwraps a bare [[wikilink]] to its target text", () => {
-    expect(stripInventedLinks("See [[weatherorb]] for details.")).toBe("See weatherorb for details.");
+    expect(stripInventedLinks("See [[weatherorb]] for details.")).toBe(
+      "See weatherorb for details.",
+    );
   });
 
   test("unwraps a [[target|display]] link to its display text", () => {
