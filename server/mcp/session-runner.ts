@@ -1140,8 +1140,8 @@ export function unclassifiedOutputFailure<T = unknown>(
 }
 
 /** Total attempts per session, including the first — at most 2 retries. */
-/** Real context window per gateway (non-Claude) model id, mirroring `_CA_CTX` in
- *  dotfiles' `config/zsh/claude.zsh` — keep the two in step. Claude Code only trusts
+/** Real context window per gateway (non-Claude) model id, mirroring `_ca_ctx` in
+ *  dotfiles' `config/zsh/iu-models.sh` — keep the two in step. Claude Code only trusts
  *  api.anthropic.com to self-report a window, so over any custom base URL it assumes
  *  200k and auto-compacts there. This is a client-side budget, not a server limit:
  *  set it HIGHER than the real window and a clean auto-compact becomes a hard API
@@ -1151,6 +1151,10 @@ export function unclassifiedOutputFailure<T = unknown>(
  *  these; re-run it when adding a row. */
 const GATEWAY_CONTEXT_TOKENS: Record<string, number> = {
   "glm-5.3-flash": 1_000_000, // measured — still accepted at a 1.1M probe ceiling
+  "DeepSeek-V4-Flash": 1_000_000, // measured 2026-09-20 (modelpick ccbench), still accepted at the 1.1M probe ceiling
+  "DeepSeek-V4-Pro": 1_000_000, // measured 2026-09-20 (modelpick ccbench), still accepted at the 1.1M probe ceiling
+  "minimax-m3": 1_000_000, // measured 2026-09-20 (modelpick ccbench), still accepted at the 1.1M probe ceiling
+  "kimi-k2.7-code": 262_144, // measured 2026-09-20, exact, named by the gateway
 };
 const GATEWAY_CONTEXT_FALLBACK = 200_000;
 

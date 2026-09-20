@@ -125,6 +125,13 @@ describe("resolveBackend", () => {
 describe("gatewayContextTokens", () => {
   test("a measured 1M model gets its full window", () => {
     expect(gatewayContextTokens("glm-5.3-flash")).toBe(1_000_000);
+    expect(gatewayContextTokens("minimax-m3")).toBe(1_000_000);
+  });
+
+  test("a model with a smaller hard cap is not budgeted past it", () => {
+    // A budget above the real window turns a clean auto-compact into a hard API
+    // rejection mid-session — the reason 1M is not a blanket default.
+    expect(gatewayContextTokens("kimi-k2.7-code")).toBe(262_144);
   });
 
   test("an unknown id falls back to the conservative 200k, never 1M", () => {
