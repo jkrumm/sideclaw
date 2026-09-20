@@ -116,8 +116,9 @@ export const DISPATCH_INPUT = z.object({
     .string()
     .optional()
     .describe(
-      "Optional model override, e.g. 'claude-opus-5[1m]'. Defaults to the sonnet worker " +
-        "tier; only override on explicit request, it spends Max quota.",
+      "Optional model override, e.g. 'claude-opus-5[1m]'. Defaults to glm-5.3-flash on " +
+        "the metered IU lane (claude-sonnet-5[1m] on Max is only the reactive fallback); " +
+        "only override on explicit request, a Claude override spends Max quota.",
     ),
   sensitive: z
     .boolean()

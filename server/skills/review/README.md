@@ -11,7 +11,7 @@ Phase 1 — Data Gathering (parallel shell, ~2s)
 ├── coderabbit review --prompt-only
 └── package.json (test script detection)
 
-Phase 1.5 — Angle Routing (one claude-sonnet-5 triage session, ~10-20s)
+Phase 1.5 — Angle Routing (one glm-5.3-flash triage session on IU, ~10-20s)
 └── Reads the diff, adds content-driven angles on top of the deterministic floor
     (skipped when the caller passes an explicit `angles` list)
 
@@ -42,7 +42,8 @@ Phase 3 — Synthesis (single claude-sonnet-5 session, ~15s)
 Selection has two layers. A **deterministic floor** is picked from changed file
 extensions (instant, free, always covers the basics). A **triage router** then
 adds content-driven angles that file types can't detect — it reads the diff once
-on claude-sonnet-5 and returns the extra angles it judges relevant. Total angles are
+on `routeFor("review_router")` (glm-5.3-flash on IU, claude-haiku-4-5 on Max as the
+reverse fallback) and returns the extra angles it judges relevant. Total angles are
 capped at `MAX_ANGLES` (8); the floor is kept first, router extras fill the rest.
 
 The router prompt carries an **ISO/IEC 25010:2023 coverage checklist** — the nine quality

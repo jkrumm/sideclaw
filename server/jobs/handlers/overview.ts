@@ -385,10 +385,12 @@ export async function runOverview(
     jsonSchema: OVERVIEW_WORKER_JSON_SCHEMA,
     route,
     readOnly: true,
-    // No `retryAfterOutput`: glm defaulting to max reasoning effort is slow, not stuck —
-    // a timeout after it already emitted turns used to re-lane onto Haiku mid-job on
-    // that alone. session-runner.ts's idle watchdog is the real stuck-detector now; a
-    // zero-output timeout is still the only one that moves lanes.
+    // No `retryAfterOutput`: glm-5.3-flash thinking is capped at 2048 tokens here
+    // (`ToolRoute.thinkingTokens`, MAX_THINKING_TOKENS), but a slow response still reads as
+    // "stalling" when it is only slow, not stuck — a timeout after it already emitted turns
+    // used to re-lane onto Haiku mid-job on that alone. session-runner.ts's idle watchdog
+    // is the real stuck-detector now; a zero-output timeout is still the only one that
+    // moves lanes.
     // Disallow every tool `readOnly` doesn't already remove — the worker must reason over the
     // prompt alone, never read a live file (the same transcripts it was already given, this
     // time ungated by the caps/fence above) or shell out.

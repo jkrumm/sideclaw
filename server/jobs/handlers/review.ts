@@ -622,10 +622,11 @@ async function routeExtraAngles(
     route: routeFor("review_router"),
     jsonSchema: ROUTER_JSON_SCHEMA,
     readOnly: true,
-    // No `retryAfterOutput`: same CLASSIFY tier as check/overview, and glm-5.3-flash
-    // defaulting to max reasoning effort reads as "stalling" when it is only slow. A
-    // timeout after it already emitted its answer used to re-lane mid-job on that alone;
-    // session-runner.ts's idle watchdog is the real stuck-detector now.
+    // No `retryAfterOutput`: same CLASSIFY tier as check/overview — glm-5.3-flash thinking
+    // is capped at 2048 tokens here (`ToolRoute.thinkingTokens`, MAX_THINKING_TOKENS) but a
+    // slow response still reads as "stalling" when it is only slow. A timeout after it
+    // already emitted its answer used to re-lane mid-job on that alone; session-runner.ts's
+    // idle watchdog is the real stuck-detector now.
     settingSources: "project",
     validate: zodValidator(ROUTER_OUTPUT),
     onActivity: bump ? (p) => bump(`router: ${p.lastAction}`) : undefined,

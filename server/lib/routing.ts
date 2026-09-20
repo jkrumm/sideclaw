@@ -27,11 +27,21 @@
 //
 // Env overrides, read once at module load (a flip needs `make reload`; the MCP process
 // loads sideclaw/.env itself — see server/lib/load-env.ts):
-//   SIDECLAW_MODEL_<TOOL>=<id>        e.g. SIDECLAW_MODEL_CHECK=claude-haiku-4-5
-//   SIDECLAW_BACKEND_<TOOL>=iu|max    e.g. SIDECLAW_BACKEND_REVIEW=iu
+//   SIDECLAW_MODEL_<TOOL>=<id>             e.g. SIDECLAW_MODEL_CHECK=claude-haiku-4-5
+//   SIDECLAW_BACKEND_<TOOL>=iu|max         e.g. SIDECLAW_BACKEND_REVIEW=iu
+//   SIDECLAW_THINKING_TOKENS_<TOOL>=<n>    e.g. SIDECLAW_THINKING_TOKENS_CHECK=4096
 // <TOOL> is the route key upper-cased. A `max` override on a non-Claude id is refused
-// back to `iu` (logged via `overrides`) — Max never serves a gateway model. The effective
-// override list (applied + refused) is logged once at startup via `logRoutingOverrides`.
+// back to `iu` (logged via `overrides`) — Max never serves a gateway model. A
+// `SIDECLAW_THINKING_TOKENS_<TOOL>` that isn't a positive integer is refused the same way.
+// The effective override list (applied + refused) is logged once at startup via
+// `logRoutingOverrides`.
+//
+// `thinkingTokens` is GLM's reasoning budget on the IU leg (see `MAX_THINKING_TOKENS` in
+// session-runner.ts's `buildWorkerEnv`) — `--effort`/`reasoning_effort`/
+// `thinking:{type:disabled}` are all ignored by the Requesty hop, so this env var is the
+// only control that reaches glm-5.3-flash there; unset means GLM's `max` default, its
+// worst setting. Only meaningful on a non-Claude route — `buildWorkerEnv` only exports it
+// for one, so it is harmless (never sent) when set on a Claude route.
 
 export type Backend = "iu" | "max";
 
@@ -65,6 +75,12 @@ export interface ToolRoute {
    *  "iu-openai": a direct IU OpenAI transport call (adversary, read_image,
    *  read_drawing) that only ever consumes `.model` — see the module comment above. */
   transport: "session" | "iu-openai";
+  /** GLM's reasoning budget on the IU leg — `session-runner.ts`'s `buildWorkerEnv` exports
+   *  this as `MAX_THINKING_TOKENS` for any non-Claude model, the only control that reaches
+   *  glm-5.3-flash's thinking depth on the Requesty hop. Absent on Claude routes (JUDGE,
+   *  PROSE), which control thinking a different way, and on the `iu-openai` transport
+   *  routes (VISION, adversary), which never reach `buildWorkerEnv` at all. */
+  thinkingTokens?: number;
 }
 
 export const SONNET = "claude-sonnet-5[1m]";
@@ -75,7 +91,9 @@ export const GLM_FLASH = "glm-5.3-flash";
 // touches one line instead of hunting down every duplicate. ──────────────────────────
 //
 // CLASSIFY: cheap mechanical work (check, overview, review's triage router) — glm-5.3-flash
-//   over IU with Haiku-on-Max as the reverse lane.
+//   over IU with Haiku-on-Max as the reverse lane, thinking capped at 2048 tokens
+//   (`thinkingTokens` — see the module-header comment on `MAX_THINKING_TOKENS`; unset would
+//   run GLM's `max` reasoning default, its worst setting, on work that is meant to be cheap).
 // AGENT: dispatch ONLY — owner decision 2026-09-11 (formerly a `SIDECLAW_MODEL_DISPATCH`
 //   override in `.env`; moved here so the default and the decision are the same place)
 //   to run dispatch's agentic worker episodes on glm-5.3-flash over IU, same model
@@ -84,7 +102,9 @@ export const GLM_FLASH = "glm-5.3-flash";
 //   0.538) and leading the Anthropic-route field on the AA coding index. GLM dispatch
 //   episodes have been measured completing fine. claude-sonnet-5[1m] on Max is the
 //   reactive fallback — this is what moves dispatch off the Max subscription onto
-//   metered IU. Deliberately NOT extended to review or otel — see JUDGE below.
+//   metered IU. Thinking capped at 8192 tokens (`thinkingTokens`) — an agentic episode
+//   needs more room than a classify-shaped call but must not default to GLM's unbounded
+//   `max`. Deliberately NOT extended to review or otel — see JUDGE below.
 // JUDGE: judgment-heavy work that stays on Max — review (angles/synthesis/router) and
 //   otel. Both excluded from AGENT, for different reasons, both dated 2026-09-11:
 //     - review: measured the same day with `SIDECLAW_MODEL_REVIEW=glm-5.3-flash`, a
@@ -118,12 +138,14 @@ const CLASSIFY: ToolRoute = {
   backend: "iu",
   fallback: { backend: "max", model: HAIKU },
   transport: "session",
+  thinkingTokens: 2048,
 };
 const AGENT: ToolRoute = {
   model: GLM_FLASH,
   backend: "iu",
   fallback: { backend: "max", model: SONNET },
   transport: "session",
+  thinkingTokens: 8192,
 };
 const JUDGE: ToolRoute = {
   model: SONNET,
@@ -164,10 +186,11 @@ export function isClaudeModel(model: string): boolean {
 
 export interface RoutingOverride {
   tool: RoutedTool;
-  field: "model" | "backend";
+  field: "model" | "backend" | "thinkingTokens";
   value: string;
-  /** Set when the override was refused (a `max` backend on a non-Claude id, or an
-   *  unknown backend name); the default stayed in force. */
+  /** Set when the override was refused (a `max` backend on a non-Claude id, an
+   *  unknown backend name, or a non-positive-integer thinking-token count); the default
+   *  stayed in force. */
   refused?: string;
   /** Set when no env var named this field — it changed as a side effect of another
    *  override (a gateway model id forcing a `max` route onto `iu`). */
@@ -186,7 +209,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
   const overrides: RoutingOverride[] = [];
   for (const tool of ROUTED_TOOLS) {
     const base = DEFAULT_ROUTES[tool];
-    let { model, backend } = base;
+    let { model, backend, thinkingTokens } = base;
     const key = tool.toUpperCase();
     const modelOverride = env[`SIDECLAW_MODEL_${key}`]?.trim();
     if (modelOverride) {
@@ -232,11 +255,36 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         implied: `forced by the ${model} model override — max only serves Claude ids`,
       });
     }
+    const thinkingOverride = env[`SIDECLAW_THINKING_TOKENS_${key}`]?.trim();
+    if (thinkingOverride) {
+      if (base.transport === "iu-openai") {
+        overrides.push({
+          tool,
+          field: "thinkingTokens",
+          value: thinkingOverride,
+          refused: `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — the thinking budget only applies to session transport`,
+        });
+      } else {
+        const parsed = Number(thinkingOverride);
+        if (!Number.isInteger(parsed) || parsed <= 0) {
+          overrides.push({
+            tool,
+            field: "thinkingTokens",
+            value: thinkingOverride,
+            refused: `expected a positive integer, got "${thinkingOverride}"`,
+          });
+        } else {
+          thinkingTokens = parsed;
+          overrides.push({ tool, field: "thinkingTokens", value: thinkingOverride });
+        }
+      }
+    }
     routes[tool] = {
       model,
       backend,
       fallback: usableFallback(base.fallback, model, backend),
       transport: base.transport,
+      thinkingTokens,
     };
   }
   return { routes, overrides };
@@ -270,6 +318,7 @@ export function routeFor(tool: RoutedTool): ToolRoute {
     backend: r.backend,
     fallback: r.fallback ? { ...r.fallback } : null,
     transport: r.transport,
+    thinkingTokens: r.thinkingTokens,
   };
 }
 
@@ -288,6 +337,10 @@ export function withModel(route: ToolRoute, model: string | undefined): ToolRout
     backend,
     fallback: usableFallback(declared, model, backend),
     transport: route.transport,
+    // Carried over unchanged: it's a property of the tool's tier, not the model override
+    // itself. Harmless when the override moves to a Claude id — buildWorkerEnv only ever
+    // exports MAX_THINKING_TOKENS for a non-Claude model.
+    thinkingTokens: route.thinkingTokens,
   };
 }
 

@@ -110,16 +110,26 @@ latched so the fallback attempt itself is never switched again:
   429/502/503/504, connection errors) is first retried once on `iu` — a
   single 503 is the common case and must not spend Max quota — and if that
   fails the same way the next attempt runs on `max`, on `fallback.model` when
-  the route fixes one (`check`/`overview` → Haiku, since glm cannot run on
-  Max) or the same model (`backend.fallback`, reason `iu-unavailable`).
-  Missing IU credentials (`iuConfigError`) and a **timeout with zero worker
-  events** skip the same-backend retry and go straight to it; a session with
-  `retryAfterOutput: true` (`check`, `overview` — no side effects to
-  half-finish) treats **any** timeout that way (measured 2026-09-07:
-  glm-5.3-flash gave overview's 10 KB prompt no event in 480 s, and another
-  run stalled after 2 turns until the cap — so overview's cap is 2 min and
-  the whole job stays ≈3 min with the Haiku lane). This is what keeps "IU
-  down, Max fine" from being a dead lane.
+  the route fixes one (`check`/`overview` → Haiku, `dispatch` → Sonnet, since
+  glm cannot run on Max) or the same model (`backend.fallback`, reason
+  `iu-unavailable`). Missing IU credentials (`iuConfigError`) and a **timeout
+  with zero worker events** skip the same-backend retry and go straight to
+  it. No caller currently sets `retryAfterOutput: true` — `check`, `overview`
+  and `review`'s router all rely on the idle watchdog in `session-runner.ts`
+  (no separate wall-clock cap) rather than re-laning after a timeout that
+  already produced turns; see each handler's own comment for why. This is
+  what keeps "IU down, Max fine" from being a dead lane.
+
+  **Thinking budget** (`ToolRoute.thinkingTokens`, `server/lib/routing.ts`):
+  `--effort`/`reasoning_effort`/`thinking:{type:disabled}` are all ignored by
+  the Requesty hop for glm-5.3-flash, so the only lever that reaches it is
+  `MAX_THINKING_TOKENS` (the CLI's env var for Anthropic's
+  `thinking.budget_tokens`), exported by `buildWorkerEnv` for any non-Claude
+  route. CLASSIFY (check/overview/review_router) runs at 2048; AGENT
+  (dispatch) at 8192; JUDGE/PROSE stay on Claude and carry no
+  `thinkingTokens`. Overridable per tool via
+  `SIDECLAW_THINKING_TOKENS_<TOOL>`, same env pattern as the model/backend
+  overrides above.
 
 `SessionResult.backend` and `.model` carry what actually ran;
 `overview`/`narrative` job output carries `backend` too. Tests:

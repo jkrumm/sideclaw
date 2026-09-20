@@ -37,7 +37,7 @@ describe("buildSessionArgs — the bounds", () => {
       {},
       { readOnly: true },
       { settingSources: "project" },
-      { model: "DeepSeek-V4-Flash" },
+      { model: "some-gateway-model" },
       { jsonSchema: { type: "object" } },
     ]) {
       expect(valueOf(args(o), "--settings")).toBe(WORKER_SETTINGS);
@@ -205,5 +205,50 @@ describe("buildWorkerEnv — USAGE_LANE", () => {
     expect(env.SOME_API_KEY).toBeUndefined();
     expect(env.SESSION_ID).toBeUndefined();
     expect(env.HOME).toBe("/Users/example");
+  });
+});
+
+// ── buildWorkerEnv — MAX_THINKING_TOKENS ─────────────────────────────────────────
+//
+// GLM's reasoning budget on the IU leg — the only control that reaches glm-5.3-flash's
+// thinking depth there, since --effort/reasoning_effort/thinking:{type:disabled} are all
+// ignored by the Requesty hop. Only ever exported for a non-Claude model.
+
+describe("buildWorkerEnv — MAX_THINKING_TOKENS", () => {
+  test("exports the route's thinking budget for a non-Claude model", () => {
+    const env = workerEnv({ backend: "iu", model: "glm-5.3-flash", thinkingTokens: 2048 });
+    expect(env.MAX_THINKING_TOKENS).toBe("2048");
+  });
+
+  test("omits the var entirely when the route declares no thinking budget", () => {
+    const env = workerEnv({ backend: "iu", model: "glm-5.3-flash" });
+    expect(env.MAX_THINKING_TOKENS).toBeUndefined();
+  });
+
+  test("never sets it for a Claude model, even if a caller passed one", () => {
+    const env = workerEnv({
+      backend: "max",
+      model: "claude-sonnet-5",
+      thinkingTokens: 8192,
+    });
+    expect(env.MAX_THINKING_TOKENS).toBeUndefined();
+  });
+
+  test("scrubs an inherited value rather than passing it through", () => {
+    // The LaunchAgent's own env can carry a stale MAX_THINKING_TOKENS from a prior run —
+    // it must never survive onto a route that doesn't set its own, Claude or not.
+    const claudeEnv = workerEnv({
+      backend: "max",
+      model: "claude-sonnet-5",
+      baseEnv: { MAX_THINKING_TOKENS: "9999" },
+    });
+    expect(claudeEnv.MAX_THINKING_TOKENS).toBeUndefined();
+
+    const noBudgetEnv = workerEnv({
+      backend: "iu",
+      model: "glm-5.3-flash",
+      baseEnv: { MAX_THINKING_TOKENS: "9999" },
+    });
+    expect(noBudgetEnv.MAX_THINKING_TOKENS).toBeUndefined();
   });
 });

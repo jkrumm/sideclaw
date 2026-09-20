@@ -674,6 +674,10 @@ export interface WorkerEnvInput {
   anthropicBase: string;
   /** Only read on the `iu` backend. */
   iuKey: string;
+  /** `ToolRoute.thinkingTokens` (routing.ts) — GLM's reasoning budget on the IU leg. Only
+   *  exported (as `MAX_THINKING_TOKENS`) when `model` is non-Claude; a Claude model
+   *  controls thinking a different way, so this is silently dropped for one. */
+  thinkingTokens?: number;
   extraEnv?: Record<string, string>;
   /** Override for tests — defaults to `process.env`. Only entries with a defined value are
    *  copied, mirroring `Object.entries` skipping `undefined`. */
@@ -705,7 +709,16 @@ export function usageLane(tool: string | undefined): string {
  *  below for why order there is load-bearing), then apply the backend/gateway/extraEnv
  *  layers, each of which can reintroduce a var the scrub removed on purpose. */
 export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
-  const { tool, backend, model, anthropicBase, iuKey, extraEnv, baseEnv = process.env } = input;
+  const {
+    tool,
+    backend,
+    model,
+    anthropicBase,
+    iuKey,
+    thinkingTokens,
+    extraEnv,
+    baseEnv = process.env,
+  } = input;
 
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(baseEnv)) {
@@ -762,7 +775,7 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
       backend satisfies never;
   }
   // Gateway-tier env for non-Claude ids, mirroring dotfiles' `ca` gateway branch
-  // (config/zsh/claude.zsh). Three things a gateway id needs that a claude-* id does not:
+  // (config/zsh/claude.zsh). Four things a gateway id needs that a claude-* id does not:
   //  - every ANTHROPIC_DEFAULT_* tier pinned to the SAME id, or a CLI-internal call
   //    (title generation, compaction, a spawned subagent) asks the gateway for a
   //    claude-* default it does not serve — measured 2026-08-31 as a hard
@@ -774,14 +787,27 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
   //    auto-compacts at 200k, and a blanket 1M would hard-reject on smaller models;
   //  - API_TIMEOUT_MS raised — these models legitimately take minutes per turn
   //    (glm-5.3-flash measured 280–737s per benchmark turn), and the default turns
-  //    slow-but-correct into a spurious timeout.
+  //    slow-but-correct into a spurious timeout;
+  //  - MAX_THINKING_TOKENS, when the route declares one (`ToolRoute.thinkingTokens`,
+  //    routing.ts) — the CLI's env var for Anthropic's `thinking.budget_tokens`, and the
+  //    ONLY thinking control that reaches glm-5.3-flash on the Requesty hop: `--effort`,
+  //    `reasoning_effort` and `thinking:{type:disabled}` are all ignored there. Left unset
+  //    (no env var at all) when the route declares none, which runs GLM at its own `max`
+  //    reasoning default rather than sending an arbitrary number.
   // Claude ids keep the inherited defaults: their `[1m]` window handling lives in the
   // model id itself, and the CLI's own defaults resolve against served models.
+  //
+  // Scrubbed unconditionally, same as ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN above: a
+  // LaunchAgent-inherited MAX_THINKING_TOKENS must not survive onto a Claude route (which
+  // never reaches the conditional set below) or onto a non-Claude route whose ToolRoute
+  // declares no budget (which reaches the block but skips the set).
+  delete env.MAX_THINKING_TOKENS;
   if (!isClaudeModel(model)) {
     env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
     env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
     env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
     env.ANTHROPIC_DEFAULT_FABLE_MODEL = model;
+    if (thinkingTokens !== undefined) env.MAX_THINKING_TOKENS = String(thinkingTokens);
     const ctx = String(gatewayContextTokens(model));
     env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = ctx;
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = ctx;
@@ -1119,15 +1145,12 @@ export function unclassifiedOutputFailure<T = unknown>(
  *  api.anthropic.com to self-report a window, so over any custom base URL it assumes
  *  200k and auto-compacts there. This is a client-side budget, not a server limit:
  *  set it HIGHER than the real window and a clean auto-compact becomes a hard API
- *  rejection mid-session — which is why 1M is not a safe blanket default
- *  (kimi-k2.7-code hard-caps at 262144). Anything absent falls back to 200k:
+ *  rejection mid-session — which is why 1M is not a safe blanket default (a smaller
+ *  gateway model can hard-cap well under it). Anything absent falls back to 200k:
  *  deliberately conservative, not measured. `modelpick`'s `bun run pick` measures
  *  these; re-run it when adding a row. */
 const GATEWAY_CONTEXT_TOKENS: Record<string, number> = {
   "glm-5.3-flash": 1_000_000, // measured — still accepted at a 1.1M probe ceiling
-  "DeepSeek-V4-Pro": 1_000_000, // documented (IU portal catalog), not yet probed
-  "DeepSeek-V4-Flash": 1_000_000, // measured — still accepted at a 1.1M probe ceiling
-  "kimi-k2.7-code": 262_144, // measured — the gateway names the number in its 400
 };
 const GATEWAY_CONTEXT_FALLBACK = 200_000;
 
@@ -1387,7 +1410,15 @@ async function runSessionAttempt<T = unknown>(
     resumeSessionId,
   });
 
-  const env = buildWorkerEnv({ tool, backend, model, anthropicBase, iuKey, extraEnv });
+  const env = buildWorkerEnv({
+    tool,
+    backend,
+    model,
+    anthropicBase,
+    iuKey,
+    thinkingTokens: route.thinkingTokens,
+    extraEnv,
+  });
 
   const startMs = performance.now();
   runnerLogger().info(

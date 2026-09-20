@@ -14,7 +14,7 @@ Always buffer partial lines — don't parse until you hit `\n`.
   "uuid": "<uuid>",
   "session_id": "<uuid>",
   "claude_code_version": "2.1.88",
-  "model": "claude-sonnet-4-6",
+  "model": "claude-sonnet-5",
   "cwd": "/path/to/project",
   "tools": ["Bash", "Read", "Edit", "Glob", "Grep"],
   "mcp_servers": [{ "name": "my-server", "status": "connected" }],
@@ -44,7 +44,7 @@ Capture `session_id` here for `--resume` usage.
         "input": { "command": "ls -la" }
       }
     ],
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "stop_reason": "tool_use",
     "usage": { "input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 0 }
   }

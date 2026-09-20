@@ -277,10 +277,11 @@ narrative"), never inline in an interactive session.
   `## Open questions` section is omitted entirely when the model returned
   none — not an empty heading.
 - **Model/backend come from `routeFor("narrative")`** — `claude-sonnet-5[1m]`
-  on IU, same model on Max as the reverse lane — this is editorial judgment
-  over a prompt, not classification, the opposite reasoning from
-  `overview`'s cheap tier. A daily cron pass across several projects spends
-  real tokens, so callers should not invoke it speculatively.
+  on Max (a flat subscription, free at the margin), same model on IU as the
+  reverse fallback lane — this is editorial judgment over a prompt, not
+  classification, the opposite reasoning from `overview`'s cheap tier. A daily
+  cron pass across several projects spends real tokens, so callers should not
+  invoke it speculatively.
 - Pure units (`clampSections`, `stripInventedLinks`, `extractSessionProse`,
   `buildNarrativePrompt`, `renderNarrativePage`) are covered by
   `tests/narrative.test.ts` — no subprocess, no mocks, mutation-verified on

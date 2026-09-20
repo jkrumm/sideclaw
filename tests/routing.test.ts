@@ -36,13 +36,14 @@ describe("buildRoutingTable defaults", () => {
     expect(overrides).toEqual([]);
   });
 
-  test("check, overview, review's router: glm-5.3-flash on iu, Haiku on max as the reverse lane (the CLASSIFY tier)", () => {
+  test("check, overview, review's router: glm-5.3-flash on iu, Haiku on max as the reverse lane (the CLASSIFY tier), thinking capped at 2048", () => {
     for (const tool of ["check", "overview", "review_router"] as const) {
       expect(routes[tool]).toEqual({
         model: GLM_FLASH,
         backend: "iu",
         fallback: { backend: "max", model: HAIKU },
         transport: "session",
+        thinkingTokens: 2048,
       });
     }
   });
@@ -58,12 +59,13 @@ describe("buildRoutingTable defaults", () => {
     }
   });
 
-  test("dispatch: glm-5.3-flash on iu with the Sonnet-on-max quota fallback (the AGENT tier)", () => {
+  test("dispatch: glm-5.3-flash on iu with the Sonnet-on-max quota fallback (the AGENT tier), thinking capped at 8192", () => {
     expect(routes.dispatch).toEqual({
       model: GLM_FLASH,
       backend: "iu",
       fallback: { backend: "max", model: SONNET },
       transport: "session",
+      thinkingTokens: 8192,
     });
   });
 
@@ -184,6 +186,48 @@ describe("buildRoutingTable env overrides", () => {
     expect(routes.check.model).toBe(GLM_FLASH);
     expect(overrides).toEqual([]);
   });
+
+  test("SIDECLAW_THINKING_TOKENS_<TOOL> replaces the tier's default and is reported", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_THINKING_TOKENS_CHECK: "4096" });
+    expect(routes.check.thinkingTokens).toBe(4096);
+    expect(overrides).toEqual([{ tool: "check", field: "thinkingTokens", value: "4096" }]);
+  });
+
+  test("a non-positive-integer thinking-token override is refused, default stays", () => {
+    for (const bad of ["0", "-8", "3.5", "not-a-number"]) {
+      const { routes, overrides } = buildRoutingTable({ SIDECLAW_THINKING_TOKENS_DISPATCH: bad });
+      expect(routes.dispatch.thinkingTokens).toBe(8192);
+      expect(overrides[0]?.refused).toContain("positive integer");
+    }
+  });
+
+  test("a thinking-token override on a Claude (JUDGE/PROSE) route is applied but harmless", () => {
+    // Nothing refuses it here — buildWorkerEnv is the gate that only ever exports
+    // MAX_THINKING_TOKENS for a non-Claude model, so setting this on a Claude route is a
+    // no-op at spawn time rather than a build-time error.
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_THINKING_TOKENS_REVIEW: "4096" });
+    expect(routes.review.thinkingTokens).toBe(4096);
+    expect(overrides).toEqual([{ tool: "review", field: "thinkingTokens", value: "4096" }]);
+  });
+
+  test("a thinking-token override on a fixed iu-openai transport tool is refused, whatever the value", () => {
+    for (const [envKey, tool] of [
+      ["SIDECLAW_THINKING_TOKENS_ADVERSARY", "adversary"],
+      ["SIDECLAW_THINKING_TOKENS_READ_IMAGE", "read_image"],
+      ["SIDECLAW_THINKING_TOKENS_READ_DRAWING", "read_drawing"],
+    ] as const) {
+      const { routes, overrides } = buildRoutingTable({ [envKey]: "4096" });
+      expect(routes[tool].thinkingTokens).toBeUndefined();
+      expect(overrides).toEqual([
+        {
+          tool,
+          field: "thinkingTokens",
+          value: "4096",
+          refused: expect.stringContaining("session transport"),
+        },
+      ]);
+    }
+  });
 });
 
 describe("withModel", () => {
@@ -200,32 +244,35 @@ describe("withModel", () => {
       backend: "max",
       fallback: { backend: "iu" },
       transport: "session",
+      thinkingTokens: undefined,
     });
   });
 
-  test("a Claude override on check drops the fixed Haiku fallback — same model on max instead", () => {
+  test("a Claude override on check drops the fixed Haiku fallback — same model on max instead, thinkingTokens carries over harmlessly", () => {
     const r = withModel(routeFor("overview"), "claude-sonnet-5[1m]");
     expect(r).toEqual({
       model: "claude-sonnet-5[1m]",
       backend: "iu",
       fallback: { backend: "max" },
       transport: "session",
+      thinkingTokens: 2048,
     });
   });
 
   test("a gateway override on a max route is forced onto iu with no Max-servable fallback", () => {
-    const r = withModel(routeFor("review"), "DeepSeek-V4-Flash");
+    const r = withModel(routeFor("review"), "some-gateway-model");
     expect(r.backend).toBe("iu");
     expect(r.fallback).toBeNull();
   });
 
   test("a gateway override on check keeps the fixed Haiku fallback", () => {
-    const r = withModel(routeFor("check"), "DeepSeek-V4-Flash");
+    const r = withModel(routeFor("check"), "some-gateway-model");
     expect(r).toEqual({
-      model: "DeepSeek-V4-Flash",
+      model: "some-gateway-model",
       backend: "iu",
       fallback: { backend: "max", model: HAIKU },
       transport: "session",
+      thinkingTokens: 2048,
     });
   });
 

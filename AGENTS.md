@@ -216,7 +216,8 @@ The `narrative` job writes/revises one project's Obsidian vault page from
 git log + session transcripts + `voice.md` — business terms, never a
 changelog; `changed: false` with no page is a correct default answer, not a
 failure. Model/backend from `routeFor("narrative")` (`claude-sonnet-5[1m]` on
-both lanes — editorial judgment, not classification, so no cheap tier). Caps
+Max first, IU as the reverse fallback — editorial judgment, not
+classification, so no cheap tier). Caps
 enforced in code (`clampSections`), never trusted from the model. Full input/
 output contract and gathering rules: `docs/agent-overview-internals.md`.
 
@@ -229,16 +230,29 @@ gated on `RESEARCH_GATEWAY_URL`/`RESEARCH_GATEWAY_TOKEN`) and self-validate
 ### Worker routing — `server/lib/routing.ts` is the only place a model or backend is decided
 
 Every worker session (`runSession`) and the adversary text call take
-`{ model, backend, fallback }` from one per-tool table; nothing else
-hardcodes an id. Handlers pass `route: routeFor("<tool>")`, the MCP tool
-descriptions print the same route under `MODEL:`, and **`GET /api/routing`**
-shows the effective table plus every applied or refused override.
+`{ model, backend, fallback, thinkingTokens }` from one per-tool table;
+nothing else hardcodes an id. Handlers pass `route: routeFor("<tool>")`, the
+MCP tool descriptions print the same route under `MODEL:`, and **`GET
+/api/routing`** shows the effective table plus every applied or refused
+override.
 
 Live table: **`GET /api/routing`**. Overrides: `SIDECLAW_MODEL_<TOOL>=<id>`,
-`SIDECLAW_BACKEND_<TOOL>=iu|max` (read once at module load → `make reload`).
-Full rationale — the tiers, the reactive fallback, why the proactive
-quota-ceiling pre-check was removed 2026-09-08 and must not return:
-`brain/wiki/engineering/model-routing.md`.
+`SIDECLAW_BACKEND_<TOOL>=iu|max`, `SIDECLAW_THINKING_TOKENS_<TOOL>=<n>` (read
+once at module load → `make reload`). Full rationale — the tiers, the
+reactive fallback, why the proactive quota-ceiling pre-check was removed
+2026-09-08 and must not return: `brain/wiki/engineering/model-routing.md`.
+
+**`thinkingTokens` governs GLM's reasoning budget on the IU leg** —
+`--effort`, `reasoning_effort` and `thinking:{type:disabled}` are all ignored
+by the Requesty hop, so `MAX_THINKING_TOKENS` (mapped by the CLI onto
+Anthropic's `thinking.budget_tokens`) is the only control that reaches
+glm-5.3-flash there. Unset means GLM's `max` default, its worst setting. The
+CLASSIFY tier (check, overview, review_router) runs at 2048; AGENT (dispatch)
+at 8192. `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
+only for non-Claude models — a Claude route's `thinkingTokens` (currently none
+set) would be a no-op there anyway, since thinking on Claude is controlled a
+different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
+`thinkingTokens` — they stay on Claude.
 
 **`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed
 `http` server) into its own worker session — key resolution fails soft
@@ -377,10 +391,15 @@ the 60s SDK timeout. Billed IU per-token, zero Max.
 - Credentials (`server/lib/iu-openai.ts`): Keychain (`claude-sdk-api-key`,
   `claude-sdk-base-url`) or `IU_API_KEY`/`IU_BASE_URL` env; OpenAI base
   derived from the Anthropic base (`/anthropic` → `/openai/v1`).
-- Model fixed at `gemini-3.5-flash` — a non-EU vendor, fine for
-  git-committed/non-sensitive content, not PII.
+- Model defaults to `gemini-3.5-flash` — a non-EU vendor, fine for
+  git-committed/non-sensitive content, not PII — overridable via
+  `SIDECLAW_MODEL_READ_IMAGE`/`SIDECLAW_MODEL_READ_DRAWING` like every other
+  routed tool (`server/lib/routing.ts`); a `SIDECLAW_BACKEND_*` override is
+  refused instead, since these run over the fixed `iu-openai` transport.
 - `read_image` — vision read of any image (SVGs rasterized first via headless
-  Chrome, `server/lib/chrome.ts`).
+  Chrome, `server/lib/chrome.ts`). Sampled at the provider's default
+  temperature — no `temperature` on the wire, since the gateway 503s on a
+  non-default value for the gpt-5.x family and VISION may be re-pointed there.
 - `read_drawing` — composite: rasterize+read the `.svg` AND deterministically
   parse the paired `.excalidraw` JSON, merged into one synthesis. Retires the
   dotfiles `/read-drawing` skill's `claude_iu` Haiku path.

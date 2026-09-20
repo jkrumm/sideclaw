@@ -129,11 +129,12 @@ export async function runCheck(
       jsonSchema: CHECK_JSON_SCHEMA,
       route: routeFor("check"),
       readOnly: true,
-      // No `retryAfterOutput`: glm-5.3-flash defaults to max reasoning effort and is
-      // genuinely slow on hard validation runs, not stuck — a timeout after it has
-      // already produced turns used to re-lane onto Haiku mid-job instead of just
-      // letting it finish. The idle watchdog in session-runner.ts is the real
-      // stuck-detector now; only a zero-output timeout still moves lanes.
+      // No `retryAfterOutput`: glm-5.3-flash thinking is capped at 2048 tokens here
+      // (`ToolRoute.thinkingTokens`, MAX_THINKING_TOKENS), but it can still run genuinely
+      // slow on hard validation runs, not stuck — a timeout after it has already produced
+      // turns used to re-lane onto Haiku mid-job instead of just letting it finish. The
+      // idle watchdog in session-runner.ts is the real stuck-detector now; only a
+      // zero-output timeout still moves lanes.
       validate: zodValidator(CHECK_OUTPUT),
       onActivity: onProgress,
     });

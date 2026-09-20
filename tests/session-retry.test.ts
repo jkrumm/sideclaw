@@ -85,7 +85,7 @@ describe("resolveBackend", () => {
   test("a non-Claude id is forced onto iu — max only serves Anthropic models", () => {
     expect(
       resolveBackend({
-        model: "DeepSeek-V4-Flash",
+        model: "some-gateway-model",
         backend: "max",
         fallback: null,
         transport: "session",
@@ -125,16 +125,12 @@ describe("resolveBackend", () => {
 describe("gatewayContextTokens", () => {
   test("a measured 1M model gets its full window", () => {
     expect(gatewayContextTokens("glm-5.3-flash")).toBe(1_000_000);
-    expect(gatewayContextTokens("DeepSeek-V4-Flash")).toBe(1_000_000);
-  });
-
-  test("a model with a smaller hard cap is not budgeted past it", () => {
-    // A budget above the real window turns a clean auto-compact into a hard API
-    // rejection mid-session — the reason 1M is not a blanket default.
-    expect(gatewayContextTokens("kimi-k2.7-code")).toBe(262_144);
   });
 
   test("an unknown id falls back to the conservative 200k, never 1M", () => {
+    // A budget above the real window turns a clean auto-compact into a hard API
+    // rejection mid-session — the reason 1M is not a blanket default for a model
+    // whose real window isn't in the table.
     expect(gatewayContextTokens("some-new-gateway-model")).toBe(200_000);
   });
 });

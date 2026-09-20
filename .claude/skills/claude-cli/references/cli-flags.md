@@ -9,7 +9,7 @@ All flags for `claude -p` (non-interactive/headless mode). Current as of v2.1.88
 | `-p` / `--print` | boolean | false | Non-interactive mode. Required for all headless use. |
 | `--output-format` | `text\|json\|stream-json` | `text` | Output format. `json` = single JSON result. `stream-json` = NDJSON events. |
 | `--json-schema` | string (JSON) | none | Force structured JSON output matching schema. Only with `--output-format json`. Result in `structured_output` field. |
-| `--model` | string | sonnet | Model alias (`haiku`, `sonnet`, `opus`) or full ID (`claude-sonnet-4-6`). |
+| `--model` | string | sonnet | Model alias (`haiku`, `sonnet`, `opus`) or full ID (`claude-sonnet-5`). |
 | `--effort` | `low\|medium\|high\|max` | `high` | Thinking depth. `max` requires Opus. |
 | `--fallback-model` | string | none | Auto-fallback when primary model is overloaded. |
 
@@ -45,7 +45,7 @@ All flags for `claude -p` (non-interactive/headless mode). Current as of v2.1.88
 
 | Flag | Type | Default | Description |
 |-|-|-|-|
-| `--max-turns` | number | unlimited | Max agentic turns. Exits with `error_max_turns`. |
+| `--max-turns` | number | unlimited | Max agentic turns. Exits with `error_max_turns`. **Banned in this house** (`rules/agent-limits.md`) — no worker gets a turn ceiling; the idle watchdog (no output for N minutes) is the only liveness check. |
 | `--max-budget-usd` | number | unlimited | Spending cap in USD. Exits with `error_max_budget_usd`. |
 
 ## Context & Settings
