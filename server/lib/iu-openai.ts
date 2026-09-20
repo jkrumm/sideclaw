@@ -359,11 +359,13 @@ export async function visionRead(opts: {
   const mimeType = opts.mimeType ?? "image/png";
   const t0 = performance.now();
 
+  // No `temperature` on the wire, deliberately — same reasoning as textComplete's: the IU
+  // gateway 503s on a non-default temperature for the gpt-5.x family, and VISION may be
+  // re-pointed at one of those models. Sampled at the provider's default.
   const data = await iuFetch(
     "/chat/completions",
     {
       model,
-      temperature: 0,
       messages: [
         {
           role: "user",
@@ -405,18 +407,21 @@ export interface TextCompleteResult {
  * one HTTPS call, one JSON response, billed IU per-token. `model` comes from the
  * caller's route (server/lib/routing.ts). Pass `tool` to tag the usage-tracker row.
  *
- * `temperature` is omitted from the request unless explicitly passed. Reasoning
- * models (the gpt-5.x family) accept only the default (1) and reject any
- * explicit value with a 400 — which the IU gateway relays as a 503, i.e. one
- * iuFetch treats as retryable and burns every attempt on. Sending nothing is
- * the only option that works across both thinking and non-thinking models.
+ * `temperature` is never sent — no caller needs it, and reasoning models (the gpt-5.x
+ * family) accept only the default (1) and reject any explicit value with a 400 — which
+ * the IU gateway relays as a 503, i.e. one iuFetch treats as retryable and burns every
+ * attempt on. Sending nothing is the only option that works across both thinking and
+ * non-thinking models.
  *
- * `reasoningEffort` likewise only goes on the wire when passed. It is a gpt-5.x
- * parameter ("none" | "low" | "medium" | "high" | "xhigh"); the gateway rejects
- * an unknown value, and non-reasoning models reject the parameter itself.
- * Omitting it on a gpt-5.x model is NOT a neutral default — it behaves as
- * "none", i.e. the reasoning model answers with no thinking at all while still
- * billing at its reasoning-tier rate. Set it explicitly to get what you pay for.
+ * `reasoningEffort` only goes on the wire when passed. It is a gpt-5.x parameter ("none" |
+ * "low" | "medium" | "high" | "xhigh"); the gateway rejects an unknown value, and
+ * non-reasoning models reject the parameter itself. Omitting it on a gpt-5.x model is NOT
+ * a neutral default — it behaves as "none", i.e. the reasoning model answers with no
+ * thinking at all while still billing at its reasoning-tier rate. Set it explicitly to get
+ * what you pay for.
+ *
+ * `maxTokens` is sent as `max_completion_tokens` — the OpenAI leg's current parameter name;
+ * `max_tokens` is the deprecated one and some models on this gateway reject it outright.
  *
  * Streamed under the hood; `timeoutMs` is an idle-watchdog budget (no token for this long,
  * default IDLE_TIMEOUT_MS = 5 min), not a ceiling on the whole call — a slow-but-progressing
@@ -425,7 +430,6 @@ export async function textComplete(opts: {
   prompt: string;
   model: string;
   tool?: string;
-  temperature?: number;
   reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   maxTokens?: number;
   timeoutMs?: number;
@@ -437,9 +441,8 @@ export async function textComplete(opts: {
     model,
     messages: [{ role: "user", content: opts.prompt }],
   };
-  if (opts.temperature !== undefined) body.temperature = opts.temperature;
   if (opts.reasoningEffort !== undefined) body.reasoning_effort = opts.reasoningEffort;
-  if (opts.maxTokens) body.max_tokens = opts.maxTokens;
+  if (opts.maxTokens) body.max_completion_tokens = opts.maxTokens;
 
   const data = await iuFetch("/chat/completions", body, { idleTimeoutMs: opts.timeoutMs });
 
