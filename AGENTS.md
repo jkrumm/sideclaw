@@ -242,13 +242,16 @@ once at module load → `make reload`). Full rationale — the tiers, the
 reactive fallback, why the proactive quota-ceiling pre-check was removed
 2026-09-08 and must not return: `brain/wiki/engineering/model-routing.md`.
 
-**`thinkingTokens` governs GLM's reasoning budget on the IU leg** —
-`--effort`, `reasoning_effort` and `thinking:{type:disabled}` are all ignored
-by the Requesty hop, so `MAX_THINKING_TOKENS` (mapped by the CLI onto
+**`thinkingTokens` governs a gateway model's reasoning budget on the IU leg**
+— `--effort`, `reasoning_effort` and `thinking:{type:disabled}` are all
+ignored by the Requesty hop, so `MAX_THINKING_TOKENS` (mapped by the CLI onto
 Anthropic's `thinking.budget_tokens`) is the only control that reaches
-glm-5.3-flash there. Unset means GLM's `max` default, its worst setting. The
-CLASSIFY tier (check, overview, review_router) runs at 2048; AGENT (dispatch)
-at 8192. `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
+glm-5.3-flash or DeepSeek-V4-Flash there. Unset means the model's own `max`
+default, its worst setting. The CLASSIFY tier (check, overview,
+review_router; glm-5.3-flash) runs at 2048; AGENT (dispatch;
+DeepSeek-V4-Flash since 2026-09-21, formerly glm-5.3-flash) at 8192 —
+`server/lib/routing.ts`'s dated comment carries the ccbench/POC evidence for
+that move. `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
 only for non-Claude models — a Claude route's `thinkingTokens` (currently none
 set) would be a no-op there anyway, since thinking on Claude is controlled a
 different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no

@@ -111,7 +111,7 @@ latched so the fallback attempt itself is never switched again:
   single 503 is the common case and must not spend Max quota — and if that
   fails the same way the next attempt runs on `max`, on `fallback.model` when
   the route fixes one (`check`/`overview` → Haiku, `dispatch` → Sonnet, since
-  glm cannot run on Max) or the same model (`backend.fallback`, reason
+  a gateway id cannot run on Max) or the same model (`backend.fallback`, reason
   `iu-unavailable`). Missing IU credentials (`iuConfigError`) and a **timeout
   with zero worker events** skip the same-backend retry and go straight to
   it. No caller currently sets `retryAfterOutput: true` — `check`, `overview`
@@ -122,12 +122,13 @@ latched so the fallback attempt itself is never switched again:
 
   **Thinking budget** (`ToolRoute.thinkingTokens`, `server/lib/routing.ts`):
   `--effort`/`reasoning_effort`/`thinking:{type:disabled}` are all ignored by
-  the Requesty hop for glm-5.3-flash, so the only lever that reaches it is
-  `MAX_THINKING_TOKENS` (the CLI's env var for Anthropic's
-  `thinking.budget_tokens`), exported by `buildWorkerEnv` for any non-Claude
-  route. CLASSIFY (check/overview/review_router) runs at 2048; AGENT
-  (dispatch) at 8192; JUDGE/PROSE stay on Claude and carry no
-  `thinkingTokens`. Overridable per tool via
+  the Requesty hop for glm-5.3-flash and DeepSeek-V4-Flash alike, so the only
+  lever that reaches either is `MAX_THINKING_TOKENS` (the CLI's env var for
+  Anthropic's `thinking.budget_tokens`), exported by `buildWorkerEnv` for any
+  non-Claude route. CLASSIFY (check/overview/review_router, glm-5.3-flash)
+  runs at 2048; AGENT (dispatch, DeepSeek-V4-Flash since 2026-09-21) at 8192
+  — the budget its ccbench/POC evidence was measured under; JUDGE/PROSE stay
+  on Claude and carry no `thinkingTokens`. Overridable per tool via
   `SIDECLAW_THINKING_TOKENS_<TOOL>`, same env pattern as the model/backend
   overrides above.
 

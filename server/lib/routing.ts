@@ -36,12 +36,13 @@
 // The effective override list (applied + refused) is logged once at startup via
 // `logRoutingOverrides`.
 //
-// `thinkingTokens` is GLM's reasoning budget on the IU leg (see `MAX_THINKING_TOKENS` in
-// session-runner.ts's `buildWorkerEnv`) — `--effort`/`reasoning_effort`/
-// `thinking:{type:disabled}` are all ignored by the Requesty hop, so this env var is the
-// only control that reaches glm-5.3-flash there; unset means GLM's `max` default, its
-// worst setting. Only meaningful on a non-Claude route — `buildWorkerEnv` only exports it
-// for one, so it is harmless (never sent) when set on a Claude route.
+// `thinkingTokens` is a gateway model's reasoning budget on the IU leg (see
+// `MAX_THINKING_TOKENS` in session-runner.ts's `buildWorkerEnv`) — `--effort`/
+// `reasoning_effort`/`thinking:{type:disabled}` are all ignored by the Requesty hop, so
+// this env var is the only control that reaches glm-5.3-flash (CLASSIFY) or
+// DeepSeek-V4-Flash (AGENT) there; unset means the model's own `max` default, its worst
+// setting. Only meaningful on a non-Claude route — `buildWorkerEnv` only exports it for
+// one, so it is harmless (never sent) when set on a Claude route.
 
 export type Backend = "iu" | "max";
 
@@ -75,17 +76,19 @@ export interface ToolRoute {
    *  "iu-openai": a direct IU OpenAI transport call (adversary, read_image,
    *  read_drawing) that only ever consumes `.model` — see the module comment above. */
   transport: "session" | "iu-openai";
-  /** GLM's reasoning budget on the IU leg — `session-runner.ts`'s `buildWorkerEnv` exports
-   *  this as `MAX_THINKING_TOKENS` for any non-Claude model, the only control that reaches
-   *  glm-5.3-flash's thinking depth on the Requesty hop. Absent on Claude routes (JUDGE,
-   *  PROSE), which control thinking a different way, and on the `iu-openai` transport
-   *  routes (VISION, adversary), which never reach `buildWorkerEnv` at all. */
+  /** A gateway model's reasoning budget on the IU leg — `session-runner.ts`'s
+   *  `buildWorkerEnv` exports this as `MAX_THINKING_TOKENS` for any non-Claude model, the
+   *  only control that reaches glm-5.3-flash's or DeepSeek-V4-Flash's thinking depth on
+   *  the Requesty hop. Absent on Claude routes (JUDGE, PROSE), which control thinking a
+   *  different way, and on the `iu-openai` transport routes (VISION, adversary), which
+   *  never reach `buildWorkerEnv` at all. */
   thinkingTokens?: number;
 }
 
 export const SONNET = "claude-sonnet-5[1m]";
 export const HAIKU = "claude-haiku-4-5";
 export const GLM_FLASH = "glm-5.3-flash";
+export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
 
 // ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
 // touches one line instead of hunting down every duplicate. ──────────────────────────
@@ -94,17 +97,33 @@ export const GLM_FLASH = "glm-5.3-flash";
 //   over IU with Haiku-on-Max as the reverse lane, thinking capped at 2048 tokens
 //   (`thinkingTokens` — see the module-header comment on `MAX_THINKING_TOKENS`; unset would
 //   run GLM's `max` reasoning default, its worst setting, on work that is meant to be cheap).
-// AGENT: dispatch ONLY — owner decision 2026-09-11 (formerly a `SIDECLAW_MODEL_DISPATCH`
-//   override in `.env`; moved here so the default and the decision are the same place)
-//   to run dispatch's agentic worker episodes on glm-5.3-flash over IU, same model
-//   CLASSIFY already trusts: ccbench (modelpick, 2026-09-11) scored it 10/10 on the
-//   agentic coding suite at $0.048/suite, ahead of claude-sonnet-5 on DeepSWE (0.634 vs
-//   0.538) and leading the Anthropic-route field on the AA coding index. GLM dispatch
-//   episodes have been measured completing fine. claude-sonnet-5[1m] on Max is the
-//   reactive fallback — this is what moves dispatch off the Max subscription onto
-//   metered IU. Thinking capped at 8192 tokens (`thinkingTokens`) — an agentic episode
-//   needs more room than a classify-shaped call but must not default to GLM's unbounded
-//   `max`. Deliberately NOT extended to review or otel — see JUDGE below.
+// AGENT: dispatch ONLY. 2026-09-11: owner decision moved dispatch off a
+//   `SIDECLAW_MODEL_DISPATCH` `.env` override onto glm-5.3-flash over IU (same model
+//   CLASSIFY already trusted), on ccbench scoring it 10/10 on the agentic coding suite.
+//   2026-09-21: moved again, to DeepSeek-V4-Flash, on evidence measured 2026-09-20 by
+//   modelpick ccbench plus a warden POC (Anthropic leg, corrected context env). The
+//   owner's standing complaint with glm in this seat was in-loop speed, in both
+//   interactive and dispatched use, and the numbers back it: ccbench's 10-task suite put
+//   DeepSeek-V4-Flash at composite 1.00, 6m20s wall, ~190 effective in-loop tok/s, $0.09,
+//   4% tool-error, zero compactions, against glm-5.3-flash's 0.81, 38m24s, 13.3 tok/s,
+//   $0.035. DeepSeek-V4-Pro (the owner's first instinct) was rejected on evidence, not
+//   preference: it ties Flash on every refreshed external index (AA coding index 68.8 vs
+//   69.1, terminal-bench 0.787 both), runs ~3x slower and ~7x the cost in ccbench, and
+//   produced one 5-minute idle stall in that run (the CLI auto-backgrounded a long Bash
+//   call, then the model waited silently) — exactly the shape this lane's idle watchdog
+//   turns into a verdict-less kill. The POC ran the same six read-only "decide this open
+//   PR" briefs through warden→sideclaw on both: 12/12 done, no stalls, Flash 0.7–2.9 min
+//   per episode vs Pro's 1.0–6.0, and Flash's verdicts matched an independent Sonnet
+//   review more often — Pro waved through two PRs that review had flagged. Honest
+//   caveat: on the external indices glm-5.3-flash still leads both DeepSeek V4 ids (AA
+//   coding index 71.5) — this is a speed-for-a-little-capability trade, and the models
+//   that beat glm on both (kimi-k3, deepseek-v4.1-flash) are OpenAI-route only,
+//   unreachable from `claude -p`. claude-sonnet-5[1m] on Max stays the reactive fallback
+//   — this is what moves dispatch off the Max subscription onto metered IU. Thinking
+//   stays capped at 8192 tokens (`thinkingTokens`) — the budget DeepSeek-V4-Flash's
+//   benchmark rows above were measured under, and still more room than a classify-shaped
+//   call needs while not defaulting to a gateway model's unbounded `max`. Deliberately
+//   NOT extended to review or otel — see JUDGE below.
 // JUDGE: judgment-heavy work that stays on Max — review (angles/synthesis/router) and
 //   otel. Both excluded from AGENT, for different reasons, both dated 2026-09-11:
 //     - review: measured the same day with `SIDECLAW_MODEL_REVIEW=glm-5.3-flash`, a
@@ -141,7 +160,7 @@ const CLASSIFY: ToolRoute = {
   thinkingTokens: 2048,
 };
 const AGENT: ToolRoute = {
-  model: GLM_FLASH,
+  model: DEEPSEEK_FLASH,
   backend: "iu",
   fallback: { backend: "max", model: SONNET },
   transport: "session",

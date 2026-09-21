@@ -116,7 +116,7 @@ export const DISPATCH_INPUT = z.object({
     .string()
     .optional()
     .describe(
-      "Optional model override, e.g. 'claude-opus-5[1m]'. Defaults to glm-5.3-flash on " +
+      "Optional model override, e.g. 'claude-opus-5[1m]'. Defaults to DeepSeek-V4-Flash on " +
         "the metered IU lane (claude-sonnet-5[1m] on Max is only the reactive fallback); " +
         "only override on explicit request, a Claude override spends Max quota.",
     ),

@@ -5,6 +5,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildRoutingTable,
+  DEEPSEEK_FLASH,
   describeRoute,
   GLM_FLASH,
   HAIKU,
@@ -59,9 +60,9 @@ describe("buildRoutingTable defaults", () => {
     }
   });
 
-  test("dispatch: glm-5.3-flash on iu with the Sonnet-on-max quota fallback (the AGENT tier), thinking capped at 8192", () => {
+  test("dispatch: DeepSeek-V4-Flash on iu with the Sonnet-on-max quota fallback (the AGENT tier), thinking capped at 8192", () => {
     expect(routes.dispatch).toEqual({
-      model: GLM_FLASH,
+      model: DEEPSEEK_FLASH,
       backend: "iu",
       fallback: { backend: "max", model: SONNET },
       transport: "session",
