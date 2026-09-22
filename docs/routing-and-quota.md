@@ -126,11 +126,14 @@ latched so the fallback attempt itself is never switched again:
   lever that reaches either is `MAX_THINKING_TOKENS` (the CLI's env var for
   Anthropic's `thinking.budget_tokens`), exported by `buildWorkerEnv` for any
   non-Claude route. CLASSIFY (check/overview/review_router, glm-5.3-flash)
-  runs at 2048; AGENT (dispatch, DeepSeek-V4-Flash since 2026-09-21) at 8192
-  — the budget its ccbench/POC evidence was measured under; JUDGE/PROSE stay
-  on Claude and carry no `thinkingTokens`. Overridable per tool via
-  `SIDECLAW_THINKING_TOKENS_<TOOL>`, same env pattern as the model/backend
-  overrides above.
+  runs at 2048; AGENT (dispatch's investigate/author tiers, DeepSeek-V4-Flash
+  since 2026-09-21) and AGENT_IMPLEMENT (dispatch's implement tier only,
+  DeepSeek-V4-Pro since 2026-09-22, mirroring warden's own
+  `AUTO_IMPLEMENT_MODEL`) both run at 8192 — the budget AGENT's ccbench/POC
+  evidence was measured under; JUDGE/PROSE stay on Claude and carry no
+  `thinkingTokens`. Overridable per tool via `SIDECLAW_THINKING_TOKENS_<TOOL>`
+  (`SIDECLAW_MODEL_DISPATCH_IMPLEMENT` etc. for the split route), same env
+  pattern as the model/backend overrides above.
 
 `SessionResult.backend` and `.model` carry what actually ran;
 `overview`/`narrative` job output carries `backend` too. Tests:

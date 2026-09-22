@@ -30,6 +30,6 @@ ASYNC: returns { jobId }. Then call job_wait({ jobId }) to block until it finish
 OUTPUT: \`summary\` (one line, read this first), \`verdict\`, \`confidence\` (high | medium | low), \`evidence[]\`, \`nextAction\` (none | issue | implement | human), \`artifactUrl\` (the issue or PR, absent if the episode concluded none was warranted), \`branch\`, \`changedFiles\` (workspace 'in-place' only), and \`degraded\` — true only when the tool itself failed to produce a structured verdict, so treat that as "retry me", not as a finding about the repo.
 CWD: absolute path of the repo to work in — not necessarily this session's CWD. It must be a repo directly under a configured dispatch root.
 POLICY: a repo/tier allowlist is enforced before anything runs, so a submission can come back \`dispatch refused: ...\` instead of a verdict — either the repo sits outside every dispatch root, or the tier exceeds that repo's ceiling. Secret-bearing repos (dotfiles-private, homelab-private) are capped at 'investigate'; \`sensitive\` is derived from the same policy, so omitting the flag does not opt a marked repo out of the outbound scan. \`GET /api/dispatch-policy\` is the effective table.
-MODEL: ${describeRoute(routeFor("dispatch"))}; per-job model param overrides it — see GET /api/routing.`,
+MODEL: investigate/author run ${describeRoute(routeFor("dispatch"))}; implement runs ${describeRoute(routeFor("dispatch_implement"))}. A per-job model param overrides either — see GET /api/routing.`,
   });
 }

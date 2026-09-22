@@ -54,6 +54,7 @@ export const ROUTED_TOOLS = [
   "review",
   "adversary",
   "dispatch",
+  "dispatch_implement",
   "otel",
   "excalidraw",
   "read_image",
@@ -89,6 +90,7 @@ export const SONNET = "claude-sonnet-5[1m]";
 export const HAIKU = "claude-haiku-4-5";
 export const GLM_FLASH = "glm-5.3-flash";
 export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
+export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 
 // ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
 // touches one line instead of hunting down every duplicate. ──────────────────────────
@@ -124,6 +126,25 @@ export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
 //   benchmark rows above were measured under, and still more room than a classify-shaped
 //   call needs while not defaulting to a gateway model's unbounded `max`. Deliberately
 //   NOT extended to review or otel — see JUDGE below.
+// AGENT_IMPLEMENT: dispatch's implement tier only — investigate/author stay on AGENT.
+//   2026-09-22: split off on the owner's explicit instruction, mirroring warden's own
+//   `AUTO_IMPLEMENT_MODEL` (default DeepSeek-V4-Pro, warden/scripts/triage.py), which
+//   already runs implement-tier episodes on Pro via a per-job model override — this makes
+//   it sideclaw's own default too instead of relying on every caller to remember the
+//   override. Tension noted honestly, not papered over: the 2026-09-21 measurement in the
+//   AGENT comment above rejected Pro for this exact seat on evidence (ties Flash on the
+//   external indices, ~3x slower and ~7x the cost in ccbench, one 5-minute idle stall, and
+//   Pro waved through two PRs an independent review had flagged). This split is a policy
+//   call for the higher-stakes write tier, not a new measurement overturning that one — if
+//   it regresses, the fix is reverting `dispatch_implement` to AGENT, not re-litigating the
+//   comment above.
+const AGENT_IMPLEMENT: ToolRoute = {
+  model: DEEPSEEK_PRO,
+  backend: "iu",
+  fallback: { backend: "max", model: SONNET },
+  transport: "session",
+  thinkingTokens: 8192,
+};
 // JUDGE: judgment-heavy work that stays on Max — review (angles/synthesis/router) and
 //   otel. Both excluded from AGENT, for different reasons, both dated 2026-09-11:
 //     - review: measured the same day with `SIDECLAW_MODEL_REVIEW=glm-5.3-flash`, a
@@ -193,6 +214,7 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   review: JUDGE,
   adversary: { model: "gpt-5.6-terra", backend: "iu", fallback: null, transport: "iu-openai" },
   dispatch: AGENT,
+  dispatch_implement: AGENT_IMPLEMENT,
   otel: JUDGE,
   excalidraw: PROSE,
   read_image: VISION,

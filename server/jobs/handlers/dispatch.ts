@@ -984,7 +984,9 @@ export async function runDispatch(
         tool: "dispatch",
         jobId,
         isCancelled,
-        route: routeFor("dispatch"),
+        // implement gets its own (pricier) default model — investigate/author stay on the
+        // cheaper AGENT route. See routing.ts's AGENT_IMPLEMENT comment for why.
+        route: routeFor(tier === "implement" ? "dispatch_implement" : "dispatch"),
         model,
         jsonSchema: z.toJSONSchema(WORKER_OUTPUT[tier]),
         readOnly: profile.readOnly,
