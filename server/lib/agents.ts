@@ -33,7 +33,7 @@ export { stripAnsi, truncate, relativeAge };
 // One producer, one JSON snapshot, three renderers (Hermes, an Argo dashboard, a brain page,
 // a herdr pane). Read-only, no LLM: this module deterministically merges three CLI/registry
 // sources by Claude sessionId and derives a single urgency `state` per agent. See
-// server/routes/agents.ts for the HTTP surface and CLAUDE.md's `### agents` section for the
+// server/routes/agents.ts for the HTTP surface and AGENTS.md's `### agents` section for the
 // operational summary.
 
 // ── Output schema (single source of truth — zod, per .claude/rules/mcp-tools.md) ───────────
@@ -844,7 +844,7 @@ export interface RenderTextOptions {
 /** Renders the same snapshot GET /api/agents returns as compact plain text for `watch`.
  *  `GET /api/overview.txt` calls this with `opts.enrichment`/`opts.overview` to swap the
  *  deterministic state icon for a recommendation icon and add a standing line — see
- *  CLAUDE.md's `### overview` section. Called with no `opts` (the plain `/api/agents.txt`
+ *  AGENTS.md's `### overview` section. Called with no `opts` (the plain `/api/agents.txt`
  *  path), behavior is byte-identical to before enrichment existed. `opts.color` (see
  *  `RenderTextOptions`) additionally colours every span with SGR codes and prepends a
  *  recommendation-count summary bar — `stripAnsi()` of that output (minus the bar line)

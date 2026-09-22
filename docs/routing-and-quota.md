@@ -1,6 +1,6 @@
 # Worker routing — backend selection and fallback
 
-Full rationale behind `server/lib/routing.ts` and `resolveBackend`. CLAUDE.md
+Full rationale behind `server/lib/routing.ts` and `resolveBackend`. AGENTS.md
 keeps the per-tool table and the top-level rule; this is the "why" — read on
 demand when touching routing or the fallback retry logic.
 

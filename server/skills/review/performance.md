@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` and scan `.claude/rules/` at the repo root for performance-relevant conventions. Respect the project's stance against premature optimization — flag real costs, not micro-optimizations.
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) and scan `.claude/rules/` at the repo root for performance-relevant conventions. Respect the project's stance against premature optimization — flag real costs, not micro-optimizations.
 
 ## Evaluation criteria
 

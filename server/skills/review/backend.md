@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-1. Read `CLAUDE.md` at the repo root for backend conventions
+1. Read `AGENTS.md` (or `CLAUDE.md` if there is none) at the repo root for backend conventions
 2. Scan `.claude/rules/` for relevant rules
 3. **Detect the backend framework** — check `package.json` dependencies:
    - If `elysia` is a dependency → load Elysia rules (see below)

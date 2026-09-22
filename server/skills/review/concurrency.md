@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` and scan `.claude/rules/` at the repo root for relevant conventions (error handling, async patterns).
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) and scan `.claude/rules/` at the repo root for relevant conventions (error handling, async patterns).
 
 ## Evaluation criteria
 

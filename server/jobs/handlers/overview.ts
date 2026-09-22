@@ -24,7 +24,7 @@ import {
 // Enriches the deterministic agent snapshot (server/lib/agents.ts, GET /api/agents) with one
 // LLM recommendation per agent — a batched, single-call, prompt-only job. Unlike check/review/
 // dispatch it never touches a repo: everything the worker needs is already in the prompt, so
-// this is a triage classification pass, not an investigation. See CLAUDE.md's `### overview`
+// this is a triage classification pass, not an investigation. See AGENTS.md's `### overview`
 // section for the operational summary and GET /api/overview's cache/staleness semantics.
 
 // ── Input schema (single source for MCP inputSchema + execution validation) ───

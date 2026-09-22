@@ -125,7 +125,7 @@ External tools run in parallel with agents:
 
 Each agent loads project context via `--setting-sources user,project`:
 
-- `CLAUDE.md` and `.claude/rules/` at the repo root
+- `AGENTS.md` (or `CLAUDE.md`) and `.claude/rules/` at the repo root
 - User-level rules with `paths:` frontmatter auto-load based on file types
 
 ### Framework-Specific Rules

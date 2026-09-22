@@ -14,7 +14,7 @@ import { JSON_ONLY_RETRY, loadSkillFile, unwrap } from "../../lib/worker-io.ts";
 
 // Writes or revises ONE project's narrative page for the Obsidian vault: what the project is,
 // where it stands, how it got here — business terms, never a changelog. Prompt-only, no tools,
-// same nonce-fence hardening as overview.ts. See CLAUDE.md's `### narrative` section for the
+// same nonce-fence hardening as overview.ts. See AGENTS.md's `### narrative` section for the
 // operational summary.
 
 // ── Bounds ───────────────────────────────────────────────────────────────────

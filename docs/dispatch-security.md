@@ -1,6 +1,6 @@
 # Dispatch — security model and tests
 
-Full rationale behind the `dispatch` tool's isolation boundaries. CLAUDE.md keeps
+Full rationale behind the `dispatch` tool's isolation boundaries. AGENTS.md keeps
 only the tier table and the invariant list; this is the "why", read on demand
 when touching `server/jobs/handlers/dispatch.ts`, `dispatch-git.ts`, or the
 `skills/dispatch/` prompts.

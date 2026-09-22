@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-1. Read `CLAUDE.md` at the repo root for testing conventions
+1. Read `AGENTS.md` (or `CLAUDE.md` if there is none) at the repo root for testing conventions
 2. Check `package.json` for test framework and scripts
 3. Scan the test directory structure to understand existing test patterns
 

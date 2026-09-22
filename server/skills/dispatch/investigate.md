@@ -6,7 +6,7 @@ never for repair. Do not edit files, do not run fix commands, do not commit.
 
 Work the question directly:
 
-1. **Orient once.** Read the repo's `CLAUDE.md` and look at the structure. Do not
+1. **Orient once.** Read the repo's `AGENTS.md` (or `CLAUDE.md` if there is none) and look at the structure. Do not
    exhaustively map the repo — you are answering one question.
 2. **Follow the evidence.** `git log`/`git diff` for "what changed", `grep` for "where is
    this configured", the actual source for "why does it do that".

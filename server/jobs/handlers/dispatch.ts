@@ -53,7 +53,7 @@ import {
 
 // A dispatch is a bounded episode: an automated observer (today: Hermes) found something it
 // cannot handle without reading a repo, and hands it to a Claude Code session that has that
-// repo's CLAUDE.md / rules / skills. One episode, one verdict, no steering.
+// repo's AGENTS.md / CLAUDE.md / rules / skills. One episode, one verdict, no steering.
 //
 // Three tiers, one pipeline, one record. They differ only in the session's permission
 // profile and in what the HANDLER does afterwards:
@@ -82,7 +82,7 @@ export const DISPATCH_INPUT = z.object({
         "a repo directly under a configured dispatch root — the repo policy also caps which " +
         "tier is allowed there, so a submission outside a root or above a repo's ceiling is " +
         "refused with 'dispatch refused: ...' rather than run. GET /api/dispatch-policy is " +
-        "the effective table. The session picks up this repo's CLAUDE.md, .claude/rules/ and " +
+        "the effective table. The session picks up this repo's AGENTS.md/CLAUDE.md, .claude/rules/ and " +
         ".claude/skills/ — that context is the point of dispatching rather than answering in " +
         "place.",
     ),
@@ -892,7 +892,7 @@ export async function runDispatch(
   // The ONE exception is implement + workspace "in-place": the episode's whole point is to
   // edit the live checkout, deliberately, for the owner's own direct-to-master review flow.
   // It is gated on the lock above (one per repo) and described by a snapshot (below), and it
-  // publishes nothing — the trade-offs are in CLAUDE.md's Dispatch section and
+  // publishes nothing — the trade-offs are in AGENTS.md's Dispatch section and
   // docs/dispatch-security.md.
   //
   // Created INSIDE the try, so the finally owns teardown on every exit path. (A throw from

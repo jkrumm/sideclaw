@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` at the repo root. Scan `.claude/rules/` for TypeScript conventions. These define the project's type strictness expectations.
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) at the repo root. Scan `.claude/rules/` for TypeScript conventions. These define the project's type strictness expectations.
 
 ## Evaluation criteria
 

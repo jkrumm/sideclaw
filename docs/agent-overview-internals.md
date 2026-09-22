@@ -1,6 +1,6 @@
 # agents / overview / narrative — implementation detail
 
-Full design rationale for the three `GET /api/agents*` producers. CLAUDE.md
+Full design rationale for the three `GET /api/agents*` producers. AGENTS.md
 keeps the contract (endpoints, key fields, caps, model routing); this is the
 "why" behind the merge/enrichment/prompt-fencing mechanics — read on demand
 when touching `server/lib/agents.ts`, `server/jobs/handlers/{overview,

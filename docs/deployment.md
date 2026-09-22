@@ -1,6 +1,6 @@
 # Deployment — LaunchAgent, BTM denial, log discipline
 
-Full forensic story behind why sideclaw runs the way it does. CLAUDE.md and
+Full forensic story behind why sideclaw runs the way it does. AGENTS.md and
 `.claude/rules/deployment.md` keep only the invariants (never start standalone,
 use the tracked plist, logs live in `~/Library/Logs`); this is the "why", read
 on demand before touching `com.jkrumm.sideclaw-server.plist` or

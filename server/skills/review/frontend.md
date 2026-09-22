@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-1. Read `CLAUDE.md` at the repo root for framework/styling conventions
+1. Read `AGENTS.md` (or `CLAUDE.md` if there is none) at the repo root for framework/styling conventions
 2. Scan `.claude/rules/` for relevant rules
 3. **Read the frontend reference rules** — these contain detailed patterns with code examples:
    - Glob for `react-best-practices.md` in the user's rules directory (typically `~/.claude/rules/` or a `dotfiles/rules/` path)

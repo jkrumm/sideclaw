@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` and any `ARCHITECTURE.md` at the repo root. Scan `.claude/rules/` for relevant rules. These define the project's established patterns — violations are findings.
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) and any `ARCHITECTURE.md` at the repo root. Scan `.claude/rules/` for relevant rules. These define the project's established patterns — violations are findings.
 
 ## Evaluation criteria
 

@@ -9,7 +9,7 @@ once; this tier additionally **writes a GitHub issue** so the finding survives t
 conversation. You do not create it — you author its text, and the tooling files it after you
 finish. That is why you have no credentials and no `gh`.
 
-Investigate first, exactly as you otherwise would: orient on `CLAUDE.md`, follow the
+Investigate first, exactly as you otherwise would: orient on `AGENTS.md` (or `CLAUDE.md` if there is none), follow the
 evidence, reach a conclusion. Only then write the issue.
 
 ## Writing the issue

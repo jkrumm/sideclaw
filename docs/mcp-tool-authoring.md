@@ -98,7 +98,7 @@ it — design new tools with these baked in.
    assumptions into prompts or angle-gating. Known residual: `review` still
    gates the QA angle on `package.json` existing.
 4. **Schema changes need an MCP reconnect, not just `make reload`** — see
-   CLAUDE.md's MCP Server section.
+   AGENTS.md's MCP Server section.
 
 ## Progress heartbeat (timeout prevention)
 

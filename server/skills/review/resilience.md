@@ -10,7 +10,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` and scan `.claude/rules/` at the repo root — deployment rules, process
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) and scan `.claude/rules/` at the repo root — deployment rules, process
 lifecycle, log locations and state-directory conventions are usually documented there, and a
 change that contradicts a documented operational constraint is a finding on its own.
 

@@ -22,7 +22,7 @@ never two parallel definitions. Return both `content` (text) and
 
 Every tool spawns inner `claude -p` sessions via `runSession()`
 (`server/mcp/session-runner.ts`). Model/backend always come from
-`routeFor("<tool>")` (`server/lib/routing.ts`) — see CLAUDE.md's Worker
+`routeFor("<tool>")` (`server/lib/routing.ts`) — see AGENTS.md's Worker
 routing section and `docs/routing-and-quota.md` for the full table and
 fallback rationale; never hardcode an id.
 

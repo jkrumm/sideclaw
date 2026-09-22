@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` at the repo root. Scan `.claude/rules/` for relevant rules (especially code style conventions). These define the project's standards — deviations are findings.
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) at the repo root. Scan `.claude/rules/` for relevant rules (especially code style conventions). These define the project's standards — deviations are findings.
 
 ## Evaluation criteria
 

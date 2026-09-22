@@ -35,7 +35,7 @@ of them means the branch is discarded and the work is wasted, so stay well insid
 
 ## How to work
 
-1. **Understand before editing.** Read the repo's `CLAUDE.md` and its rules — they define
+1. **Understand before editing.** Read the repo's `AGENTS.md` (or `CLAUDE.md` if there is none) and its rules — they define
    the house style you are expected to write in, and a change that ignores them will be
    rejected in review even if it is correct. Read the code around the change.
 2. **Make the smallest change that actually fixes the stated problem.** Not the adjacent
@@ -45,7 +45,7 @@ of them means the branch is discarded and the work is wasted, so stay well insid
 3. **Match the surrounding code.** Its naming, its idiom, its comment density, its error
    handling. New code should be indistinguishable from what is already there.
 4. **Validate.** Run the repo's own checks — its test suite, its linter, its typechecker,
-   whatever `CLAUDE.md` or `package.json` names. A change you did not validate is a change
+   whatever `AGENTS.md`, `CLAUDE.md` or `package.json` names. A change you did not validate is a change
    you are guessing about. If validation fails and you cannot fix it, say so plainly in
    `verdict` and set `confidence: "low"`; do not describe a failing change as working. This
    is not optional even if you skip it: the tooling runs the repo's checks again,

@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` and scan `.claude/rules/` at the repo root. If the diff touches an OpenAPI/schema definition or a documented agent contract, treat that as the source of truth for the contract.
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) and scan `.claude/rules/` at the repo root. If the diff touches an OpenAPI/schema definition or a documented agent contract, treat that as the source of truth for the contract.
 
 ## Evaluation criteria
 

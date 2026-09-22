@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` and scan `.claude/rules/` at the repo root. Note the persistence stack (ORM, migration tool, database) referenced in the diff or project docs.
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) and scan `.claude/rules/` at the repo root. Note the persistence stack (ORM, migration tool, database) referenced in the diff or project docs.
 
 ## Evaluation criteria
 

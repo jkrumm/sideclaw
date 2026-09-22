@@ -8,7 +8,7 @@ If no changes found, return `{ "findings": [] }`.
 
 ## Load project context
 
-Read `CLAUDE.md` and scan `.claude/rules/` (especially any security rule) at the repo root. The global `security` rule forbids exposing real IPs, hostnames, tokens, usernames, or secrets in any tracked file — treat violations as findings.
+Read `AGENTS.md` (or `CLAUDE.md` if there is none) and scan `.claude/rules/` (especially any security rule) at the repo root. The global `security` rule forbids exposing real IPs, hostnames, tokens, usernames, or secrets in any tracked file — treat violations as findings.
 
 ## Evaluation criteria
 

@@ -19,7 +19,7 @@ function parseTextQuery(query: Record<string, string | undefined>): {
 
 // Deterministic, read-only, no-LLM agent overview: one JSON snapshot of every Claude Code
 // agent on this Mac mini, grouped by project. Single producer behind Hermes, an Argo
-// dashboard, a brain page and a herdr pane. See CLAUDE.md's `### agents` section.
+// dashboard, a brain page and a herdr pane. See AGENTS.md's `### agents` section.
 //
 // `buildSnapshot` itself lives in lib/agents.ts — the `overview` job calls it in-process
 // too, rather than looping back over HTTP to this route. The routes here read it through
