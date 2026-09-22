@@ -39,8 +39,15 @@ import { appLogger as logger } from "../../logger.ts";
 /** Refuse to push a diff that touches the CI execution surface. A dispatched episode has
  *  no business editing what runs on push/PR, and a workflow change arriving inside a PR is
  *  the classic path from "an agent wrote a file" to "an agent ran code in CI". Refusing at
- *  the push step (rather than instructing the worker not to) is what makes it a bound. */
-const FORBIDDEN_PATH_RE = /^\.github\/(workflows|actions)\//;
+ *  the push step (rather than instructing the worker not to) is what makes it a bound.
+ *
+ *  Covers both forges now that `resolveRepoIdentity` accepts GitLab origins:
+ *  `.github/workflows/`/`.github/actions/` for GitHub, `.gitlab-ci.yml` (the root pipeline
+ *  entry point) and everything under `.gitlab/` (its conventional include location, e.g.
+ *  `.gitlab/ci/*.yml`) for GitLab. Same limitation on both forges: an `include: local:`
+ *  path outside these directories is not caught — this guards the idiomatic CI location, not
+ *  every possible one. */
+const FORBIDDEN_PATH_RE = /^\.github\/(workflows|actions)\/|^\.gitlab-ci\.yml$|^\.gitlab\//;
 
 /** The changed files that land in the CI execution surface. Both refusal paths
  *  (worktree push and in-place warning) run the same anchored filter over their
