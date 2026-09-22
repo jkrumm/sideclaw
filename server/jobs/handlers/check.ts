@@ -27,6 +27,20 @@ export const CHECK_INPUT = z.object({
         "non-Node repos). Each command becomes one step named after its first token. " +
         "Omit on Node/Bun repos where package.json scripts are auto-detected reliably.",
     ),
+  stepTimeoutSeconds: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe(
+      "Override the per-step idle-timeout window: seconds of no NEW output before a step " +
+        "is judged stuck and killed. It is an idle watchdog, not a wall clock — a step that " +
+        "keeps producing output past this many seconds is never killed on elapsed time " +
+        "alone. Applies to every step, including test. Default when omitted: 180s for " +
+        "ordinary steps, 600s for the test step specifically (e2e suites legitimately go " +
+        "quiet for minutes between assertions). Raise this per call for a repo whose suite " +
+        "needs more headroom than the default.",
+    ),
 });
 
 export type CheckParams = z.infer<typeof CHECK_INPUT>;
@@ -73,11 +87,74 @@ Return ONLY a JSON object with this exact structure (no explanation, no markdown
 
 Only include \`errors\` when the step failed. \`passed\` at root is true only if ALL steps that ran passed.`;
 
+// ── Command safety — idle watchdog ──────────────────────────────────────────────
+//
+// A hung command must never stall the job, but a fixed wall-clock cap (the old `timeout
+// 180 <cmd>`) kills legitimate long-running steps too — an e2e suite that runs minutes but
+// keeps producing output is indistinguishable, on elapsed time alone, from one that is
+// actually wedged (rollhook had to rename its e2e `test` script to dodge exactly this — see
+// rollhook#26). The owner's standing rule is "no wall-clock ceilings on agent work, only
+// idle watchdogs" — so this caps IDLE time (no new output) instead of total time.
+
+/** Ordinary-step idle window when the caller does not override it. */
+const DEFAULT_STEP_IDLE_SECONDS = 180;
+/** The test step specifically defaults higher — e2e suites legitimately go quiet between
+ *  assertions for longer than a lint or typecheck step ever should. */
+const DEFAULT_TEST_IDLE_SECONDS = 600;
+
+/** The idle-watchdog instructions, parameterized by the effective idle windows. Shared by
+ *  both prompt paths (explicit-commands and discovery) so they can never drift — the
+ *  watchdog shell function itself is worker-authored bash embedded in the prompt (there is
+ *  no handler-side subprocess to attach a real idle timer to; the worker's own Bash tool is
+ *  the only thing actually running the command), so keeping one copy of the recipe matters. */
+function idleWatchdogBlock(stepSeconds: number, testSeconds: number): string {
+  return (
+    `## Command safety — idle watchdog, not a wall clock\n\n` +
+    `A hung command must never stall the job. But many legitimate steps (e2e suites, slow ` +
+    `integration tests) run for minutes while still producing output — do NOT cap on ` +
+    `elapsed time. Cap on IDLE time instead: kill a step only once it has produced no NEW ` +
+    `output for its idle window.\n\n` +
+    `Before running any command, define this helper once in your Bash session:\n\n` +
+    "    run_step() {\n" +
+    '      local cmd="$1" idle="$2" out; out=$(mktemp)\n' +
+    '      eval "$cmd" >"$out" 2>&1 &\n' +
+    "      local pid=$! last=0 stalled=0\n" +
+    '      while kill -0 "$pid" 2>/dev/null; do\n' +
+    "        sleep 5\n" +
+    '        local size; size=$(wc -c <"$out")\n' +
+    '        if [ "$size" != "$last" ]; then last=$size; stalled=0; else stalled=$((stalled + 5)); fi\n' +
+    '        if [ "$stalled" -ge "$idle" ]; then\n' +
+    '          kill -9 "$pid" 2>/dev/null\n' +
+    '          echo "IDLE_TIMEOUT: no output for ${idle}s" >>"$out"\n' +
+    "          break\n" +
+    "        fi\n" +
+    "      done\n" +
+    '      wait "$pid" 2>/dev/null; local code=$?\n' +
+    '      cat "$out"; rm -f "$out"\n' +
+    "      return $code\n" +
+    "    }\n\n" +
+    `Run every command through it: \`run_step '<cmd>' <idle-seconds>\` — use ${stepSeconds} ` +
+    `for ordinary steps and ${testSeconds} for the test step specifically (both are ` +
+    `caller-configured; use these exact numbers, do not substitute your own). If \`run_step\` ` +
+    `cannot be defined (no bash, restricted shell), fall back to \`timeout ${stepSeconds} ` +
+    `<cmd>\` (or \`gtimeout\`) as a wall-clock approximation. "IDLE_TIMEOUT" appearing in the ` +
+    `captured output (or exit code 124 from the timeout fallback) means the watchdog killed ` +
+    `it — mark that step failed with "no output for <idle-seconds>s — likely a watch-mode ` +
+    `runner or a hung process" and move on, never retry. If a test command reports no tests ` +
+    `("0 test files", "No test files found", pytest exit 5), mark the step passed — an ` +
+    `empty suite is not a failure.`
+  );
+}
+
 /** Minimal, self-contained prompt for the explicit-commands fast path. Loads NO
  *  discovery skill — the worker runs exactly the given commands and nothing else
  *  (no ecosystem sniffing, no fallow, no `git remote -v`/`which`). This is what
  *  keeps the fast path fast: discovery is the dominant turn-sink otherwise. */
-function explicitCommandsPrompt(commands: string[]): string {
+function explicitCommandsPrompt(
+  commands: string[],
+  stepSeconds: number,
+  testSeconds: number,
+): string {
   return (
     `You are a code quality checker. The caller supplied the EXACT validation commands. ` +
     `Run ONLY these, in order, via Bash — capture stdout+stderr for each. A step passes if ` +
@@ -86,24 +163,28 @@ function explicitCommandsPrompt(commands: string[]): string {
     `Run EXACTLY these and nothing else. Do NOT explore the repo, read package.json/` +
     `pyproject.toml, sniff the ecosystem, run \`which\`/\`git remote -v\`, or run \`fallow\`. ` +
     `As soon as every command has run once, emit the JSON — do not re-run or re-read.\n\n` +
-    `Wrap each command in a wall-clock cap so a hung or watch-mode process can't stall the ` +
-    `job: prefer \`timeout 180 <cmd>\` (or \`gtimeout 180\`); if neither exists, set your Bash ` +
-    `tool's own timeout to 180000 ms. Exit code 124 means the cap killed it — mark that step ` +
-    `failed with "timed out after 180s" and move on, never retry. If a test command reports no ` +
-    `tests ("0 test files", "No test files found", pytest exit 5), mark the step passed — an ` +
-    `empty suite is not a failure.\n\n` +
+    `${idleWatchdogBlock(stepSeconds, testSeconds)}\n\n` +
     commands.map((c, i) => `${i + 1}. \`${c}\``).join("\n") +
     `\n\n` +
     OUTPUT_CONTRACT
   );
 }
 
-async function loadSkillPrompt(commands: string[] | undefined): Promise<string> {
-  if (commands && commands.length > 0) return explicitCommandsPrompt(commands);
+async function loadSkillPrompt(
+  commands: string[] | undefined,
+  stepSeconds: number,
+  testSeconds: number,
+): Promise<string> {
+  if (commands && commands.length > 0)
+    return explicitCommandsPrompt(commands, stepSeconds, testSeconds);
   const skillPath = join(import.meta.dir, "../../skills/check.md");
-  // Discovery path: drop the (now-unused) explicit-commands placeholder.
+  // Discovery path: drop the (now-unused) explicit-commands placeholder, and splice in the
+  // caller-configured idle-watchdog block so both prompt paths run the same recipe.
   const template = await loadSkillFile(skillPath, "check");
-  return template.replace("{{COMMANDS}}\n", "").replace("{{COMMANDS}}", "");
+  return template
+    .replace("{{COMMANDS}}\n", "")
+    .replace("{{COMMANDS}}", "")
+    .replace("{{TIMEOUT_BLOCK}}", idleWatchdogBlock(stepSeconds, testSeconds));
 }
 
 // ── Core ───────────────────────────────────────────────────────────────────────
@@ -115,10 +196,15 @@ export async function runCheck(
   jobId?: string,
   isCancelled?: (jobId: string) => boolean,
 ): Promise<CheckOutput> {
-  const { cwd, commands } = parseParams(CHECK_INPUT, rawParams);
+  const { cwd, commands, stepTimeoutSeconds } = parseParams(CHECK_INPUT, rawParams);
   if (!existsSync(cwd)) throw new Error(`Directory not found: ${cwd}`);
 
-  const prompt = await loadSkillPrompt(commands);
+  // A caller-supplied override applies uniformly to every step, including test — it is an
+  // explicit "this repo's suite needs more (or less) headroom than the default" statement,
+  // not a per-step distinction the caller is expected to make.
+  const stepSeconds = stepTimeoutSeconds ?? DEFAULT_STEP_IDLE_SECONDS;
+  const testSeconds = stepTimeoutSeconds ?? DEFAULT_TEST_IDLE_SECONDS;
+  const prompt = await loadSkillPrompt(commands, stepSeconds, testSeconds);
   const runWorker = (p: string) =>
     runSession<CheckOutput>({
       cwd,

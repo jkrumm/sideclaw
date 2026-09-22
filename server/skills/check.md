@@ -46,17 +46,8 @@ complexity, duplication):
 - A step **fails** if exit code is non-zero. Collect all error lines from stdout + stderr
   into the `errors` array.
 
-## Command safety — timeouts & test runners
+{{TIMEOUT_BLOCK}}
 
-A hung command must never stall the whole job. Apply these to EVERY command, and especially
-to the test step:
-
-- **Cap each command's wall-clock.** Wrap it in a timeout: `timeout 180 <cmd>` (or `gtimeout
-180` on macOS where coreutils is installed). If neither binary exists, invoke the command
-  through your Bash tool with its own `timeout` parameter set to 180000 ms. If a command is
-  killed by the cap (exit code 124), record that step as **failed** with the error line
-  `"timed out after 180s — likely a watch-mode runner or a hung process"` and move on — do
-  NOT retry it.
 - **Never run tests in watch mode.** A bare `vitest`, `jest`, or `bun test --watch` watches
   forever and hangs the job. Force a single run: `vitest run`, `jest --ci --watchAll=false`
   (or prefix `CI=true`); `bun test` is one-shot by default. If the declared `test` script is a
