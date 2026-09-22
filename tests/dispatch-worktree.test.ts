@@ -12,6 +12,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   statSync,
@@ -19,6 +20,7 @@ import {
   writeFileSync,
 } from "fs";
 import { rmSync } from "fs";
+import { tmpdir } from "os";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -705,6 +707,27 @@ describe("diffRefusalReason", () => {
     expect(await refusal(wt)).toMatch(/CI execution surface/);
   });
 
+  test("refuses a change to the GitLab pipeline entry point", async () => {
+    const wt = await createWorktree(fx.repo, key(), "gitlab-ci", "master");
+    fx.write(".gitlab-ci.yml", "stages: [build]\n", wt.path);
+    await commitPendingWork(wt, "touch gitlab-ci");
+    expect(await refusal(wt)).toMatch(/CI execution surface \(\.gitlab-ci\.yml\)/);
+  });
+
+  test("refuses a change under the .gitlab/ include directory", async () => {
+    const wt = await createWorktree(fx.repo, key(), "gitlab-include", "master");
+    fx.write(".gitlab/ci/deploy.yml", "deploy:\n  script: echo hi\n", wt.path);
+    await commitPendingWork(wt, "touch gitlab include");
+    expect(await refusal(wt)).toMatch(/CI execution surface/);
+  });
+
+  test("a rename INTO the GitLab CI surface does not walk past the bound", async () => {
+    const wt = await createWorktree(fx.repo, key(), "evil-gitlab", "master");
+    await git(["mv", "src/app.ts", ".gitlab-ci.yml"], wt.path);
+    await commitPendingWork(wt, "smuggle a pipeline");
+    expect(await refusal(wt)).toMatch(/CI execution surface/);
+  });
+
   test("leaves non-executing .github files alone", async () => {
     const wt = await createWorktree(fx.repo, key(), "dependabot", "master");
     fx.write(".github/dependabot.yml", "version: 2\n", wt.path);
@@ -919,6 +942,95 @@ describe("artifact refusals", () => {
     await expect(
       openPullRequest(ID, { title: "Fix", body: "clean body", head: "master" }),
     ).rejects.toThrow(/head is the default branch \(master\)/);
+  });
+});
+
+// ── GitLab write paths ──────────────────────────────────────────────────────────
+//
+// openGitlabIssue/openGitlabMergeRequest are unexported — reached only through
+// openIssue/openPullRequest when `id.kind === "gitlab"`. A real POST to gitlab.com is not
+// an option here, so `glab` itself is stubbed: a shell script placed ahead of the real
+// binary on PATH that records its argv and prints canned JSON. That exercises the real
+// code path (argv shaping, endpoint encoding, the JSON parse, the web_url extraction)
+// rather than asserting against a mock of dispatch-git.ts's own internals.
+describe("GitLab artifact write paths (openIssue/openPullRequest via glab)", () => {
+  const GITLAB_ID: RepoIdentity = {
+    owner: "jkrumm",
+    repo: "fixture",
+    defaultBranch: "master",
+    kind: "gitlab",
+  };
+
+  let binDir: string;
+  let argvFile: string;
+  let originalPath: string | undefined;
+  let originalArgvFile: string | undefined;
+
+  beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), "sideclaw-glab-"));
+    argvFile = join(binDir, "argv.txt");
+    writeFileSync(
+      join(binDir, "glab"),
+      [
+        "#!/bin/sh",
+        'printf \'%s\\n\' "$@" > "$GLAB_ARGV_FILE"',
+        'case "$*" in',
+        '  *merge_requests*) echo \'{"iid": 9, "web_url": "https://gitlab.com/jkrumm/fixture/-/merge_requests/9"}\' ;;',
+        '  *) echo \'{"iid": 7, "web_url": "https://gitlab.com/jkrumm/fixture/-/issues/7"}\' ;;',
+        "esac",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(binDir, "glab"), 0o755);
+    originalPath = process.env.PATH;
+    originalArgvFile = process.env.GLAB_ARGV_FILE;
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.GLAB_ARGV_FILE = argvFile;
+  });
+
+  afterEach(() => {
+    process.env.PATH = originalPath;
+    if (originalArgvFile === undefined) delete process.env.GLAB_ARGV_FILE;
+    else process.env.GLAB_ARGV_FILE = originalArgvFile;
+    rmSync(binDir, { recursive: true, force: true });
+  });
+
+  test("openIssue on a GitLab identity shells out to glab and returns its web_url", async () => {
+    const url = await openIssue(GITLAB_ID, { title: "Fix the thing", body: "plain body" });
+    expect(url).toBe("https://gitlab.com/jkrumm/fixture/-/issues/7");
+    const argv = readFileSync(argvFile, "utf8");
+    expect(argv).toContain("--hostname\ngitlab.com");
+    expect(argv).toContain("projects/jkrumm%2Ffixture/issues");
+    expect(argv).toContain("--raw-field\ntitle=Fix the thing");
+    expect(argv).toContain("--raw-field\ndescription=plain body");
+  });
+
+  test("openPullRequest on a GitLab identity opens a Draft-prefixed merge request", async () => {
+    const url = await openPullRequest(GITLAB_ID, {
+      title: "Add feature",
+      body: "clean body",
+      head: "dispatch/x-1234abcd",
+    });
+    expect(url).toBe("https://gitlab.com/jkrumm/fixture/-/merge_requests/9");
+    const argv = readFileSync(argvFile, "utf8");
+    expect(argv).toContain("projects/jkrumm%2Ffixture/merge_requests");
+    expect(argv).toContain("--raw-field\nsource_branch=dispatch/x-1234abcd");
+    expect(argv).toContain("--raw-field\ntarget_branch=master");
+    expect(argv).toContain("--raw-field\ntitle=Draft: Add feature");
+  });
+
+  test("a GitLab issue body carrying a credential is refused before glab ever runs", async () => {
+    await expect(
+      openIssue(GITLAB_ID, { title: "Fix", body: "set op://hermes/gateway/api-server-key" }),
+    ).rejects.toThrow(/refusing to publish an issue.*1Password reference/s);
+    expect(existsSync(argvFile)).toBe(false);
+  });
+
+  test("a GitLab MR whose head is the default branch is never opened", async () => {
+    await expect(
+      openPullRequest(GITLAB_ID, { title: "Fix", body: "clean body", head: "master" }),
+    ).rejects.toThrow(/head is the default branch \(master\)/);
+    expect(existsSync(argvFile)).toBe(false);
   });
 });
 

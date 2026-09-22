@@ -250,6 +250,17 @@ describe("finishInPlace", () => {
     expect(result.note).toMatch(/WARNING: .*CI execution surface/);
   });
 
+  test("a GitLab CI-surface edit is a prominent warning too", async () => {
+    const snap = await snapshotInPlace(fx.repo);
+    fx.write(".gitlab-ci.yml", "stages: [build]\n");
+    const result = await finishInPlace(fx.repo, snap, () => {}, {
+      runCheckFn: passingCheck,
+    });
+    expect(result.outcome).toBe("applied_in_place");
+    expect(result.changedFiles).toContain(".gitlab-ci.yml");
+    expect(result.note).toMatch(/WARNING: .*CI execution surface/);
+  });
+
   test("a secret-shaped added line is a warning naming the pattern", async () => {
     const snap = await snapshotInPlace(fx.repo);
     fx.write("episode.txt", `${SECRET_BODY}\n`);
