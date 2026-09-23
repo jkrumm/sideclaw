@@ -2,6 +2,9 @@
   "name": "sideclaw",
   "version": "0.1.0",
   "private": true,
+  "bin": {
+    "sideclaw": "bin/sideclaw.ts"
+  },
   "scripts": {
     "dev:server": "bun --watch server/index.ts",
     "dev:client": "vite",

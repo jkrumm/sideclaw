@@ -174,9 +174,16 @@ install-agent: build
 	@i=0; until curl -sf --max-time 2 http://127.0.0.1:7705/health >/dev/null 2>&1 || [ $$i -ge 40 ]; do sleep 0.5; i=$$((i+1)); done; \
 	curl -sf --max-time 2 http://127.0.0.1:7705/health >/dev/null && echo "sideclaw LaunchAgent installed and started" || { echo "sideclaw did not come back on :7705 after install — tail ~/Library/Logs/sideclaw.err"; exit 1; }
 
+# Symlink the harness-agnostic CLI (bin/sideclaw.ts, a plain HTTP client of the job
+# routes — no MCP layer) onto PATH so any tool can drive dispatch/check/review.
+install-cli:
+	@mkdir -p ~/.local/bin
+	@ln -sf "$(CURDIR)/bin/sideclaw.ts" ~/.local/bin/sideclaw
+	@echo "sideclaw CLI symlinked to ~/.local/bin/sideclaw (edit: make install-cli, run: sideclaw --help)"
+
 uninstall-agent:
 	launchctl bootout gui/$$(id -u)/com.jkrumm.sideclaw-server
 	rm ~/Library/LaunchAgents/com.jkrumm.sideclaw-server.plist
 	@echo "sideclaw LaunchAgent removed"
 
-.PHONY: dev start build reload install-agent uninstall-agent
+.PHONY: dev start build reload install-agent install-cli uninstall-agent

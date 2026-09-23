@@ -87,6 +87,27 @@ the unknown field before it reaches the handler. After changing a tool
 schema, reconnect `/mcp` (or restart the session) — not just `make reload`.
 Skill-prompt and handler-logic edits need only `make reload`.
 
+### CLI — the same jobs, without an MCP client
+
+`bin/sideclaw.ts` (`make install-cli` → `~/.local/bin/sideclaw`) is a plain
+HTTP client of the routes below — **no MCP layer**, so OpenCode, Codex, a
+shell, a Makefile or cron can drive the same work Claude Code drives through
+MCP:
+
+```bash
+sideclaw dispatch --repo warden --tier implement --workspace in-place 'the brief'
+sideclaw check --repo sideclaw          # submit + wait, progress on stderr
+sideclaw review --pr 42 --json          # stdout carries ONLY the result JSON
+sideclaw jobs --running · status|wait|cancel <jobId> · routing · policy · health
+```
+
+`--no-wait` prints the jobId and exits; `--json` makes stdout machine-readable
+(progress stays on stderr); `--timeout` is opt-in, the default wait has no
+ceiling (`.claude/rules/agent-limits.md`). Exit codes: **0** done · **1**
+failed/interrupted/cancelled · **2** usage error or `dispatch refused: …` ·
+**3** server unreachable. Same policy, same queue, same concurrency cap as the
+MCP door — the CLI adds no capability, only reach.
+
 ### Async job model (durable, off the MCP transport)
 
 The long tools (`check`/`review`/`dispatch`/`overview`/`narrative`) do
@@ -206,7 +227,7 @@ The `overview` job enriches that snapshot with **one LLM recommendation per
 agent** (`answer`/`continue`/`ship`/`review`/`merge`/`close`/`stale`/`watch`,
 each with `standing`/`blocker`/`confidence`) — one batched, prompt-only call
 (`readOnly: true`, no repo tools), model/backend from `routeFor("overview")`
-(glm-5.3-flash on IU / Haiku on Max). `GET /api/overview[.txt]` never runs the
+(DeepSeek-V4-Flash on IU / Haiku on Max). `GET /api/overview[.txt]` never runs the
 LLM inline — it merges the latest **completed** job result onto a fresh
 snapshot, and marks a recommendation `recommendationStale: true` if the agent
 has been active since. Full reconciliation/fencing detail:
@@ -246,12 +267,14 @@ reactive fallback, why the proactive quota-ceiling pre-check was removed
 — `--effort`, `reasoning_effort` and `thinking:{type:disabled}` are all
 ignored by the Requesty hop, so `MAX_THINKING_TOKENS` (mapped by the CLI onto
 Anthropic's `thinking.budget_tokens`) is the only control that reaches
-glm-5.3-flash or DeepSeek-V4-Flash there. Unset means the model's own `max`
+DeepSeek-V4-Flash or DeepSeek-V4-Pro there. Unset means the model's own `max`
 default, its worst setting. The CLASSIFY tier (check, overview,
-review_router; glm-5.3-flash) runs at 2048; AGENT (dispatch;
-DeepSeek-V4-Flash since 2026-09-21, formerly glm-5.3-flash) at 8192 —
-`server/lib/routing.ts`'s dated comment carries the ccbench/POC evidence for
-that move. `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
+review_router) runs at 2048; AGENT (dispatch's investigate/author) and
+AGENT_IMPLEMENT (implement, DeepSeek-V4-Pro) at 8192 —
+`server/lib/routing.ts`'s dated comments carry the ccbench/POC evidence.
+**No route runs on GLM any more** (retired 2026-09-23, owner decision; the
+`GLM_FLASH` id survives only so an env override naming it still resolves), so
+every non-Claude lane here is DeepSeek. `session-runner.ts`'s `buildWorkerEnv` exports `MAX_THINKING_TOKENS`
 only for non-Claude models — a Claude route's `thinkingTokens` (currently none
 set) would be a no-op there anyway, since thinking on Claude is controlled a
 different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
