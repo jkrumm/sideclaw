@@ -530,17 +530,6 @@ function excerpt(text: string, max: number): string {
   return t.length <= max ? t : `${t.slice(0, max)}\n…(truncated)`;
 }
 
-/** Provenance footer. A reviewer opening this PR needs to know it was not opened by a human
- *  at a keyboard, and needs the brief that caused it — without that, "why does this exist"
- *  is unanswerable. It is deliberately a statement of process and inputs, carrying no tool
- *  credit of any kind. */
-export function provenance(brief: string): string {
-  return `\n\n---\n\nOpened automatically by a bounded dispatch episode, from this brief:\n\n> ${excerpt(
-    brief,
-    1200,
-  ).replace(/\n/g, "\n> ")}`;
-}
-
 /** Both artifact fields set, or both empty. One of each is incoherent — the worker either
  *  decided there is something to file or it did not — and is treated as "file nothing",
  *  since half an artifact is strictly worse than none. */
@@ -1122,7 +1111,7 @@ export async function runDispatch(
         try {
           artifactUrl = await openIssue(identity, {
             title: text.title,
-            body: text.body + provenance(brief),
+            body: text.body,
           });
           outcome = "issue_filed";
         } catch (err) {
@@ -1154,7 +1143,7 @@ export async function runDispatch(
           throw new Error("internal: repo identity or worktree missing for the implement tier");
         }
         assertNoGithubForSensitive(effectiveSensitive, "openPullRequest");
-        const deposit = await depositBranch(worktree, identity, data, brief, note, {
+        const deposit = await depositBranch(worktree, identity, data, note, {
           jobId,
           isCancelled,
         });
@@ -1433,7 +1422,6 @@ export async function depositBranch(
   worktree: DispatchWorktree,
   identity: RepoIdentity,
   data: DispatchOutput,
-  brief: string,
   note: (s: string) => void,
   checkCtx: {
     jobId?: string;
@@ -1543,7 +1531,7 @@ export async function depositBranch(
   try {
     const artifactUrl = await openPullRequest(identity, {
       title: text.title,
-      body: text.body + (advisory ? `\n\n---\n${advisory.trim()}` : "") + provenance(brief),
+      body: text.body + (advisory ? `\n\n---\n${advisory.trim()}` : ""),
       head: worktree.branch,
     });
     return { artifactUrl, branch: worktree.branch, outcome: "pr_opened", note: advisory };

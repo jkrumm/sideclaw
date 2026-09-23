@@ -65,9 +65,9 @@ const GITHUB_TOKEN_REF = "op://mini/github/token";
  * This is new blast radius that no earlier sideclaw tool had: `check` and `review` return
  * text to one caller, whereas an artifact is durable, indexed and — for most repos in the
  * allowlist — world-readable. The text being published is authored by a session whose
- * context holds an untrusted brief AND whatever it read inside the repo, and the provenance
- * footer quotes the brief verbatim. The brief is assembled from Slack messages and log
- * lines, which are private; the issue is not. That asymmetry is the leak.
+ * context holds an untrusted brief AND whatever it read inside the repo, and the worker's
+ * own title/body can quote either verbatim. The brief is assembled from Slack messages and
+ * log lines, which are private; the issue is not. That asymmetry is the leak.
  *
  * A prompt instruction telling the worker not to quote secrets is not a control, so this
  * runs in the handler, after the worker is done and before anything is published.
