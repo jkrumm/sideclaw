@@ -10,9 +10,18 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import { isTerminal, type JobStatus } from "../server/jobs/types";
+import type { DispatchOutput } from "../server/jobs/handlers/dispatch.ts";
+import type { CheckOutput } from "../server/jobs/handlers/check.ts";
+import type { ReviewOutput } from "../server/jobs/handlers/review.ts";
 
 const DEFAULT_URL = "http://127.0.0.1:7705";
 const POLL_MS = 2000;
+// A transient poll failure (e.g. the `make reload` restart window) is retried with backoff
+// rather than aborting the whole wait — the job itself is durable server-side.
+const MAX_POLL_RETRIES = 10;
+const POLL_RETRY_BASE_MS = 2000;
+const POLL_RETRY_CAP_MS = 10000;
 
 // ── Errors (message → exit code) ─────────────────────────────────────────────────
 
@@ -33,6 +42,25 @@ class CliUsageError extends CliError {
     this.name = "CliUsageError";
   }
 }
+
+/** The server answered but with an error (bad status, malformed body, unknown job) → exit 1. */
+class CliServerError extends CliError {
+  constructor(message: string) {
+    super(message, 1);
+    this.name = "CliServerError";
+  }
+}
+
+/** The server could not be reached at all (connection refused, DNS, …) → exit 3. */
+class CliUnreachableError extends CliError {
+  constructor(message: string) {
+    super(message, 3);
+    this.name = "CliUnreachableError";
+  }
+}
+
+/** Internal-only: a bounded poll's deadline passed — never surfaced past `waitForJob`. */
+class PollDeadlineError extends Error {}
 
 // ── Parsed-command model ─────────────────────────────────────────────────────────
 
@@ -457,16 +485,9 @@ export function resolveContext(
   }
 }
 
-/** Terminal job statuses (mirrors server/jobs/types.ts's `isTerminal`). */
-const TERMINAL = new Set(["done", "failed", "interrupted", "cancelled"]);
-
-export function isTerminal(status: string): boolean {
-  return TERMINAL.has(status);
-}
-
 /** Exit code for a job that reached a terminal state: 0 done, 1 failed/interrupted/
  *  cancelled, 2 a policy refusal (`dispatch refused: …` surfaced as a job error). */
-export function exitCodeFor(status: string, error: string | null): number {
+export function exitCodeFor(status: JobStatus, error: string | null): number {
   if (status === "done") return 0;
   if (status === "failed" || status === "interrupted" || status === "cancelled") {
     return error !== null && error.startsWith("dispatch refused:") ? 2 : 1;
@@ -486,55 +507,68 @@ export function formatDuration(ms: number): string {
 
 // ── Rendering (readable output for humans) ───────────────────────────────────────
 
+export function renderVerdictResult(r: DispatchOutput): string {
+  const lines: string[] = [r.summary, "", r.verdict];
+  lines.push(`confidence: ${r.confidence}`);
+  lines.push(`outcome: ${r.outcome}`);
+  lines.push(`nextAction: ${r.nextAction}`);
+  lines.push(`recommendation: ${r.recommendation}`);
+  if (typeof r.artifactUrl === "string") lines.push(`artifact: ${r.artifactUrl}`);
+  if (typeof r.branch === "string") lines.push(`branch: ${r.branch}`);
+  if (Array.isArray(r.changedFiles) && r.changedFiles.length > 0) {
+    lines.push(`changed: ${r.changedFiles.join(", ")}`);
+  }
+  return lines.join("\n");
+}
+
+export function renderCheckResult(r: CheckOutput): string {
+  const lines = [r.summary];
+  for (const step of r.steps) {
+    const detail =
+      Array.isArray(step.errors) && step.errors.length > 0 ? ` — ${step.errors.join(" | ")}` : "";
+    lines.push(`  [${step.passed ? "ok" : "FAIL"}] ${step.name}${detail}`);
+  }
+  return lines.join("\n");
+}
+
+export function renderReviewResult(r: ReviewOutput): string {
+  const lines = [r.summary];
+  for (const finding of r.blocking.slice(0, 8)) {
+    lines.push(`  - [blocking] ${finding.file}: ${finding.message}`);
+  }
+  return lines.join("\n");
+}
+
+function isDispatchOutput(r: Record<string, unknown>): r is DispatchOutput {
+  return typeof r.verdict === "string";
+}
+
+function isCheckOutput(r: Record<string, unknown>): r is CheckOutput {
+  return typeof r.passed === "boolean" && Array.isArray(r.steps);
+}
+
+function isReviewOutput(r: Record<string, unknown>): r is ReviewOutput {
+  return typeof r.outcome === "string" && ("blocking" in r || "improvements" in r);
+}
+
+/** Renderer table, tried in order — the first matching shape wins. A server ahead of the
+ *  CLI (an unknown output shape) degrades to the raw-JSON fallback rather than throwing. */
+const RESULT_RENDERERS: ReadonlyArray<{
+  matches: (r: Record<string, unknown>) => boolean;
+  render: (r: Record<string, unknown>) => string;
+}> = [
+  { matches: isDispatchOutput, render: (r) => renderVerdictResult(r as DispatchOutput) },
+  { matches: isCheckOutput, render: (r) => renderCheckResult(r as CheckOutput) },
+  { matches: isReviewOutput, render: (r) => renderReviewResult(r as ReviewOutput) },
+];
+
 export function renderResult(result: unknown): string {
   if (result === null || result === undefined) return "(no result)";
   if (typeof result !== "object") return String(result);
   const r = result as Record<string, unknown>;
-
-  if (typeof r.verdict === "string") {
-    const lines: string[] = [];
-    if (typeof r.summary === "string") lines.push(r.summary, "");
-    lines.push(r.verdict);
-    if (typeof r.confidence === "string") lines.push(`confidence: ${r.confidence}`);
-    if (typeof r.outcome === "string") lines.push(`outcome: ${r.outcome}`);
-    if (typeof r.nextAction === "string") lines.push(`nextAction: ${r.nextAction}`);
-    if (typeof r.recommendation === "string") lines.push(`recommendation: ${r.recommendation}`);
-    if (typeof r.artifactUrl === "string") lines.push(`artifact: ${r.artifactUrl}`);
-    if (typeof r.branch === "string") lines.push(`branch: ${r.branch}`);
-    if (Array.isArray(r.changedFiles) && r.changedFiles.length > 0) {
-      lines.push(`changed: ${r.changedFiles.join(", ")}`);
-    }
-    return lines.join("\n");
+  for (const { matches, render } of RESULT_RENDERERS) {
+    if (matches(r)) return render(r);
   }
-
-  if (typeof r.passed === "boolean" && Array.isArray(r.steps)) {
-    const lines = [typeof r.summary === "string" ? r.summary : r.passed ? "passed" : "failed"];
-    for (const step of r.steps) {
-      const s = step as { name?: string; passed?: boolean; errors?: string[] };
-      const detail =
-        Array.isArray(s.errors) && s.errors.length > 0 ? ` — ${s.errors.join(" | ")}` : "";
-      lines.push(`  [${s.passed === true ? "ok" : "FAIL"}] ${s.name ?? "?"}${detail}`);
-    }
-    return lines.join("\n");
-  }
-
-  if (typeof r.outcome === "string" && ("blocking" in r || "improvements" in r)) {
-    const blocking = Array.isArray(r.blocking) ? r.blocking.length : 0;
-    const improvements = Array.isArray(r.improvements) ? r.improvements.length : 0;
-    const discussions = Array.isArray(r.discussions) ? r.discussions.length : 0;
-    const testGaps = Array.isArray(r.testGaps) ? r.testGaps.length : 0;
-    const lines = [
-      typeof r.summary === "string"
-        ? r.summary
-        : `outcome: ${r.outcome} (${blocking} blocking, ${improvements} improvements, ${discussions} discussions, ${testGaps} test gaps)`,
-    ];
-    for (const finding of Array.isArray(r.blocking) ? r.blocking.slice(0, 8) : []) {
-      const f = finding as { file?: string; message?: string };
-      lines.push(`  - [blocking] ${f.file ?? ""}: ${f.message ?? ""}`);
-    }
-    return lines.join("\n");
-  }
-
   return JSON.stringify(result, null, 2);
 }
 
@@ -558,10 +592,12 @@ async function request(
   let res: Response;
   try {
     res = await fetchFn(base + path, init);
-  } catch {
-    throw new CliError(
+  } catch (err) {
+    // An abort we issued ourselves (a bounded poll's own deadline) is not "unreachable" —
+    // let it propagate so the caller can tell the two apart.
+    if (err instanceof Error && err.name === "AbortError") throw err;
+    throw new CliUnreachableError(
       `sideclaw server unreachable at ${base} — it runs as a LaunchAgent; start it with 'make install-agent' in ~/SourceRoot/sideclaw`,
-      3,
     );
   }
   const text = await res.text();
@@ -577,7 +613,7 @@ async function request(
 interface JobView {
   id: string;
   tool: string;
-  status: string;
+  status: JobStatus;
   result: unknown;
   error: string | null;
   progress: { turns: number; lastAction: string } | null;
@@ -598,25 +634,63 @@ async function submitJob(fetchFn: FetchLike, base: string, body: RequestBody): P
   }
   const data = r.data as { error?: string };
   const message = data.error ?? `job submit failed with status ${r.status}`;
-  if (message.startsWith("dispatch refused:")) throw new CliError(message, 2);
-  throw new CliError(message, r.status >= 400 && r.status < 500 ? 2 : 1);
+  if (message.startsWith("dispatch refused:")) throw new CliUsageError(message);
+  throw r.status >= 400 && r.status < 500
+    ? new CliUsageError(message)
+    : new CliServerError(message);
 }
 
-async function fetchJob(fetchFn: FetchLike, base: string, jobId: string): Promise<JobView> {
-  const r = await request(fetchFn, base, `/api/jobs/${encodeURIComponent(jobId)}`);
-  if (r.status === 404) throw new CliError(`job not found: ${jobId}`, 1);
-  if (r.status !== 200) throw new CliError(`job status fetch failed (${r.status})`, 1);
+async function fetchJob(
+  fetchFn: FetchLike,
+  base: string,
+  jobId: string,
+  signal?: AbortSignal,
+): Promise<JobView> {
+  const r = await request(
+    fetchFn,
+    base,
+    `/api/jobs/${encodeURIComponent(jobId)}`,
+    signal ? { signal } : undefined,
+  );
+  if (r.status === 404) throw new CliServerError(`job not found: ${jobId}`);
+  if (r.status !== 200) throw new CliServerError(`job status fetch failed (${r.status})`);
   const data = r.data as { ok?: boolean; job?: JobView };
-  if (data.ok !== true || data.job === undefined) throw new CliError("job status fetch failed", 1);
+  if (data.ok !== true || data.job === undefined)
+    throw new CliServerError("job status fetch failed");
   return data.job;
+}
+
+/** Poll bounded by an overall deadline: aborts the request once the remaining time runs
+ *  out, and throws `PollDeadlineError` (never the generic "unreachable" error) for both
+ *  an abort and a deadline already passed before the request was even made. No `deadline`
+ *  means unbounded — the plain `fetchJob`, no `AbortController` involved. */
+async function fetchJobBounded(
+  fetchFn: FetchLike,
+  base: string,
+  jobId: string,
+  deadline: number | undefined,
+): Promise<JobView> {
+  if (deadline === undefined) return fetchJob(fetchFn, base, jobId);
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new PollDeadlineError();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), remaining);
+  try {
+    return await fetchJob(fetchFn, base, jobId, controller.signal);
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw new PollDeadlineError();
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function fetchPolicy(fetchFn: FetchLike, base: string): Promise<{ roots: string[] }> {
   const r = await request(fetchFn, base, "/api/dispatch-policy");
-  if (r.status !== 200) throw new CliError(`could not read dispatch policy (${r.status})`, 1);
+  if (r.status !== 200) throw new CliServerError(`could not read dispatch policy (${r.status})`);
   const data = r.data as { ok?: boolean; roots?: unknown };
   if (data.ok !== true || !Array.isArray(data.roots)) {
-    throw new CliError("dispatch policy returned no roots", 1);
+    throw new CliServerError("dispatch policy returned no roots");
   }
   return { roots: data.roots.filter((x): x is string => typeof x === "string") };
 }
@@ -648,6 +722,9 @@ export interface CliContext {
   gitRoot: (cwd: string) => string | null;
   cwd: string;
   env: Record<string, string | undefined>;
+  /** Overrides the real `setTimeout`-based delay — tests inject an instant resolver so a
+   *  poll interval or a retry backoff doesn't cost real wall-clock time. Defaults to `sleep`. */
+  sleepFn?: (ms: number) => Promise<void>;
 }
 
 /** Run the CLI against an injected fetch/gitRoot — the seam tests use to avoid a
@@ -708,7 +785,7 @@ async function execute(
     }
     case "jobs": {
       const r = await request(ctx.fetchFn, base, "/api/jobs");
-      if (r.status !== 200) throw new CliError(`could not list jobs (${r.status})`, 1);
+      if (r.status !== 200) throw new CliServerError(`could not list jobs (${r.status})`);
       const data = r.data as { ok?: boolean; jobs?: JobView[] };
       const jobs = (data.jobs ?? []).filter((j) => !command.running || !isTerminal(j.status));
       if (options.json) io.out(`${JSON.stringify(jobs, null, 2)}\n`);
@@ -731,25 +808,26 @@ async function execute(
         return 0;
       }
       const data = r.data as { error?: string };
-      throw new CliError(data.error ?? `cancel failed (${r.status})`, 1);
+      throw new CliServerError(data.error ?? `cancel failed (${r.status})`);
     }
     case "health": {
       const r = await request(ctx.fetchFn, base, "/api/jobs/health");
-      if (r.status !== 200) throw new CliError(`health check failed (${r.status})`, 1);
+      if (r.status !== 200) throw new CliServerError(`health check failed (${r.status})`);
       if (options.json) io.out(`${JSON.stringify(r.data, null, 2)}\n`);
       else io.out(`${renderHealth(r.data as Record<string, unknown>)}\n`);
       return 0;
     }
     case "routing": {
       const r = await request(ctx.fetchFn, base, "/api/routing");
-      if (r.status !== 200) throw new CliError(`could not read routing table (${r.status})`, 1);
+      if (r.status !== 200) throw new CliServerError(`could not read routing table (${r.status})`);
       if (options.json) io.out(`${JSON.stringify(r.data, null, 2)}\n`);
       else io.out(`${renderRouting(r.data)}\n`);
       return 0;
     }
     case "policy": {
       const r = await request(ctx.fetchFn, base, "/api/dispatch-policy");
-      if (r.status !== 200) throw new CliError(`could not read dispatch policy (${r.status})`, 1);
+      if (r.status !== 200)
+        throw new CliServerError(`could not read dispatch policy (${r.status})`);
       if (options.json) io.out(`${JSON.stringify(r.data, null, 2)}\n`);
       else io.out(`${renderPolicy(r.data)}\n`);
       return 0;
@@ -765,6 +843,10 @@ async function resolveCwd(ctx: CliContext, base: string, command: JobCommand): P
   return resolveRepoSpec(command.repo, { cwd: ctx.cwd, roots: policy.roots, gitRoot: ctx.gitRoot });
 }
 
+function timeoutMessage(jobId: string, timeoutSec: number): string {
+  return `sideclaw: timed out after ${timeoutSec}s — job ${jobId} still running\n`;
+}
+
 async function waitForJob(
   ctx: CliContext,
   io: CliIo,
@@ -773,16 +855,52 @@ async function waitForJob(
   options: GlobalOptions,
 ): Promise<number> {
   const start = Date.now();
+  const wait = ctx.sleepFn ?? sleep;
   let lastSig: string | null = null;
-  let lastStatus: string | null = null;
+  let lastStatus: JobStatus | null = null;
+  let pollFailures = 0;
   const showProgress = !options.quiet && !options.json;
+  const deadline = () =>
+    options.timeoutSec !== undefined ? start + options.timeoutSec * 1000 : undefined;
 
   for (;;) {
-    if (options.timeoutSec !== undefined && Date.now() - start > options.timeoutSec * 1000) {
-      io.err(`sideclaw: timed out after ${options.timeoutSec}s — job ${jobId} still running\n`);
+    const before = deadline();
+    if (before !== undefined && Date.now() >= before) {
+      io.err(timeoutMessage(jobId, options.timeoutSec as number));
       return 1;
     }
-    const job = await fetchJob(ctx.fetchFn, base, jobId);
+
+    let job: JobView;
+    try {
+      job = await fetchJobBounded(ctx.fetchFn, base, jobId, before);
+    } catch (err) {
+      if (err instanceof PollDeadlineError) {
+        io.err(timeoutMessage(jobId, options.timeoutSec as number));
+        return 1;
+      }
+      // Only a transient transport failure is retried — a real server error (bad status,
+      // malformed body) means retrying would just fail the same way.
+      if (err instanceof CliUnreachableError && pollFailures < MAX_POLL_RETRIES) {
+        pollFailures++;
+        if (pollFailures === 1) io.err(`sideclaw: poll failed (${err.message}) — retrying…\n`);
+        await wait(Math.min(POLL_RETRY_BASE_MS * 2 ** (pollFailures - 1), POLL_RETRY_CAP_MS));
+        continue;
+      }
+      throw err;
+    }
+    if (pollFailures > 0) {
+      io.err(`sideclaw: poll recovered after ${pollFailures} failed attempt(s)\n`);
+      pollFailures = 0;
+    }
+
+    // Re-check the deadline after the fetch resolves: a slow poll that only returns once
+    // the deadline has already passed must not be accepted as the result, terminal or not.
+    const after = deadline();
+    if (after !== undefined && Date.now() >= after) {
+      io.err(timeoutMessage(jobId, options.timeoutSec as number));
+      return 1;
+    }
+
     if (showProgress && (job.status === "pending" || job.status === "running")) {
       const sig = progressSig(job);
       if (sig !== lastSig || job.status !== lastStatus) {
@@ -792,14 +910,14 @@ async function waitForJob(
       }
     }
     if (isTerminal(job.status)) {
-      if (job.status !== "done" && job.error !== null && !options.json) {
+      if (job.status !== "done" && job.error !== null) {
         io.err(`sideclaw: job ${job.id} ${job.status}: ${job.error}\n`);
       }
       if (options.json) io.out(`${JSON.stringify(job.result, null, 2)}\n`);
       else io.out(`${renderResult(job.result)}\n`);
       return exitCodeFor(job.status, job.error);
     }
-    await sleep(POLL_MS);
+    await wait(POLL_MS);
   }
 }
 
@@ -900,7 +1018,8 @@ Flags:
   --workspace <ws>      worktree | in-place (default worktree, implement tier only)
   --model <id>          model override (e.g. claude-opus-5[1m])
   --context <text|@file>  raw supporting material, passed as data (leading @ reads a file)
-  --sensitive           mark the repo secret-bearing (investigate tier only)
+  --sensitive           mark the repo secret-bearing; the server refuses this outside the
+                        investigate tier — the CLI does not validate it client-side
 `;
 
 const CHECK_HELP = `sideclaw check [--repo <name|path>] [--commands "cmd1,cmd2"]
