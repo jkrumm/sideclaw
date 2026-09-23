@@ -92,7 +92,7 @@ async function failingCheck() {
 describe("depositBranch outcomes", () => {
   test("no_changes — the episode committed nothing", async () => {
     const wt = await createWorktree(fx.repo, key(), "noop", "master");
-    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+    const result = await depositBranch(wt, ID, baseVerdict(), () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.outcome).toBe("no_changes");
@@ -106,7 +106,7 @@ describe("depositBranch outcomes", () => {
     // A workflow-file change is the cheapest bound to trip.
     fx.write(".github/workflows/ci.yml", "on: push\n", wt.path);
     await commitPendingWork(wt, "smuggle a workflow");
-    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+    const result = await depositBranch(wt, ID, baseVerdict(), () => {}, {
       runCheckFn: passingCheck,
     });
     expect(result.outcome).toBe("diff_refused");
@@ -123,7 +123,6 @@ describe("depositBranch outcomes", () => {
       wt,
       ID,
       baseVerdict({ prTitle: "Fix the thing", prBody: "a normal PR body" }),
-      "brief",
       () => {},
       { runCheckFn: failingCheck },
     );
@@ -138,7 +137,7 @@ describe("depositBranch outcomes", () => {
     const wt = await createWorktree(fx.repo, key(), "mixed-failure", "master");
     fx.write("added.txt", "content\n", wt.path);
     await commitPendingWork(wt, "work worth pushing");
-    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+    const result = await depositBranch(wt, ID, baseVerdict(), () => {}, {
       runCheckFn: async () => ({
         passed: false as const,
         steps: [
@@ -159,7 +158,7 @@ describe("depositBranch outcomes", () => {
     const wt = await createWorktree(fx.repo, key(), "fallow-only", "master");
     fx.write("added.txt", "content\n", wt.path);
     await commitPendingWork(wt, "work with inherited complexity");
-    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+    const result = await depositBranch(wt, ID, baseVerdict(), () => {}, {
       runCheckFn: async () => ({
         passed: false as const,
         steps: [
@@ -180,7 +179,7 @@ describe("depositBranch outcomes", () => {
     const wt = await createWorktree(fx.repo, key(), "broken-check", "master");
     fx.write("added.txt", "content\n", wt.path);
     await commitPendingWork(wt, "work worth pushing");
-    const result = await depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+    const result = await depositBranch(wt, ID, baseVerdict(), () => {}, {
       runCheckFn: async () => {
         throw new Error("check tool exploded");
       },
@@ -194,7 +193,7 @@ describe("depositBranch outcomes", () => {
     fx.write("added.txt", "content\n", wt.path);
     await commitPendingWork(wt, "work worth pushing");
     await expect(
-      depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+      depositBranch(wt, ID, baseVerdict(), () => {}, {
         jobId: "job-cancel-1",
         runCheckFn: async () => {
           throw new SessionCancelledError("job-cancel-1");
@@ -210,7 +209,7 @@ describe("depositBranch outcomes", () => {
     fx.write("added.txt", "content\n", wt.path);
     await commitPendingWork(wt, "work worth pushing");
     await expect(
-      depositBranch(wt, ID, baseVerdict(), "brief", () => {}, {
+      depositBranch(wt, ID, baseVerdict(), () => {}, {
         jobId: "job-cancel-2",
         isCancelled: () => true,
         runCheckFn: passingCheck,
@@ -224,14 +223,9 @@ describe("depositBranch outcomes", () => {
     const wt = await createWorktree(fx.repo, key(), "silent", "master");
     fx.write("added.txt", "content\n", wt.path);
     await commitPendingWork(wt, "work worth pushing");
-    const result = await depositBranch(
-      wt,
-      ID,
-      baseVerdict({ prTitle: "", prBody: "" }),
-      "brief",
-      () => {},
-      { runCheckFn: passingCheck },
-    );
+    const result = await depositBranch(wt, ID, baseVerdict({ prTitle: "", prBody: "" }), () => {}, {
+      runCheckFn: passingCheck,
+    });
     expect(result.outcome).toBe("branch_no_pr");
     expect(result.branch).toBe(wt.branch);
     expect(result.artifactUrl).toBeUndefined();
@@ -246,7 +240,6 @@ describe("depositBranch outcomes", () => {
       wt,
       ID,
       baseVerdict({ prTitle: "Fix the thing", prBody: SECRET_BODY }),
-      "brief",
       () => {},
       { runCheckFn: passingCheck },
     );
