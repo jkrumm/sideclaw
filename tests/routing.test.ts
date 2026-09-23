@@ -38,10 +38,10 @@ describe("buildRoutingTable defaults", () => {
     expect(overrides).toEqual([]);
   });
 
-  test("check, overview, review's router: glm-5.3-flash on iu, Haiku on max as the reverse lane (the CLASSIFY tier), thinking capped at 2048", () => {
+  test("check, overview, review's router: DeepSeek-V4-Flash on iu, Haiku on max as the reverse lane (the CLASSIFY tier), thinking capped at 2048", () => {
     for (const tool of ["check", "overview", "review_router"] as const) {
       expect(routes[tool]).toEqual({
-        model: GLM_FLASH,
+        model: DEEPSEEK_FLASH,
         backend: "iu",
         fallback: { backend: "max", model: HAIKU },
         transport: "session",
@@ -195,8 +195,16 @@ describe("buildRoutingTable env overrides", () => {
 
   test("whitespace-only overrides are ignored", () => {
     const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_CHECK: "  " });
-    expect(routes.check.model).toBe(GLM_FLASH);
+    expect(routes.check.model).toBe(DEEPSEEK_FLASH);
     expect(overrides).toEqual([]);
+  });
+
+  test("no route runs on GLM any more — retired 2026-09-23, the id stays only for an env override", () => {
+    const { routes } = buildRoutingTable({});
+    for (const route of Object.values(routes)) {
+      expect(route.model).not.toBe(GLM_FLASH);
+      expect(route.fallback?.model ?? "").not.toBe(GLM_FLASH);
+    }
   });
 
   test("SIDECLAW_THINKING_TOKENS_<TOOL> replaces the tier's default and is reported", () => {
@@ -299,12 +307,14 @@ describe("routeFor / describeRoute", () => {
     const a = routeFor("check");
     a.model = "mutated";
     if (a.fallback) a.fallback.model = "mutated";
-    expect(routeFor("check").model).toBe(GLM_FLASH);
+    expect(routeFor("check").model).toBe(DEEPSEEK_FLASH);
     expect(routeFor("check").fallback?.model).toBe(HAIKU);
   });
 
   test("describeRoute renders the fallback model or the primary when none is fixed", () => {
-    expect(describeRoute(routeFor("check"))).toBe(`${GLM_FLASH} on iu (fallback ${HAIKU} on max)`);
+    expect(describeRoute(routeFor("check"))).toBe(
+      `${DEEPSEEK_FLASH} on iu (fallback ${HAIKU} on max)`,
+    );
     expect(describeRoute(routeFor("review"))).toBe(`${SONNET} on max (fallback ${SONNET} on iu)`);
     expect(describeRoute(routeFor("adversary"))).toBe("gpt-5.6-terra on iu");
   });

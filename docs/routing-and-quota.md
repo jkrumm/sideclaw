@@ -122,10 +122,11 @@ latched so the fallback attempt itself is never switched again:
 
   **Thinking budget** (`ToolRoute.thinkingTokens`, `server/lib/routing.ts`):
   `--effort`/`reasoning_effort`/`thinking:{type:disabled}` are all ignored by
-  the Requesty hop for glm-5.3-flash and DeepSeek-V4-Flash alike, so the only
-  lever that reaches either is `MAX_THINKING_TOKENS` (the CLI's env var for
-  Anthropic's `thinking.budget_tokens`), exported by `buildWorkerEnv` for any
-  non-Claude route. CLASSIFY (check/overview/review_router, glm-5.3-flash)
+  the Requesty hop for every gateway id alike, so the only lever that reaches
+  one is `MAX_THINKING_TOKENS` (the CLI's env var for Anthropic's
+  `thinking.budget_tokens`), exported by `buildWorkerEnv` for any non-Claude
+  route. CLASSIFY (check/overview/review_router, DeepSeek-V4-Flash since
+  2026-09-23 — GLM is retired from every route)
   runs at 2048; AGENT (dispatch's investigate/author tiers, DeepSeek-V4-Flash
   since 2026-09-21) and AGENT_IMPLEMENT (dispatch's implement tier only,
   DeepSeek-V4-Pro since 2026-09-22, mirroring warden's own

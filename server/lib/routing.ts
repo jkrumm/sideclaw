@@ -7,7 +7,7 @@
 // a flipped env var actually did.
 //
 // Backends: `iu` (the IU unified endpoint's native Anthropic transport — metered per
-// token, serves Claude AND gateway ids like glm-5.3-flash) and `max` (the inherited
+// token, serves Claude AND gateway ids like DeepSeek-V4-Flash) and `max` (the inherited
 // Claude Code OAuth profile — the Max subscription, Claude ids only).
 //
 // Fallback semantics (applied in session-runner.ts, one hop only, never a second one), purely
@@ -39,8 +39,8 @@
 // `thinkingTokens` is a gateway model's reasoning budget on the IU leg (see
 // `MAX_THINKING_TOKENS` in session-runner.ts's `buildWorkerEnv`) — `--effort`/
 // `reasoning_effort`/`thinking:{type:disabled}` are all ignored by the Requesty hop, so
-// this env var is the only control that reaches glm-5.3-flash (CLASSIFY) or
-// DeepSeek-V4-Flash (AGENT) there; unset means the model's own `max` default, its worst
+// this env var is the only control that reaches DeepSeek-V4-Flash (CLASSIFY, AGENT) or
+// DeepSeek-V4-Pro (AGENT_IMPLEMENT) there; unset means the model's own `max` default, its worst
 // setting. Only meaningful on a non-Claude route — `buildWorkerEnv` only exports it for
 // one, so it is harmless (never sent) when set on a Claude route.
 
@@ -79,7 +79,7 @@ export interface ToolRoute {
   transport: "session" | "iu-openai";
   /** A gateway model's reasoning budget on the IU leg — `session-runner.ts`'s
    *  `buildWorkerEnv` exports this as `MAX_THINKING_TOKENS` for any non-Claude model, the
-   *  only control that reaches glm-5.3-flash's or DeepSeek-V4-Flash's thinking depth on
+   *  only control that reaches DeepSeek-V4-Flash's or DeepSeek-V4-Pro's thinking depth on
    *  the Requesty hop. Absent on Claude routes (JUDGE, PROSE), which control thinking a
    *  different way, and on the `iu-openai` transport routes (VISION, adversary), which
    *  never reach `buildWorkerEnv` at all. */
@@ -88,6 +88,8 @@ export interface ToolRoute {
 
 export const SONNET = "claude-sonnet-5[1m]";
 export const HAIKU = "claude-haiku-4-5";
+/** Retired from every route 2026-09-23 (see CLASSIFY below); kept as a named id so an env
+ *  override naming it still resolves to something this file documents. */
 export const GLM_FLASH = "glm-5.3-flash";
 export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
 export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
@@ -95,10 +97,19 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 // ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
 // touches one line instead of hunting down every duplicate. ──────────────────────────
 //
-// CLASSIFY: cheap mechanical work (check, overview, review's triage router) — glm-5.3-flash
-//   over IU with Haiku-on-Max as the reverse lane, thinking capped at 2048 tokens
-//   (`thinkingTokens` — see the module-header comment on `MAX_THINKING_TOKENS`; unset would
-//   run GLM's `max` reasoning default, its worst setting, on work that is meant to be cheap).
+// CLASSIFY: cheap mechanical work (check, overview, review's triage router) —
+//   DeepSeek-V4-Flash over IU with Haiku-on-Max as the reverse lane, thinking capped at 2048
+//   tokens (`thinkingTokens` — see the module-header comment on `MAX_THINKING_TOKENS`; unset
+//   would run the gateway model's `max` reasoning default, its worst setting, on work that is
+//   meant to be cheap).
+//   2026-09-23: moved off glm-5.3-flash on the owner's instruction, which retires GLM from
+//   this server entirely — the same in-loop-speed complaint the AGENT note below measured
+//   (13.3 tok/s, 38m24s on ccbench's 10-task suite vs DeepSeek-V4-Flash's ~190 tok/s, 6m20s)
+//   applies here too, and it is the model that stalled an 84-minute dispatch episode on
+//   2026-09-15. No separate CLASSIFY-tier measurement was run: this is the same id AGENT
+//   already carries, at a lower thinking budget, on strictly easier work. `GLM_FLASH` stays
+//   exported as a named id so a `SIDECLAW_MODEL_<TOOL>=glm-5.3-flash` override still resolves
+//   to something documented.
 // AGENT: dispatch ONLY. 2026-09-11: owner decision moved dispatch off a
 //   `SIDECLAW_MODEL_DISPATCH` `.env` override onto glm-5.3-flash over IU (same model
 //   CLASSIFY already trusted), on ccbench scoring it 10/10 on the agentic coding suite.
@@ -174,7 +185,7 @@ const AGENT_IMPLEMENT: ToolRoute = {
 //   fallback.
 // adversary sits alone: its own model (gpt-5.6-terra), same iu-openai transport as VISION.
 const CLASSIFY: ToolRoute = {
-  model: GLM_FLASH,
+  model: DEEPSEEK_FLASH,
   backend: "iu",
   fallback: { backend: "max", model: HAIKU },
   transport: "session",
@@ -385,7 +396,7 @@ export function withModel(route: ToolRoute, model: string | undefined): ToolRout
   };
 }
 
-/** One-line human rendering for tool descriptions and logs: `glm-5.3-flash on iu (fallback claude-haiku-4-5 on max)`. */
+/** One-line human rendering for tool descriptions and logs: `DeepSeek-V4-Flash on iu (fallback claude-haiku-4-5 on max)`. */
 export function describeRoute(route: ToolRoute): string {
   const fb = route.fallback
     ? ` (fallback ${route.fallback.model ?? route.model} on ${route.fallback.backend})`
