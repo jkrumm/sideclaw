@@ -78,11 +78,11 @@ describe("review angle registry", () => {
   });
 
   test("the non-angle finding sources stay documented alongside the angles", () => {
-    // adversary/coderabbit/fallow file findings without being selectable angles, so they
+    // adversary/coderabbit/fallow/ocr file findings without being selectable angles, so they
     // live only in the prose lists — which is exactly where they rot unnoticed.
     const synthesis = read("synthesis.md");
     const findingAngle = REVIEW_OUTPUT.shape.blocking.element.shape.angle.description ?? "";
-    for (const source of ["adversary", "coderabbit", "fallow"]) {
+    for (const source of ["adversary", "coderabbit", "fallow", "ocr"]) {
       expect(synthesis).toContain(`\`${source}\``);
       expect(findingAngle).toContain(source);
     }

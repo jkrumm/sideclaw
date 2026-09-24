@@ -16,11 +16,17 @@ You have received findings from these sources (some may be empty):
 
 [CODERABBIT_RESULTS]
 
+### OpenCodeReview
+
+[OCR_RESULTS]
+
 ## Your job
 
 1. **Deduplicate, but do not collapse minority dissent.** Multiple reviewers may flag the same issue from different angles — merge those into one finding, keeping the most specific message and crediting the angle that caught it. **However:** a finding raised by only one reviewer is NOT weaker than a finding raised by many. The lone dissenter is often the one who looked closely at the right line. Carry single-reviewer findings through to the output unless they are clearly wrong on the merits; if you reject one, state why in the finding's message rather than silently dropping it.
 
 2. **Weight the adversary critic specially.** If the input includes an `adversary` reviewer, it is the only cross-family critic in this pipeline (different model family from every other angle). Its findings are designed to catch correlated blind spots the same-family reviewers share. Treat adversary findings with at least equal weight to consensus findings — do not down-weight just because no other reviewer agreed. The adversary's empty-findings result is also meaningful: a genuine cross-family approval.
+
+2a. **Weight OpenCodeReview (OCR) as a single reviewer, same minority-dissent rule as #1.** OCR comments are line-anchored and precision-tuned — treat a line number it gives as trustworthy and keep it. Credit these findings with `angle: "ocr"`. A lone OCR finding is not weaker than one from an agentic angle; do not discard it just because no other reviewer flagged the same line.
 
 3. **Resolve conflicts**: If two reviewers disagree (e.g., architect says "extract to module" but senior-dev says "keep it simple"), resolve with your judgment. State the tradeoff briefly.
 
@@ -71,7 +77,7 @@ is discarded. Do any reasoning first, then emit the JSON as your final message a
 ## Rules
 
 - `line` is optional — omit if not identifiable from the original finding
-- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `resilience`, `adversary`, `coderabbit`, `fallow`
+- `angle` is required — which reviewer caught it: `architect`, `senior-dev`, `frontend`, `backend`, `typescript`, `qa`, `security`, `performance`, `concurrency`, `data-migration`, `api-contract`, `resilience`, `adversary`, `coderabbit`, `fallow`, `ocr`
 - Preserve specificity from the original finding — don't generalize
 - Empty arrays are fine — not every review has blocking issues
 - Bias toward `improvement` over `discussion` — if the fix is obvious and low-risk, it's an improvement

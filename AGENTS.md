@@ -280,6 +280,41 @@ set) would be a no-op there anyway, since thinking on Claude is controlled a
 different way. JUDGE/PROSE (review, otel, narrative, excalidraw) carry no
 `thinkingTokens` — they stay on Claude.
 
+**`dispatch`/`dispatch_implement` run on a second harness, OpenCode, not
+`claude -p`** (2026-09-24, `harness: "opencode"` on `ToolRoute` — AGENT_OC/
+AGENT_OC_IMPLEMENT — every other tool stays `"claude"`). `opencode run` talks
+to `deepseek-v4.1-flash` over the IU endpoint's **OpenAI-compatible** route
+(`iu/deepseek-v4.1-flash` — a different id and transport from the IU-native-
+Anthropic `DeepSeek-V4-Flash`/`DeepSeek-V4-Pro` every other gateway route
+uses; `claude -p` cannot reach it at all). Measured against DeepSeek-V4-Pro on
+`claude -p` (three re-run implement briefs): ~40x cheaper, ~2-4x faster, a
+blind diff review preferred it on 2 of 3, lost the third on inverted
+volume-floor logic in a HyperDX config — not a clean sweep, and 95-98% cache
+hit vs V4-Pro's 8%. `variant` (opencode's `--variant`, a reasoning-effort
+knob) is `"high"` for investigate/author, `"max"` for implement — the same
+higher-stakes-write-tier split AGENT_IMPLEMENT used to encode; opencode's
+model/harness combination is validated AFTER every override
+(`buildRoutingTable`'s cross-field pass, routing.ts) — a Claude model always
+normalizes harness back to `claude`, and `deepseek-v4.1-flash` (only
+reachable via opencode) with harness `claude` is refused rather than applied.
+Overrides: `SIDECLAW_HARNESS_<TOOL>=claude|opencode`, `SIDECLAW_VARIANT_<TOOL>=<v>`
+(a bare `SIDECLAW_HARNESS_DISPATCH=claude` is refused on its own — pair it
+with a `SIDECLAW_MODEL_DISPATCH` override naming a Claude id). A fallback
+attempt (the `iu`→`max` reverse lane) always runs `claude -p` regardless of
+the primary's harness — Max only ever serves a Claude id. Implementation:
+`server/mcp/opencode-runner.ts` (argv/config/env builders + the NDJSON event
+mapper), invoked from `session-runner.ts`'s `runSessionAttempt` via
+`resolveHarness()`. Its per-run config is passed as `OPENCODE_CONFIG_CONTENT`
+(a JSON string env var), **never** `OPENCODE_CONFIG` (a file path) — measured
+2026-09-24, a repo-local `opencode.json`/`opencode.jsonc` OVERRIDES
+`OPENCODE_CONFIG`, but `OPENCODE_CONFIG_CONTENT` overrides the repo file, so
+only the CONTENT form is a safe way to hand the worker its permission
+profile. That profile sets every opencode `permission` key to `allow`/`deny`
+explicitly — the default `ask` is auto-REJECTED in non-interactive `run`
+mode and silently ends the session, so there is no "ask and it just works"
+here, unlike an interactive opencode session. **Never `--pure`** — measured
+2026-09-24 to hang.
+
 **`otel` also injects the real ClickStack/HyperDX MCP** (bearer-authed
 `http` server) into its own worker session — key resolution fails soft
 (local `.env`, then `HYPERDX_PROD_ACCESS_KEY`, then `secrets-run` — never a
@@ -321,6 +356,11 @@ for any tier but `implement` and for `sensitive: true`; at most one in-place
 episode per repo at a time. What it gives up: no worktree isolation and no
 settings strip (the repo's `.claude/settings.json` `env` **does** apply —
 accepted for the owner's own audited repos; `disableAllHooks` still holds).
+On the opencode harness specifically, in-place instead **refuses outright**
+(`assertInPlaceOpencodeConfigAllowed`, dispatch.ts) when the live repo root
+carries `opencode.json`/`opencode.jsonc`/`.opencode/` — a plugin there
+executes code regardless of permissions, and there is no worktree to strip
+it from first; worktree tiers still get the ordinary strip/restore.
 What still holds: `GIT_DENY_CREDENTIALS_ENV`, the fence, the CI-path and
 added-secret scans (a hit is a warning in the verdict, not a discard — nothing
 is published), the repo's own `check` before the verdict (reported, never
@@ -369,10 +409,12 @@ boundary for a sensitive episode, not the permission profile.
 - `GIT_DENY_CREDENTIALS_ENV` at every tier — this host's `~/.gitconfig`
   wires a credential helper any process can use, and a read-only session
   still has `Bash`.
-- `--settings '{"disableAllHooks":true}'` on every worker, and
-  `.claude/settings{,.local}.json` are stripped from the throwaway worktree
-  before the episode and restored **from the pinned base** after — an
-  audited repo's hooks/`env` must never execute inside the episode.
+- `--settings '{"disableAllHooks":true}'` on every claude-harness worker, and
+  `.claude/settings{,.local}.json` **and** (2026-09-24, the opencode harness)
+  `opencode.json`/`opencode.jsonc`/`.opencode/` are stripped from the
+  throwaway worktree before the episode and restored **from the pinned base**
+  after — an audited repo's hooks/`env`/plugins must never execute inside the
+  episode.
 - `implement` refuses `.github/workflows` diffs and added lines matching
   `SECRET_PATTERNS`; commits `--no-verify`; opens a **draft** PR (GitHub) or
   a "Draft: " MR (GitLab) against the forge-resolved `default_branch`. The
@@ -388,15 +430,34 @@ boundary for a sensitive episode, not the permission profile.
 ### Review — multi-angle pipeline
 
 The `review` job (`server/jobs/handlers/review.ts`) runs a 3-phase parallel
-pipeline: data gathering (git diff, fallow audit, CodeRabbit CLI) → angle
-reviews (parallel claude-sonnet-5 sessions, capped at `ANGLE_CONCURRENCY=3`:
-architect, senior-dev, + conditional frontend/backend/typescript/QA, plus
-router-picked content angles security/performance/concurrency/
-data-migration/api-contract/resilience against an ISO 25010 checklist, plus a
-non-agentic `gpt-5.6-terra` adversary critic) → synthesis (claude-sonnet-5,
-classifies into `blocking`/`improvements`/`discussions`/`testGaps`).
-`outcome`: `"clean"` / `"actionable"` / `"needs-human"`. Full pipeline docs,
-angle tables and cost profile: `server/skills/review/README.md`.
+pipeline: data gathering (git diff, `fallow review --brief` with a scope-derived
+`--base` — `fallowBaseFor`, never `audit`'s auto-detected merge-base, which
+is wrong on this direct-to-master repo for an already-pushed scope, CodeRabbit
+CLI) → angle reviews (parallel claude-sonnet-5 sessions, capped at
+`ANGLE_CONCURRENCY=3`: architect, senior-dev, + conditional
+frontend/backend/typescript/QA, plus router-picked content angles
+security/performance/concurrency/data-migration/api-contract/resilience
+against an ISO 25010 checklist, plus a non-agentic `gpt-5.6-terra` adversary
+critic) → synthesis (claude-sonnet-5, classifies into
+`blocking`/`improvements`/`discussions`/`testGaps`). `outcome`: `"clean"` /
+`"actionable"` / `"needs-human"`. Full pipeline docs, angle tables and cost
+profile: `server/skills/review/README.md`.
+
+**OpenCodeReview (OCR):** one more phase-1 input, started right after Phase 1
+confirms real changes and awaited only just before the synthesis prompt is
+built, so its 3-7 minute wall time runs parallel with the router + angle
+phases instead of adding in front of them (`server/lib/ocr.ts`, route
+`review_ocr` — DeepSeek-V4-Flash over IU, per-token, off Max; no Max fallback,
+since it's an external CLI, not a `runSession` worker). Fails soft to a
+one-line skip/fail block the synthesizer reads like an unavailable
+fallow/CodeRabbit — never a gate, never thrown into the review. Disable with
+`SIDECLAW_REVIEW_OCR=0`. The IU key is handed to the third-party `ocr` binary
+via env — accepted because its agent tools are read-only (file read/find/
+search via `git`, no shell tool) and it reads LLM config only from env/
+`~/.opencodereview`, never the repo; a repo's own `.opencodereview/rule.json`
+can inject review-rule text into the prompt, not redirect the endpoint. OCR
+also runs outside `ANGLE_CONCURRENCY` — one extra IU stream per review,
+accepted.
 
 **External-fact validation (optional):** with `RESEARCH_GATEWAY_URL` +
 `RESEARCH_GATEWAY_TOKEN` set, each angle prompt gets a bounded `curl` recipe

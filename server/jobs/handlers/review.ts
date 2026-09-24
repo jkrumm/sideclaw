@@ -5,6 +5,8 @@ import { z } from "zod";
 import { runSession, zodValidator } from "../../mcp/session-runner.ts";
 import { routeFor } from "../../lib/routing.ts";
 import { textComplete } from "../../lib/iu-openai.ts";
+import { runOcrReview, type RunOcrReviewResult } from "../../lib/ocr.ts";
+import { isPathScope, splitRange } from "../../lib/scope.ts";
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
@@ -152,7 +154,7 @@ const FINDING = z.object({
   angle: z
     .string()
     .describe(
-      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | resilience | adversary | coderabbit | fallow",
+      "Which reviewer caught this: architect | senior-dev | frontend | backend | typescript | qa | security | performance | concurrency | data-migration | api-contract | resilience | adversary | coderabbit | fallow | ocr",
     ),
 });
 
@@ -245,6 +247,15 @@ const SAFE_SCOPE = /^[a-zA-Z0-9._/~^@{}-]+$/;
 
 export function validateScope(scope: string): void {
   if (scope === "uncommitted" || scope === "head") return;
+  // A leading `-` would be read as a flag once spliced into `fallow --base`/`ocr --from`'s
+  // argv, not as a git ref — refused before the character-class check below, which would
+  // otherwise happily accept it (`-` is itself in SAFE_SCOPE, for refs like `HEAD^-1`).
+  // Each half of a range too: `HEAD..-x` would put `-x` in `ocr --to`'s slot.
+  const range = splitRange(scope);
+  const halves = range ? [range.from, range.to] : [scope];
+  if (halves.some((h) => h.startsWith("-"))) {
+    throw new Error(`Invalid scope — a ref must not start with '-': ${scope}`);
+  }
   if (!SAFE_SCOPE.test(scope)) {
     throw new Error(`Invalid scope — contains unsafe characters: ${scope}`);
   }
@@ -283,9 +294,65 @@ export function validateBranchRef(branch: string): void {
 // commit) was a footgun: it silently reviewed one old commit instead of the
 // recent work. Explicit ranges ("main..HEAD") and paths pass through unchanged.
 export function scopeDiffArgs(scope: string): string {
-  if (scope.includes("..")) return scope; // explicit range
-  if (scope.startsWith("/") || scope.includes(".")) return `-- ${scope}`; // file path
+  if (splitRange(scope)) return scope; // explicit range
+  if (isPathScope(scope)) return `-- ${scope}`; // file path
   return `${scope} HEAD`; // bare ref → range up to HEAD
+}
+
+/** `fallowBaseFor`'s result: `"base"` — an explicit `--base <ref>` fallow can use as-is.
+ *  `"auto"` — no explicit base; let fallow auto-detect the merge-base against origin (needs
+ *  the `git remote -v` guard the caller keeps for this branch). `"skip"` — no fallow-shaped
+ *  equivalent for this scope at all; the caller runs `echo ""` instead of invoking fallow. */
+export type FallowBase = { kind: "base"; ref: string } | { kind: "auto" } | { kind: "skip" };
+
+// `fallow review --brief --base <ref>` always reviews `<ref>...HEAD` — it has no way to name
+// an arbitrary right-hand side. `scopeDiffArgs`'s two-sided range vocabulary (`scope: "A..B"`)
+// can express `HEAD~4..HEAD~2`, which fallow simply cannot answer with `--base` — reviewing it
+// as `HEAD~4..HEAD` would silently review the wrong, larger range, so that shape is a `"skip"`
+// rather than a best-effort wrong answer. Same scope vocabulary as `scopeDiffArgs` otherwise.
+export function fallowBaseFor(scope: string): FallowBase {
+  // `--base HEAD` is not an empty range: fallow diffs the working tree against it, so it
+  // covers staged, unstaged and untracked changes (verified on fallow 3.27).
+  if (scope === "uncommitted") return { kind: "base", ref: "HEAD" };
+  if (scope === "head") return { kind: "base", ref: "HEAD~1" };
+  const range = splitRange(scope);
+  if (range) {
+    if (!range.from) return { kind: "skip" };
+    if (range.to && range.to !== "HEAD") return { kind: "skip" };
+    return { kind: "base", ref: range.from };
+  }
+  if (isPathScope(scope)) return { kind: "auto" }; // file path
+  return { kind: "base", ref: scope }; // bare ref
+}
+
+/** Marker prefix `fallowCommand` prints when fallow itself fails, so the synthesizer is told
+ *  "fallow crashed" rather than reading silence as "fallow found nothing". */
+export const FALLOW_FAILED_PREFIX = "fallow failed";
+
+/** Synthesis-prompt block for the fallow output: a crash is named as one, never rendered as
+ *  a clean brief or as "not available". */
+export function renderFallowBlock(stdout: string): string {
+  if (!stdout) return "fallow: not available or skipped.";
+  if (stdout.startsWith(FALLOW_FAILED_PREFIX)) {
+    return `${stdout} — no static-analysis input for this review.`;
+  }
+  return `fallow review brief:\n\`\`\`\n${stdout}\n\`\`\``;
+}
+
+/** Shell command for the fallow brief. Empty output = fallow absent/skipped; a non-zero exit
+ *  prints `FALLOW_FAILED_PREFIX` + the stderr tail instead of being swallowed. The ref is
+ *  already `validateScope`-checked (or a resolved OID in ref mode). */
+export function fallowCommand(base: FallowBase): string {
+  if (base.kind === "skip") return "true";
+  const guards =
+    base.kind === "auto"
+      ? "command -v fallow >/dev/null 2>&1 || exit 0; git remote -v 2>/dev/null | grep -q . || exit 0"
+      : "command -v fallow >/dev/null 2>&1 || exit 0";
+  const baseArg = base.kind === "base" ? ` --base ${base.ref}` : "";
+  return (
+    `${guards}; e=$(mktemp); fallow review --brief --quiet${baseArg} 2>"$e"; rc=$?; ` +
+    `[ $rc -eq 0 ] || echo "${FALLOW_FAILED_PREFIX} (exit $rc): $(tail -n 3 "$e")"; rm -f "$e"`
+  );
 }
 
 // Untracked (but non-ignored) files are invisible to `git diff`, which blinded
@@ -835,6 +902,10 @@ export async function runReview(
   // exactly that path. Set the instant the fetch actually lands the ref, by
   // `fetchReviewHead`'s own callback.
   let fetchRefCreated = false;
+  // OCR runs in parallel with the angle phase; the `finally` aborts and awaits it so an early
+  // exit (throw, all-angles-failed) never leaves `ocr` reading a worktree being torn down.
+  let ocrAbort: AbortController | undefined;
+  let ocrPromise: Promise<RunOcrReviewResult> | undefined;
 
   try {
     // Every downstream git/session call runs in `effectiveCwd`: the caller's own checkout for
@@ -845,19 +916,24 @@ export async function runReview(
     let diffCmd: string;
     let filesCmd: string;
     let coderabbitCmd: string;
+    let fallowCmd: string;
+    // Hoisted so ref mode's resolved base can also seed OCR's `--from` after Phase 1 — see
+    // where `ocrPromise` is started below. Stays `undefined` outside ref mode.
+    let baseOid: string | undefined;
 
     if (refMode) {
       bump("fetching ref");
       const headOid = await fetchReviewHead(cwd, jobKey, { pr, branch }, () => {
         fetchRefCreated = true;
       });
-      const { baseOid } = await resolveReviewBase(cwd);
+      ({ baseOid } = await resolveReviewBase(cwd));
       bump("checking out worktree");
       worktree = await createReadWorktree(cwd, jobKey, headOid);
       effectiveCwd = worktree.path;
       diffCmd = refDiffCommand(baseOid);
       filesCmd = refDiffFilesCommand(baseOid);
       coderabbitCmd = `which coderabbit >/dev/null 2>&1 && coderabbit review --prompt-only --base ${baseOid} 2>/dev/null || true`;
+      fallowCmd = fallowCommand({ kind: "base", ref: baseOid });
     } else {
       diffCmd = gitDiffCommand(resolvedScope);
       filesCmd = gitDiffFilesCommand(resolvedScope);
@@ -867,20 +943,20 @@ export async function runReview(
           : resolvedScope === "head"
             ? "which coderabbit >/dev/null 2>&1 && coderabbit review --prompt-only --type committed 2>/dev/null || true"
             : `which coderabbit >/dev/null 2>&1 && coderabbit review --prompt-only --base ${resolvedScope} 2>/dev/null || true`;
+      // Explicit `--base` from the scope — never fallow's auto-detected merge-base, which on
+      // this direct-to-master repo resolves against `origin/master` and so audits nothing for
+      // already-pushed commits. See `fallowBaseFor` for the `auto`/`skip` cases.
+      fallowCmd = fallowCommand(fallowBaseFor(resolvedScope));
     }
 
     // ── Phase 1: Data gathering (parallel) ──────────────────────────────
-    bump("gathering diff, fallow, coderabbit");
+    bump("gathering diff, fallow, coderabbit, ocr");
 
     const [diffResult, filesResult, fallowResult, coderabbitResult, packageJsonResult] =
       await Promise.all([
         shell(diffCmd, effectiveCwd),
         shell(filesCmd, effectiveCwd),
-        shell(
-          'which fallow >/dev/null 2>&1 && git remote -v 2>/dev/null | grep -q . && fallow audit --quiet 2>&1 || echo ""',
-          effectiveCwd,
-          60_000,
-        ),
+        shell(fallowCmd, effectiveCwd, 60_000),
         shell(coderabbitCmd, effectiveCwd, 60_000),
         shell("cat package.json 2>/dev/null", effectiveCwd),
       ]);
@@ -914,6 +990,32 @@ export async function runReview(
         schemaVersion: REVIEW_SCHEMA_VERSION,
       };
     }
+
+    // Started here (real changes confirmed, so nothing is left running past the "no changes"
+    // early return above) and awaited only just before the synthesis prompt is built — so its
+    // 3-7 minute wall time runs in parallel with the router + angle-session phases below
+    // instead of adding in front of them. `refBaseOid` wins over `scope` in ref mode, where
+    // `resolvedScope` is only the synthetic `pr:N`/`branch:x` label. Whether it actually ran
+    // (vs. was skipped) comes back on the result itself (`ran`) — no separate enable check
+    // duplicated here.
+    ocrAbort = new AbortController();
+    ocrPromise = runOcrReview({
+      cwd: effectiveCwd,
+      scope: resolvedScope,
+      refBaseOid: refMode ? baseOid : undefined,
+      context,
+      jobId,
+      onActivity: bump,
+      signal: ocrAbort.signal,
+    }).catch(
+      // Belt and braces: `runOcrReview` is contracted to never throw, but a caller awaiting
+      // `ocrPromise` unconditionally (this function's own `finally`) must not let a violation
+      // of that contract become an unhandled rejection or a crashed review.
+      (err): RunOcrReviewResult => ({
+        block: `OpenCodeReview: failed (${String(err)})`,
+        ran: false,
+      }),
+    );
 
     const changedFiles = filesResult.stdout.split("\n").filter(Boolean);
     let hasTestScript = false;
@@ -1080,6 +1182,15 @@ export async function runReview(
     }
 
     // ── Phase 3: Synthesis ───────────────────────────
+    // Awaited here, not started here: `ocrPromise` has been running in parallel with the
+    // router + angle-session phases above since right after Phase 1 confirmed real changes —
+    // this is the first point its 3-7 minute wall time can actually block anything.
+    bump("synthesis: awaiting ocr");
+    const ocrResult = await ocrPromise;
+    logger.info(
+      { event: "review.ocr", tool: "review", project: cwd, hasOcr: ocrResult.ran },
+      "ocr review resolved",
+    );
     bump("synthesizing findings");
     const synthesisPrompt = await loadAnglePrompt("synthesis");
 
@@ -1094,18 +1205,21 @@ export async function runReview(
       })
       .join("\n\n");
 
-    const fallowBlock = fallowResult.stdout
-      ? `fallow audit output:\n\`\`\`\n${fallowResult.stdout}\n\`\`\``
-      : "fallow: not available or skipped.";
+    const fallowBlock = renderFallowBlock(fallowResult.stdout);
 
     const coderabbitBlock = coderabbitResult.stdout
       ? `CodeRabbit findings:\n\`\`\`\n${coderabbitResult.stdout}\n\`\`\``
       : "CodeRabbit: not available or skipped.";
 
+    // Function replacers, not string ones — `String.prototype.replace`'s string form treats
+    // `$&`/`$1`/`$$` etc. in the replacement as special substitution patterns, and every one
+    // of these blocks is untrusted-ish worker/tool output that could legitimately contain a
+    // `$`-shaped sequence. A function replacer's return value is inserted literally.
     const finalPrompt = synthesisPrompt
-      .replace("[ANGLE_RESULTS]", angleBlock)
-      .replace("[FALLOW_RESULTS]", fallowBlock)
-      .replace("[CODERABBIT_RESULTS]", coderabbitBlock);
+      .replace("[ANGLE_RESULTS]", () => angleBlock)
+      .replace("[FALLOW_RESULTS]", () => fallowBlock)
+      .replace("[CODERABBIT_RESULTS]", () => coderabbitBlock)
+      .replace("[OCR_RESULTS]", () => ocrResult.block);
 
     const runSynthesis = (synthPrompt: string) =>
       runSession<SynthesisOutput>({
@@ -1207,6 +1321,8 @@ export async function runReview(
 
     return { ...data, schemaVersion: REVIEW_SCHEMA_VERSION };
   } finally {
+    ocrAbort?.abort();
+    await ocrPromise;
     // Torn down on every exit path, including a throw — same "the caller's own checkout is
     // never left holding this review's work" property dispatch's read tiers rely on
     // (dispatch-git.ts). The worktree and the fetch ref are two independent pieces of state

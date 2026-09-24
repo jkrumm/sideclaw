@@ -89,6 +89,7 @@ describe("resolveBackend", () => {
         backend: "max",
         fallback: null,
         transport: "session",
+        harness: "claude",
       }).backend,
     ).toBe("iu");
     expect(
@@ -97,6 +98,7 @@ describe("resolveBackend", () => {
         backend: "max",
         fallback: null,
         transport: "session",
+        harness: "claude",
       }).backend,
     ).toBe("iu");
   });
@@ -107,6 +109,7 @@ describe("resolveBackend", () => {
       backend: "iu",
       fallback: { backend: "max" },
       transport: "session",
+      harness: "claude",
     });
     expect(r).toEqual({ backend: "iu", reason: "ok" });
   });
@@ -117,6 +120,7 @@ describe("resolveBackend", () => {
       backend: "max",
       fallback: null,
       transport: "session",
+      harness: "claude",
     });
     expect(r).toEqual({ backend: "max", reason: "ok" });
   });

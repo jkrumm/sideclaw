@@ -7,9 +7,15 @@ Deep code review via parallel specialist agents, synthesized into a single actio
 ```
 Phase 1 — Data Gathering (parallel shell, ~2s)
 ├── git diff (scope-aware; "uncommitted" also splices in untracked files)
-├── fallow audit --quiet (static analysis)
+├── fallow review --brief --quiet --base <scope-derived base> (static analysis)
 ├── coderabbit review --prompt-only
 └── package.json (test script detection)
+
+Phase 1b (parallel sidecar, started right after Phase 1, ~3-7 min) — OpenCodeReview
+└── `ocr review` (alibaba/open-code-review CLI) on DeepSeek-V4-Flash over IU —
+    awaited only just before synthesis, so its wall time overlaps the router +
+    angle phases instead of sitting in front of them. `SIDECLAW_REVIEW_OCR=0`
+    disables it.
 
 Phase 1.5 — Angle Routing (one glm-5.3-flash triage session on IU, ~10-20s)
 └── Reads the diff, adds content-driven angles on top of the deterministic floor
@@ -89,8 +95,11 @@ when re-running a review). The baseline architect + senior-dev are always kept.
 
 External tools run in parallel with agents:
 
-- **fallow audit** — dead code, complexity, duplication (if installed + remote)
+- **fallow review --brief** — dead code, complexity, duplication (if installed; needs a
+  remote only when the scope has no explicit base to hand it — see `fallowBaseFor`)
 - **CodeRabbit CLI** — additional static analysis (if installed)
+- **OpenCodeReview (`ocr`)** — cross-file consistency, config drift, precise line-anchored
+  findings (if installed on PATH; `SIDECLAW_REVIEW_OCR=0` disables)
 
 ## Output Schema
 
@@ -154,12 +163,19 @@ with a quota error. The router triage runs on the cheap CLASSIFY tier
 so its bias profile is uncorrelated with the claude-sonnet-5 reviewers. The live
 table is always `GET /api/routing`.
 
-| Component                                                                                             | Model           |
-| ----------------------------------------------------------------------------------------------------- | --------------- |
-| 1 router triage session (own `review_router` route — the cheap CLASSIFY tier, same as check/overview) | glm-5.3-flash   |
-| 2–8 angle sessions (3 in flight)                                                                      | claude-sonnet-5 |
-| 1 adversary critic (single HTTPS call, no agent)                                                      | gpt-5.6-terra   |
-| 1 synthesis session                                                                                   | claude-sonnet-5 |
+| Component                                                                                             | Model             |
+| ----------------------------------------------------------------------------------------------------- | ----------------- |
+| 1 router triage session (own `review_router` route — the cheap CLASSIFY tier, same as check/overview) | glm-5.3-flash     |
+| 2–8 angle sessions (3 in flight)                                                                      | claude-sonnet-5   |
+| 1 adversary critic (single HTTPS call, no agent)                                                      | gpt-5.6-terra     |
+| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles)            | DeepSeek-V4-Flash |
+| 1 synthesis session                                                                                   | claude-sonnet-5   |
+
+OCR reads the repo itself with its own tool loop rather than working off a single diff
+string, so its own IU-billed token spend (`review_ocr` in the `sideclaw-iu` usage sink) runs
+**~1.4-4.6M tokens per run** — high, but over 90% is cache reads (repeated repo-context
+reads across its internal subtasks), not fresh input, so the real marginal cost is well
+below the raw token count.
 
 `gpt-5.6-terra` is a reasoning model — it thinks before answering, so it is
 slower (~50s) and pricier ($2.50/$15 per 1M, ~$0.08 a review) than the

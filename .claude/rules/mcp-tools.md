@@ -52,9 +52,20 @@ patterns: `docs/mcp-tool-authoring.md`.
 
 ## Fallow Static Analysis
 
-`fallow audit --quiet` (auto-detects base branch) — never `fallow diff`
-(doesn't exist). Guard: `which fallow` and a git remote must both exist.
-Treat `pass`/`warn` as passed, `fail` as failed.
+`check` runs `fallow audit --quiet` (auto-detects the merge-base against
+upstream) — never `fallow diff` (doesn't exist). Guard: `which fallow` and a
+git remote must both exist. Treat `pass`/`warn` as passed, `fail` as failed.
+
+`review` instead runs `fallow review --brief --quiet --base <base>` (fallow
+3.27+'s reviewer-oriented alias: same analysis, always exits 0, rendered as
+an orientation brief rather than a gating verdict) with an explicit `--base`
+derived from its own scope (`fallowBaseFor` in
+`server/jobs/handlers/review.ts`) — `audit`'s auto-detected merge-base is
+wrong on this direct-to-master repo when the scope is already-pushed commits
+(`scope: "HEAD~4"`, a range, `pr`/`branch`), since it defaults to diffing
+against `origin/master` instead. The `git remote -v` guard only still applies
+when `fallowBaseFor` returns `null` (a file-path scope, which has no
+review-shaped base) and fallow falls back to its own auto-detection.
 
 ## Progress Heartbeat
 

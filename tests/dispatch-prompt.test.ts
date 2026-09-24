@@ -27,7 +27,7 @@ import {
   type DispatchTier,
 } from "../server/jobs/handlers/dispatch.ts";
 import { privateVerdictsRoot } from "../server/jobs/handlers/dispatch-git.ts";
-import { classifyExitFailure } from "../server/mcp/session-runner.ts";
+import { classifyExitFailure, unclassifiedOutputFailure } from "../server/mcp/session-runner.ts";
 import { makeFixture } from "./git-fixture.ts";
 
 const NONCE = "0123456789ab";
@@ -237,6 +237,22 @@ describe("isSalvageable", () => {
   test("retries: the exact shape classifyExitFailure now produces for a max-turns exit", () => {
     const r = classifyExitFailure(1, { subtype: "error_max_turns" }, "irrelevant stderr", "");
     expect(isSalvageable({ ok: false, error: r.error, noOutput: r.noOutput })).toBe(true);
+  });
+
+  // Regression for the opencode harness (2026-09-24, AGENT_OC/AGENT_OC_IMPLEMENT):
+  // `runOpencodeAttempt` (opencode-runner.ts) has no CLI envelope to classify — its own
+  // unparseable-final-text and schema-validation failures both go through the exact same
+  // `unclassifiedOutputFailure` helper the claude path uses, so `isSalvageable` needs no
+  // harness-specific branch to keep working for it.
+  test("retries: the shape unclassifiedOutputFailure produces for an opencode session whose final text didn't parse", () => {
+    const r = unclassifiedOutputFailure<DispatchOutput>(
+      "final message is not valid JSON: not json",
+      "not json",
+      false,
+      "iu",
+      "deepseek-v4.1-flash",
+    );
+    expect(isSalvageable(r)).toBe(true);
   });
 });
 

@@ -797,18 +797,27 @@ const MAX_COPY_FILES = 5_000;
 /**
  * Directory segments never copied, regardless of size or count.
  *
- * `.claude` is the one that is security-critical, not cost-driven, and must never be relaxed:
- * `stripProjectSettings` (below) exists because a repo's `.claude/settings.json` can override
- * the handler's environment, including `GIT_DENY_CREDENTIALS_ENV` — a live hole closed
- * 2026-08-03. That strip only removes what `git worktree add` materializes from TRACKED
- * history; an untracked `.claude/settings.local.json` sitting in the live checkout would walk
- * straight past it if this copy brought it in. So any path with a `.claude` segment is
- * excluded here, unconditionally, before the strip ever runs. The rest are ordinary
- * cost-control — the directories most likely to hold thousands of files nobody dispatched an
- * episode to read.
+ * `.claude` (and, 2026-09-24, `.opencode`) is the one that is security-critical, not
+ * cost-driven, and must never be relaxed: `stripProjectSettings` (below) exists because a
+ * repo's `.claude/settings.json` can override the handler's environment, including
+ * `GIT_DENY_CREDENTIALS_ENV` (via its `env` block — a live hole closed 2026-08-03) — and,
+ * now that dispatch/dispatch_implement run the opencode harness (routing.ts's AGENT_OC), a
+ * `.opencode/` directory can carry a PLUGIN, which executes arbitrary code the moment
+ * opencode loads it (opencode's own config schema has no `env` block to override an env var
+ * through, unlike claude's — the risk there is code execution, not env override).
+ * `opencode.json`/`opencode.jsonc` are excluded alongside it for the same defense-in-depth
+ * reasoning, though their PERMISSION override is separately neutralized by
+ * `OPENCODE_CONFIG_CONTENT` winning over a repo file — see `PROJECT_SETTINGS_FILES`'s doc
+ * comment below. That strip only removes what `git worktree add` materializes from TRACKED
+ * history; an untracked `.claude/settings.local.json` (or `.opencode/`) sitting in the live
+ * checkout would walk straight past it if this copy brought it in. So any path with a
+ * `.claude` or `.opencode` segment is excluded here, unconditionally, before the strip ever
+ * runs. The rest are ordinary cost-control — the directories most likely to hold thousands of
+ * files nobody dispatched an episode to read.
  */
 const EXCLUDED_COPY_SEGMENTS = new Set([
   ".claude",
+  ".opencode",
   "node_modules",
   ".venv",
   "venv",
@@ -1228,11 +1237,25 @@ function describeLeftover(path: string): { main: string; branch: string } {
  * Settings files a session loads from the repo it runs in.
  *
  * Only the PROJECT ROOT's are honored — measured on CLI 2.1.220 (2026-08-03): a
- * `sub/.claude/settings.json` had no effect, so removing these two is sufficient rather than
+ * `sub/.claude/settings.json` had no effect, so removing these is sufficient rather than
  * merely helpful. `settings.local.json` is conventionally untracked and therefore absent from
  * a fresh worktree; it is listed anyway, because "conventionally" is not a guarantee.
+ *
+ * `opencode.json`/`opencode.jsonc` and `.opencode/` were added 2026-09-24, when
+ * dispatch/dispatch_implement moved onto the opencode harness (routing.ts's AGENT_OC) — a
+ * repo-local opencode config or plugin directory is the exact same vector `.claude/
+ * settings.json` was for claude: it would execute inside the episode's worktree otherwise.
+ * `.opencode` is a directory, not a file — `stripProjectSettings`/`restoreStrippedSettings`
+ * both already handle either shape (see the `rmSync(..., { recursive: true })` below and
+ * `git checkout <base> -- <path>`'s own directory-pathspec support).
  */
-const PROJECT_SETTINGS_FILES = [".claude/settings.json", ".claude/settings.local.json"];
+const PROJECT_SETTINGS_FILES = [
+  ".claude/settings.json",
+  ".claude/settings.local.json",
+  "opencode.json",
+  "opencode.jsonc",
+  ".opencode",
+];
 
 /**
  * Delete the repo's own session settings from the worktree, before the episode starts.
@@ -1247,7 +1270,17 @@ const PROJECT_SETTINGS_FILES = [".claude/settings.json", ".claude/settings.local
  * overlay that takes git's push credential away from every tier, undone by one line in the
  * audited repo. `disableAllHooks` does nothing about it, and neither would any other flag
  * that keeps the project source loaded. So the file is removed instead, in the only place
- * that can do it without touching anything a human owns: the throwaway copy.
+ * that can do it without touching anything a human owns: the throwaway copy. The same
+ * reasoning covers opencode.json/opencode.jsonc/.opencode/ on the opencode harness (see
+ * `PROJECT_SETTINGS_FILES`'s doc comment) — measured 2026-09-24, the PRECEDENCE actually
+ * runs the other way from what an earlier draft of this comment assumed: a repo-local
+ * `opencode.json`/`opencode.jsonc` OVERRIDES an `OPENCODE_CONFIG` env var (a file path), so
+ * a per-run config written to a temp file and pointed at by `OPENCODE_CONFIG` would have
+ * LOST to a malicious repo config, not won. `OPENCODE_CONFIG_CONTENT` (the JSON itself, as
+ * an env value — opencode-runner.ts's `buildOpencodeEnv`) is the one that wins over the repo
+ * file, which is why sideclaw passes the config that way and never via `OPENCODE_CONFIG` at
+ * all. This strip is still real defense in depth on top of that, not redundant with it: it
+ * also removes `.opencode/`, whose plugin code executes regardless of which config wins.
  *
  * Returns the paths removed, which the caller hands back to `restoreStrippedSettings`.
  */
@@ -1256,7 +1289,7 @@ export function stripProjectSettings(wt: DispatchWorktree): string[] {
   for (const rel of PROJECT_SETTINGS_FILES) {
     const abs = join(wt.path, rel);
     if (!existsSync(abs)) continue;
-    rmSync(abs, { force: true });
+    rmSync(abs, { recursive: true, force: true });
     stripped.push(rel);
   }
   if (stripped.length > 0) {

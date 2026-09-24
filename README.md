@@ -55,7 +55,9 @@ Logs: `~/Library/Logs/sideclaw.jsonl` (structured, both processes), `sideclaw.{l
 | `GITHUB_TOKEN` | fallback GitHub credential for `dispatch` artifacts (primary is `secrets-run read op://mini/github/token`) |
 | `RESEARCH_GATEWAY_URL`, `RESEARCH_GATEWAY_TOKEN` | lets review angle workers validate external claims |
 | `SIDECLAW_MODEL_<TOOL>`, `SIDECLAW_BACKEND_<TOOL>` | per-tool routing override (`iu` \| `max`); a gateway id never lands on `max`, and a backend override on `adversary`/`read_image`/`read_drawing` (fixed `iu-openai` transport) is refused |
+| `SIDECLAW_HARNESS_<TOOL>` (`claude` \| `opencode`), `SIDECLAW_VARIANT_<TOOL>` | per-tool harness/reasoning-effort override — `dispatch`/`dispatch_implement` default to `opencode` (deepseek-v4.1-flash over IU's OpenAI route), refused on a fixed-transport tool same as the model/backend overrides |
 | `SIDECLAW_WORKER_FALLBACK=none` | disable both fallback directions |
+| `SIDECLAW_REVIEW_OCR=0` | disable the OpenCodeReview (`ocr` CLI) phase-1 review input |
 | `SIDECLAW_JOB_CONCURRENCY` (3) | running-job cap |
 | `SIDECLAW_AGENT_STALE_HOURS` (24) | agent snapshot stale threshold |
 | `ARGO_URL` | Argo API base for the overview push (default `https://argo.jkrumm.com/api`) |

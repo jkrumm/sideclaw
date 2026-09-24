@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import {
   assertInPlaceAllowed,
+  assertInPlaceOpencodeConfigAllowed,
   DISPATCH_OUTCOMES,
   DISPATCH_SCHEMA_VERSION,
   finishInPlace,
@@ -68,6 +69,38 @@ describe("assertInPlaceAllowed", () => {
   });
 });
 
+describe("assertInPlaceOpencodeConfigAllowed (2026-09-24 security fix)", () => {
+  test("no-op for the claude harness, regardless of repo contents", () => {
+    fx.write("opencode.json", "{}\n");
+    expect(() => assertInPlaceOpencodeConfigAllowed(fx.repo, "claude")).not.toThrow();
+  });
+
+  test("no-op for the opencode harness in a repo with none of the three paths", () => {
+    expect(() => assertInPlaceOpencodeConfigAllowed(fx.repo, "opencode")).not.toThrow();
+  });
+
+  test("refuses the opencode harness when the repo carries opencode.json", () => {
+    fx.write("opencode.json", "{}\n");
+    expect(() => assertInPlaceOpencodeConfigAllowed(fx.repo, "opencode")).toThrow(
+      /dispatch refused:.*opencode\.json/,
+    );
+  });
+
+  test("refuses the opencode harness when the repo carries opencode.jsonc", () => {
+    fx.write("opencode.jsonc", "// c\n{}\n");
+    expect(() => assertInPlaceOpencodeConfigAllowed(fx.repo, "opencode")).toThrow(
+      /dispatch refused:.*opencode\.jsonc/,
+    );
+  });
+
+  test("refuses the opencode harness when the repo carries a .opencode/ directory (plugins)", () => {
+    fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
+    expect(() => assertInPlaceOpencodeConfigAllowed(fx.repo, "opencode")).toThrow(
+      /dispatch refused:.*\.opencode/,
+    );
+  });
+});
+
 describe("runDispatch — in-place refusals before anything runs", () => {
   test("in-place with tier investigate throws and creates no worktree or branch", async () => {
     try {
@@ -107,6 +140,18 @@ describe("runDispatch — in-place refusals before anything runs", () => {
       await expect(
         runDispatch({ cwd: fx.repo, brief: "b", tier: "implement", workspace: "in-place" }),
       ).rejects.toThrow(/already running in this repo \(job job-first\)/);
+    } finally {
+      releaseInPlaceLock(fx.repo);
+    }
+  });
+
+  test("in-place implement is refused before any worktree exists when the repo carries a .opencode/ plugin dir — dispatch_implement runs the opencode harness by default", async () => {
+    fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
+    try {
+      await expect(
+        runDispatch({ cwd: fx.repo, brief: "b", tier: "implement", workspace: "in-place" }),
+      ).rejects.toThrow(/dispatch refused:.*\.opencode/);
+      expect(await fx.linkedWorktrees()).toEqual([]);
     } finally {
       releaseInPlaceLock(fx.repo);
     }

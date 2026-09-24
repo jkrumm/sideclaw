@@ -301,8 +301,10 @@ function normalizeUsage(raw: unknown): IuUsage | undefined {
 }
 
 /** Append one usage row to the NDJSON sink. Best-effort: telemetry failure must
- * never break the tool, but it is logged (not silently dropped). */
-async function recordIuUsage(rec: {
+ * never break the tool, but it is logged (not silently dropped). Exported — `server/lib/ocr.ts`
+ * bypasses `visionRead`/`textComplete` (it shells out to the `ocr` CLI, not a direct fetch)
+ * but still bills IU per-token and needs the same sink. */
+export async function recordIuUsage(rec: {
   tool: string;
   model: string;
   usage?: IuUsage;

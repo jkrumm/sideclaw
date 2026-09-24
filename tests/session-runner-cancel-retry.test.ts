@@ -26,6 +26,7 @@ const ROUTE: ToolRoute = {
   backend: "iu",
   fallback: null, // no lane switch available — planNextAttempt can only "retry" or "return"
   transport: "session",
+  harness: "claude",
 };
 
 describe("runSession's cancel check at the top of the retry loop", () => {

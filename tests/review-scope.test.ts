@@ -13,6 +13,7 @@ import { randomUUID } from "crypto";
 import {
   assertSafeDefaultBranch,
   checkoutRefDiff,
+  fallowBaseFor,
   gitDiffCommand,
   REVIEW_OUTCOMES,
   REVIEW_SCHEMA_VERSION,
@@ -75,6 +76,45 @@ describe("gitDiffCommand", () => {
   });
 });
 
+describe("fallowBaseFor", () => {
+  test('"uncommitted" bases off HEAD', () => {
+    expect(fallowBaseFor("uncommitted")).toEqual({ kind: "base", ref: "HEAD" });
+  });
+
+  test('"head" bases off the commit before HEAD', () => {
+    expect(fallowBaseFor("head")).toEqual({ kind: "base", ref: "HEAD~1" });
+  });
+
+  test("an explicit two-dot range against HEAD uses the left side as the base", () => {
+    expect(fallowBaseFor("main..HEAD")).toEqual({ kind: "base", ref: "main" });
+  });
+
+  test("an explicit three-dot range against HEAD uses the left side as the base", () => {
+    expect(fallowBaseFor("main...HEAD")).toEqual({ kind: "base", ref: "main" });
+  });
+
+  test("a bare ref is its own base", () => {
+    expect(fallowBaseFor("HEAD~3")).toEqual({ kind: "base", ref: "HEAD~3" });
+  });
+
+  test("a path-shaped scope (leading slash) auto-detects (needs the remote guard)", () => {
+    expect(fallowBaseFor("/abs/path/file.ts")).toEqual({ kind: "auto" });
+  });
+
+  test("a path-shaped scope (contains a dot) auto-detects (needs the remote guard)", () => {
+    expect(fallowBaseFor("server/index.ts")).toEqual({ kind: "auto" });
+  });
+
+  test("a range whose right side is not HEAD has no fallow --base equivalent — skip", () => {
+    expect(fallowBaseFor("HEAD~4..HEAD~2")).toEqual({ kind: "skip" });
+    expect(fallowBaseFor("main..feature")).toEqual({ kind: "skip" });
+  });
+
+  test("a range with an empty right side ('main..') still bases off the left side", () => {
+    expect(fallowBaseFor("main..")).toEqual({ kind: "base", ref: "main" });
+  });
+});
+
 // ── validateScope / validateBranchRef ───────────────────────────────────────────
 
 describe("validateScope", () => {
@@ -88,6 +128,11 @@ describe("validateScope", () => {
   test("shell metacharacters are refused", () => {
     expect(() => validateScope("HEAD; rm -rf /")).toThrow(/unsafe characters/);
     expect(() => validateScope("$(whoami)")).toThrow(/unsafe characters/);
+  });
+
+  test("a leading '-' is refused (flag injection into fallow --base / ocr --from)", () => {
+    expect(() => validateScope("--upload-pack=evil")).toThrow(/must not start with '-'/);
+    expect(() => validateScope("-x")).toThrow(/must not start with '-'/);
   });
 });
 

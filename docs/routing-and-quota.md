@@ -123,18 +123,22 @@ latched so the fallback attempt itself is never switched again:
   **Thinking budget** (`ToolRoute.thinkingTokens`, `server/lib/routing.ts`):
   `--effort`/`reasoning_effort`/`thinking:{type:disabled}` are all ignored by
   the Requesty hop for every gateway id alike, so the only lever that reaches
-  one is `MAX_THINKING_TOKENS` (the CLI's env var for Anthropic's
-  `thinking.budget_tokens`), exported by `buildWorkerEnv` for any non-Claude
-  route. CLASSIFY (check/overview/review_router, DeepSeek-V4-Flash since
-  2026-09-23 — GLM is retired from every route)
-  runs at 2048; AGENT (dispatch's investigate/author tiers, DeepSeek-V4-Flash
-  since 2026-09-21) and AGENT_IMPLEMENT (dispatch's implement tier only,
-  DeepSeek-V4-Pro since 2026-09-22, mirroring warden's own
-  `AUTO_IMPLEMENT_MODEL`) both run at 8192 — the budget AGENT's ccbench/POC
-  evidence was measured under; JUDGE/PROSE stay on Claude and carry no
-  `thinkingTokens`. Overridable per tool via `SIDECLAW_THINKING_TOKENS_<TOOL>`
-  (`SIDECLAW_MODEL_DISPATCH_IMPLEMENT` etc. for the split route), same env
-  pattern as the model/backend overrides above.
+  one on the `claude` harness is `MAX_THINKING_TOKENS` (the CLI's env var for
+  Anthropic's `thinking.budget_tokens`), exported by `buildWorkerEnv` for any
+  non-Claude route. CLASSIFY (check/overview/review_router, DeepSeek-V4-Flash
+  since 2026-09-23 — GLM is retired from every route) runs at 2048; JUDGE/
+  PROSE stay on Claude and carry no `thinkingTokens`. `dispatch`/
+  `dispatch_implement` carry none either — AGENT/AGENT_IMPLEMENT (this
+  `thinkingTokens` mechanism, DeepSeek-V4-Flash/-Pro over the IU native
+  Anthropic transport) were retired 2026-09-24 for AGENT_OC/AGENT_OC_IMPLEMENT
+  (`harness: "opencode"`, `deepseek-v4.1-flash` over IU's OpenAI-compatible
+  route) — opencode has no `MAX_THINKING_TOKENS` equivalent, only `--variant`
+  (`"high"` investigate/author, `"max"` implement, same reasoning tier split
+  AGENT_IMPLEMENT used to encode). Overridable per tool via
+  `SIDECLAW_THINKING_TOKENS_<TOOL>` (claude-harness routes) or
+  `SIDECLAW_HARNESS_<TOOL>`/`SIDECLAW_VARIANT_<TOOL>` (any route), same env
+  pattern as the model/backend overrides above. Full harness rationale:
+  `AGENTS.md`'s Worker routing section.
 
 `SessionResult.backend` and `.model` carry what actually ran;
 `overview`/`narrative` job output carries `backend` too. Tests:

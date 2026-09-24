@@ -10,6 +10,16 @@
 // token, serves Claude AND gateway ids like DeepSeek-V4-Flash) and `max` (the inherited
 // Claude Code OAuth profile — the Max subscription, Claude ids only).
 //
+// Harness: `claude` (default — spawns `claude -p`, `session-runner.ts`) or `opencode`
+// (spawns `opencode run`, `server/mcp/opencode-runner.ts`) — ONLY `dispatch`/
+// `dispatch_implement` run on `opencode` as of 2026-09-24 (see the AGENT_OC/
+// AGENT_OC_IMPLEMENT tiers below); every other tool stays on `claude`. A route's
+// `variant` (opencode's `--variant`, a reasoning-effort knob) is only meaningful when
+// `harness: "opencode"`. A fallback attempt (the `iu`→`max` reverse lane) ALWAYS runs the
+// `claude` harness, regardless of the primary route's harness — Max only ever serves a
+// Claude id via `claude -p`, so a fallback onto it can never be an opencode run. See
+// `session-runner.ts`'s `resolveHarness`.
+//
 // Fallback semantics (applied in session-runner.ts, one hop only, never a second one), purely
 // REACTIVE — a session is only ever moved after a launch actually fails, never pre-empted:
 //   primary `max` → `fallback.backend: "iu"`: a quota-flavoured failure before first output.
@@ -21,18 +31,39 @@
 //
 // `transport: "iu-openai"` marks the three routes (`adversary`, `read_image`, `read_drawing`)
 // that never reach `runSession` at all — a direct IU OpenAI transport call consuming only
-// `.model`. Their `backend`/`fallback` are informational defaults only; a
-// `SIDECLAW_BACKEND_<TOOL>` override on one of them is refused rather than silently accepted
-// and displayed with no effect.
+// `.model`. `transport: "external-iu"` marks `review_ocr`: an external CLI (`ocr`,
+// alibaba/open-code-review) that talks to IU's Anthropic transport itself
+// (`server/lib/ocr.ts` sets `OCR_LLM_URL`/`OCR_LLM_TOKEN` from `getIuConfig()`), so it too
+// only ever consumes `.model` — there is no `runSession`/backend switch for a CLI sideclaw
+// doesn't control the auth wiring of. Both transports' `backend`/`fallback` are informational
+// defaults only; a `SIDECLAW_BACKEND_<TOOL>` override on either is refused rather than
+// silently accepted and displayed with no effect.
 //
 // Env overrides, read once at module load (a flip needs `make reload`; the MCP process
 // loads sideclaw/.env itself — see server/lib/load-env.ts):
 //   SIDECLAW_MODEL_<TOOL>=<id>             e.g. SIDECLAW_MODEL_CHECK=claude-haiku-4-5
 //   SIDECLAW_BACKEND_<TOOL>=iu|max         e.g. SIDECLAW_BACKEND_REVIEW=iu
 //   SIDECLAW_THINKING_TOKENS_<TOOL>=<n>    e.g. SIDECLAW_THINKING_TOKENS_CHECK=4096
+//   SIDECLAW_HARNESS_<TOOL>=claude|opencode e.g. SIDECLAW_HARNESS_DISPATCH=claude, PAIRED
+//     with SIDECLAW_MODEL_DISPATCH=claude-sonnet-5[1m] — dispatch's default model
+//     (deepseek-v4.1-flash) is only reachable via the opencode harness, so a bare
+//     SIDECLAW_HARNESS_DISPATCH=claude with no matching model override is refused (see the
+//     cross-field validation in buildRoutingTable below)
+//   SIDECLAW_VARIANT_<TOOL>=<v>            e.g. SIDECLAW_VARIANT_DISPATCH=max
 // <TOOL> is the route key upper-cased. A `max` override on a non-Claude id is refused
 // back to `iu` (logged via `overrides`) — Max never serves a gateway model. A
 // `SIDECLAW_THINKING_TOKENS_<TOOL>` that isn't a positive integer is refused the same way.
+// A `SIDECLAW_HARNESS_<TOOL>` value other than `claude`/`opencode` is refused, same as an
+// unknown backend name. Both harness/variant overrides are refused on a non-`session`
+// transport route (iu-openai, external-iu), same reasoning as the backend/thinking-token
+// overrides above — there is no `runSession` call for either to affect. AFTER every
+// per-field override, `buildRoutingTable` validates the resulting model/harness COMBINATION:
+// a Claude model always normalizes harness to `claude` (implied, not refused); a
+// deepseek-v4.1-flash model with harness `claude` is refused back to the tool's own
+// defaults (that model has no code path through `claude -p` at all). A
+// `SIDECLAW_THINKING_TOKENS_<TOOL>` on a route whose (possibly just-normalized) harness is
+// `opencode`, or a `SIDECLAW_VARIANT_<TOOL>` on one whose harness is `claude`, is refused —
+// each knob only exists on the OTHER harness.
 // The effective override list (applied + refused) is logged once at startup via
 // `logRoutingOverrides`.
 //
@@ -46,12 +77,18 @@
 
 export type Backend = "iu" | "max";
 
+/** Which CLI a session actually spawns. `claude` → `claude -p` (session-runner.ts,
+ *  the default on every route). `opencode` → `opencode run` (opencode-runner.ts) —
+ *  see the module header's Harness paragraph. */
+export type Harness = "claude" | "opencode";
+
 export const ROUTED_TOOLS = [
   "check",
   "overview",
   "review_router",
   "narrative",
   "review",
+  "review_ocr",
   "adversary",
   "dispatch",
   "dispatch_implement",
@@ -75,15 +112,28 @@ export interface ToolRoute {
   fallback: RouteFallback | null;
   /** "session" (default): `runSession()` actually honors `backend`/`fallback`.
    *  "iu-openai": a direct IU OpenAI transport call (adversary, read_image,
-   *  read_drawing) that only ever consumes `.model` — see the module comment above. */
-  transport: "session" | "iu-openai";
+   *  read_drawing) that only ever consumes `.model` — see the module comment above.
+   *  "external-iu": an external CLI (review_ocr's `ocr`) that talks to IU's Anthropic
+   *  transport itself, consuming only `.model` — see the module comment above. */
+  transport: "session" | "iu-openai" | "external-iu";
   /** A gateway model's reasoning budget on the IU leg — `session-runner.ts`'s
    *  `buildWorkerEnv` exports this as `MAX_THINKING_TOKENS` for any non-Claude model, the
    *  only control that reaches DeepSeek-V4-Flash's or DeepSeek-V4-Pro's thinking depth on
    *  the Requesty hop. Absent on Claude routes (JUDGE, PROSE), which control thinking a
    *  different way, and on the `iu-openai` transport routes (VISION, adversary), which
-   *  never reach `buildWorkerEnv` at all. */
+   *  never reach `buildWorkerEnv` at all. Meaningless on an `opencode`-harness route —
+   *  opencode has no equivalent env control, only `variant` (below). */
   thinkingTokens?: number;
+  /** Which CLI this route's `runSession` call actually spawns — see the module header's
+   *  Harness paragraph and `Harness`'s doc comment. Defaults to `"claude"` on every tier
+   *  below except AGENT_OC/AGENT_OC_IMPLEMENT. */
+  harness: Harness;
+  /** opencode's `--variant` — a reasoning-effort knob (`"high"`, `"max"`, `"none"`, …)
+   *  specific to the model's `opencode.json` entry (see `buildOpencodeConfig` in
+   *  opencode-runner.ts). Only read when `harness === "opencode"`; absent (undefined) on
+   *  every `claude`-harness route, where thinking is controlled by `thinkingTokens`
+   *  (gateway ids) or not at all (Claude ids). */
+  variant?: string;
 }
 
 export const SONNET = "claude-sonnet-5[1m]";
@@ -92,7 +142,11 @@ export const HAIKU = "claude-haiku-4-5";
  *  override naming it still resolves to something this file documents. */
 export const GLM_FLASH = "glm-5.3-flash";
 export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
-export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
+/** OpenCode-harness-only id — reached over the IU OpenAI-compatible route as
+ *  `iu/deepseek-v4.1-flash` (opencode-runner.ts's `buildOpencodeConfig`/`buildOpencodeArgs`),
+ *  NOT the IU native Anthropic transport `DEEPSEEK_FLASH` above runs over — `claude -p`
+ *  cannot reach this id at all. See AGENT_OC below. */
+export const DEEPSEEK_V41_FLASH = "deepseek-v4.1-flash";
 
 // ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
 // touches one line instead of hunting down every duplicate. ──────────────────────────
@@ -137,24 +191,64 @@ export const DEEPSEEK_PRO = "DeepSeek-V4-Pro";
 //   benchmark rows above were measured under, and still more room than a classify-shaped
 //   call needs while not defaulting to a gateway model's unbounded `max`. Deliberately
 //   NOT extended to review or otel — see JUDGE below.
-// AGENT_IMPLEMENT: dispatch's implement tier only — investigate/author stay on AGENT.
+// AGENT_IMPLEMENT / AGENT — RETIRED 2026-09-24, replaced by AGENT_OC / AGENT_OC_IMPLEMENT
+//   below. History kept as comment text since the constants themselves are now dead code
+//   (nothing references them — deleted rather than left unused):
+//
+//   AGENT_IMPLEMENT: dispatch's implement tier only — investigate/author stayed on AGENT.
 //   2026-09-22: split off on the owner's explicit instruction, mirroring warden's own
 //   `AUTO_IMPLEMENT_MODEL` (default DeepSeek-V4-Pro, warden/scripts/triage.py), which
-//   already runs implement-tier episodes on Pro via a per-job model override — this makes
+//   already ran implement-tier episodes on Pro via a per-job model override — this made
 //   it sideclaw's own default too instead of relying on every caller to remember the
 //   override. Tension noted honestly, not papered over: the 2026-09-21 measurement in the
 //   AGENT comment above rejected Pro for this exact seat on evidence (ties Flash on the
 //   external indices, ~3x slower and ~7x the cost in ccbench, one 5-minute idle stall, and
-//   Pro waved through two PRs an independent review had flagged). This split is a policy
-//   call for the higher-stakes write tier, not a new measurement overturning that one — if
-//   it regresses, the fix is reverting `dispatch_implement` to AGENT, not re-litigating the
-//   comment above.
-const AGENT_IMPLEMENT: ToolRoute = {
-  model: DEEPSEEK_PRO,
+//   Pro waved through two PRs an independent review had flagged). That split was a policy
+//   call for the higher-stakes write tier, not a new measurement overturning the AGENT one.
+//   { model: "DeepSeek-V4-Pro", backend: "iu", fallback: { backend: "max", model: SONNET },
+//     transport: "session", thinkingTokens: 8192 } — the model id string is kept only as
+//   history text here; the `DEEPSEEK_PRO` constant itself was removed 2026-09-24 (unused
+//   once this tier retired — nothing else in the codebase referenced it).
+//
+// AGENT_OC / AGENT_OC_IMPLEMENT — dispatch (investigate/author) and dispatch_implement,
+//   2026-09-24. Owner decision, moving dispatch off `claude -p` entirely onto the OpenCode
+//   harness (`opencode run`, opencode-runner.ts) running `deepseek-v4.1-flash` over the IU
+//   endpoint's OpenAI-compatible route (`iu/deepseek-v4.1-flash`) — a DIFFERENT id and a
+//   DIFFERENT transport from AGENT's `DeepSeek-V4-Flash` over the IU native Anthropic
+//   transport above; `claude -p` cannot reach this id at all, hence the new harness rather
+//   than a model-only swap. Evidence: the same three implement briefs re-run from Pro's
+//   (AGENT_IMPLEMENT's) base commits, OpenCode+deepseek-v4.1-flash vs DeepSeek-V4-Pro on
+//   `claude -p` — vps $2.46/10min vs $0.06/5min; research-gateway #21 $11.01/28min vs
+//   $0.10/5min (max effort $0.11); weatherorb $5.39/21min vs $0.06/5min. A blind diff
+//   review preferred OpenCode's output on 2 of 3 (research-gateway: max effort variant
+//   closed a gap Pro's diff left open, 479/0 tests; weatherorb: tied/won, did an AGENTS.md
+//   update Pro skipped, 1872 tests passed) and lost one (vps: inverted volume-floor logic
+//   in a HyperDX config — not a clean sweep, recorded honestly). Cache hit 95–98% on this
+//   route vs V4-Pro's 8% on the Anthropic route. Gateway-measured rates for
+//   deepseek-v4.1-flash: $0.15/MTok input, $0.60 output, ~$0.003 cache read (used by
+//   opencode-runner.ts's cost computation, since opencode has no --json-schema envelope to
+//   read a CLI-computed cost from). `variant` is opencode's reasoning-effort knob:
+//   investigate/author at "high" (AGENT_OC), implement at "max" (AGENT_OC_IMPLEMENT) —
+//   mirroring AGENT_IMPLEMENT's own higher-stakes-write-tier split above. Fallback stays
+//   claude-sonnet-5[1m] on Max — a fallback attempt always runs the `claude` harness (see
+//   the module header's Harness paragraph), so a lane switch here is model AND harness AND
+//   transport all changing at once, same as it already was reaching Max from AGENT/
+//   AGENT_IMPLEMENT's IU-native-Anthropic primary.
+const AGENT_OC: ToolRoute = {
+  model: DEEPSEEK_V41_FLASH,
   backend: "iu",
   fallback: { backend: "max", model: SONNET },
   transport: "session",
-  thinkingTokens: 8192,
+  harness: "opencode",
+  variant: "high",
+};
+const AGENT_OC_IMPLEMENT: ToolRoute = {
+  model: DEEPSEEK_V41_FLASH,
+  backend: "iu",
+  fallback: { backend: "max", model: SONNET },
+  transport: "session",
+  harness: "opencode",
+  variant: "max",
 };
 // JUDGE: judgment-heavy work that stays on Max — review (angles/synthesis/router) and
 //   otel. Both excluded from AGENT, for different reasons, both dated 2026-09-11:
@@ -190,31 +284,28 @@ const CLASSIFY: ToolRoute = {
   fallback: { backend: "max", model: HAIKU },
   transport: "session",
   thinkingTokens: 2048,
-};
-const AGENT: ToolRoute = {
-  model: DEEPSEEK_FLASH,
-  backend: "iu",
-  fallback: { backend: "max", model: SONNET },
-  transport: "session",
-  thinkingTokens: 8192,
+  harness: "claude",
 };
 const JUDGE: ToolRoute = {
   model: SONNET,
   backend: "max",
   fallback: { backend: "iu" },
   transport: "session",
+  harness: "claude",
 };
 const PROSE: ToolRoute = {
   model: SONNET,
   backend: "max",
   fallback: { backend: "iu" },
   transport: "session",
+  harness: "claude",
 };
 const VISION: ToolRoute = {
   model: "gemini-3.5-flash",
   backend: "iu",
   fallback: null,
   transport: "iu-openai",
+  harness: "claude",
 };
 
 const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
@@ -223,9 +314,27 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   review_router: CLASSIFY,
   narrative: PROSE,
   review: JUDGE,
-  adversary: { model: "gpt-5.6-terra", backend: "iu", fallback: null, transport: "iu-openai" },
-  dispatch: AGENT,
-  dispatch_implement: AGENT_IMPLEMENT,
+  // review_ocr: the `ocr` CLI (server/lib/ocr.ts) only ever consumes `.model` — it is not a
+  // `runSession` worker, so there is no Max lane for it to fall back to (Max serves the
+  // Claude Code CLI's own auth path, not an arbitrary external binary's), same reasoning as
+  // adversary/VISION below. DeepSeek-V4-Flash rather than a Claude id: OCR is one more cheap
+  // parallel input alongside fallow/CodeRabbit, not judgment-heavy synthesis work.
+  review_ocr: {
+    model: DEEPSEEK_FLASH,
+    backend: "iu",
+    fallback: null,
+    transport: "external-iu",
+    harness: "claude",
+  },
+  adversary: {
+    model: "gpt-5.6-terra",
+    backend: "iu",
+    fallback: null,
+    transport: "iu-openai",
+    harness: "claude",
+  },
+  dispatch: AGENT_OC,
+  dispatch_implement: AGENT_OC_IMPLEMENT,
   otel: JUDGE,
   excalidraw: PROSE,
   read_image: VISION,
@@ -238,7 +347,7 @@ export function isClaudeModel(model: string): boolean {
 
 export interface RoutingOverride {
   tool: RoutedTool;
-  field: "model" | "backend" | "thinkingTokens";
+  field: "model" | "backend" | "thinkingTokens" | "harness" | "variant";
   value: string;
   /** Set when the override was refused (a `max` backend on a non-Claude id, an
    *  unknown backend name, or a non-positive-integer thinking-token count); the default
@@ -261,7 +370,7 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
   const overrides: RoutingOverride[] = [];
   for (const tool of ROUTED_TOOLS) {
     const base = DEFAULT_ROUTES[tool];
-    let { model, backend, thinkingTokens } = base;
+    let { model, backend, thinkingTokens, harness, variant } = base;
     const key = tool.toUpperCase();
     const modelOverride = env[`SIDECLAW_MODEL_${key}`]?.trim();
     if (modelOverride) {
@@ -270,12 +379,15 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     }
     const backendOverride = env[`SIDECLAW_BACKEND_${key}`]?.trim();
     if (backendOverride) {
-      if (base.transport === "iu-openai") {
+      if (base.transport !== "session") {
         overrides.push({
           tool,
           field: "backend",
           value: backendOverride,
-          refused: `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — a backend override has no effect`,
+          refused:
+            base.transport === "iu-openai"
+              ? `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — a backend override has no effect`
+              : `${tool} runs over a fixed external-iu transport (an external CLI, not runSession) — a backend override has no effect`,
         });
       } else if (backendOverride !== "iu" && backendOverride !== "max") {
         overrides.push({
@@ -307,14 +419,99 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         implied: `forced by the ${model} model override — max only serves Claude ids`,
       });
     }
+    const harnessOverride = env[`SIDECLAW_HARNESS_${key}`]?.trim();
+    if (harnessOverride) {
+      if (base.transport !== "session") {
+        overrides.push({
+          tool,
+          field: "harness",
+          value: harnessOverride,
+          refused:
+            base.transport === "iu-openai"
+              ? `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — a harness override has no effect`
+              : `${tool} runs over a fixed external-iu transport (an external CLI, not runSession) — a harness override has no effect`,
+        });
+      } else if (harnessOverride !== "claude" && harnessOverride !== "opencode") {
+        overrides.push({
+          tool,
+          field: "harness",
+          value: harnessOverride,
+          refused: `unknown harness — expected "claude" or "opencode"`,
+        });
+      } else {
+        harness = harnessOverride;
+        overrides.push({ tool, field: "harness", value: harnessOverride });
+      }
+    }
+    // ── Cross-field validation, AFTER model/backend/harness overrides above have all been
+    // applied — every route below this point has a model/harness combination that is
+    // actually reachable.
+    //
+    // isClaudeModel(model) always implies harness "claude": opencode's `iu` provider has no
+    // code path to a Claude id at all (see withModel's doc comment). Normalize + report as
+    // IMPLIED, not refused — the model override (or default) is legitimate, harness just has
+    // to follow it.
+    if (isClaudeModel(model) && harness !== "claude") {
+      harness = "claude";
+      variant = undefined;
+      overrides.push({
+        tool,
+        field: "harness",
+        value: "claude",
+        implied: `forced by the ${model} model — a Claude id can only run on the claude harness`,
+      });
+    }
+    // The reverse: DEEPSEEK_V41_FLASH is reachable ONLY via the opencode harness (opencode's
+    // `iu` provider over the OpenAI-compatible route) — `claude -p` has no path to it at all.
+    // If the overrides above land on this combination, REFUSE whichever override actually
+    // caused it and fall back to the tool's own documented default for BOTH fields — a
+    // partial revert would leave the other field pointing at a combination nothing declared.
+    if (model === DEEPSEEK_V41_FLASH && harness !== "opencode") {
+      const culprit = harnessOverride ? "harness" : modelOverride ? "model" : "harness";
+      const culpritValue = harnessOverride ?? modelOverride ?? harness;
+      // The culprit override already pushed a plain "accepted" entry above (the harness or
+      // model block's own `else` branch) — remove it rather than leaving both a plain and a
+      // refused entry for the same field in the reported list.
+      const acceptedIdx = overrides.findIndex(
+        (o) =>
+          o.tool === tool &&
+          o.field === culprit &&
+          o.value === culpritValue &&
+          !o.refused &&
+          !o.implied,
+      );
+      if (acceptedIdx !== -1) overrides.splice(acceptedIdx, 1);
+      overrides.push({
+        tool,
+        field: culprit,
+        value: culpritValue,
+        refused:
+          `${DEEPSEEK_V41_FLASH} is reachable only via the opencode harness (claude -p cannot ` +
+          `run it) — pair SIDECLAW_HARNESS_${key}=claude with a SIDECLAW_MODEL_${key} override ` +
+          `naming a Claude id instead`,
+      });
+      model = base.model;
+      harness = base.harness;
+      variant = base.variant;
+    }
     const thinkingOverride = env[`SIDECLAW_THINKING_TOKENS_${key}`]?.trim();
     if (thinkingOverride) {
-      if (base.transport === "iu-openai") {
+      if (base.transport !== "session") {
         overrides.push({
           tool,
           field: "thinkingTokens",
           value: thinkingOverride,
-          refused: `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — the thinking budget only applies to session transport`,
+          refused:
+            base.transport === "iu-openai"
+              ? `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — the thinking budget only applies to session transport`
+              : `${tool} runs over a fixed external-iu transport (an external CLI, not runSession) — the thinking budget only applies to session transport`,
+        });
+      } else if (harness === "opencode") {
+        overrides.push({
+          tool,
+          field: "thinkingTokens",
+          value: thinkingOverride,
+          refused: `${tool} runs on the opencode harness — reasoning depth is controlled by SIDECLAW_VARIANT_${key} instead, not a thinking-token budget`,
         });
       } else {
         const parsed = Number(thinkingOverride);
@@ -331,12 +528,38 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
         }
       }
     }
+    const variantOverride = env[`SIDECLAW_VARIANT_${key}`]?.trim();
+    if (variantOverride) {
+      if (base.transport !== "session") {
+        overrides.push({
+          tool,
+          field: "variant",
+          value: variantOverride,
+          refused:
+            base.transport === "iu-openai"
+              ? `${tool} runs over a fixed iu-openai transport (a direct fetch, not runSession) — a variant override has no effect`
+              : `${tool} runs over a fixed external-iu transport (an external CLI, not runSession) — a variant override has no effect`,
+        });
+      } else if (harness === "claude") {
+        overrides.push({
+          tool,
+          field: "variant",
+          value: variantOverride,
+          refused: `${tool} runs on the claude harness — variant is an opencode-only reasoning-effort knob`,
+        });
+      } else {
+        variant = variantOverride;
+        overrides.push({ tool, field: "variant", value: variantOverride });
+      }
+    }
     routes[tool] = {
       model,
       backend,
       fallback: usableFallback(base.fallback, model, backend),
       transport: base.transport,
       thinkingTokens,
+      harness,
+      variant,
     };
   }
   return { routes, overrides };
@@ -371,14 +594,26 @@ export function routeFor(tool: RoutedTool): ToolRoute {
     fallback: r.fallback ? { ...r.fallback } : null,
     transport: r.transport,
     thinkingTokens: r.thinkingTokens,
+    harness: r.harness,
+    variant: r.variant,
   };
 }
 
 /** A route with a per-call model override (a job's `model` param). The backend is kept
- *  unless the override is a gateway id, which Max cannot serve. */
+ *  unless the override is a gateway id, which Max cannot serve.
+ *
+ *  A Claude id ALWAYS forces `harness: "claude"` — a per-job model override naming a
+ *  Claude id (e.g. warden's `AUTO_IMPLEMENT_MODEL` pointed at `claude-*`) must still run
+ *  `claude -p`, since opencode's harness has no code path to a Claude id (its `iu` provider
+ *  is wired to the OpenAI-compatible route only — see opencode-runner.ts). A non-Claude
+ *  override, conversely, keeps the route's OWN harness unchanged: overriding AGENT_OC's
+ *  model to a different gateway id does not silently opt it into `claude -p`. `variant` is
+ *  dropped (undefined) once forced onto `claude` — opencode's reasoning-effort knob is
+ *  meaningless there. */
 export function withModel(route: ToolRoute, model: string | undefined): ToolRoute {
   if (!model || model === route.model) return route;
   const backend: Backend = route.backend === "max" && !isClaudeModel(model) ? "iu" : route.backend;
+  const harness: Harness = isClaudeModel(model) ? "claude" : route.harness;
   // A Claude override also becomes the fallback model (both backends serve it — quality
   // stays constant across the hop, only billing moves); a gateway override keeps a
   // fixed-model fallback (check's Haiku) as declared, since it cannot run on Max itself.
@@ -393,15 +628,22 @@ export function withModel(route: ToolRoute, model: string | undefined): ToolRout
     // itself. Harmless when the override moves to a Claude id — buildWorkerEnv only ever
     // exports MAX_THINKING_TOKENS for a non-Claude model.
     thinkingTokens: route.thinkingTokens,
+    harness,
+    variant: harness === "opencode" ? route.variant : undefined,
   };
 }
 
-/** One-line human rendering for tool descriptions and logs: `DeepSeek-V4-Flash on iu (fallback claude-haiku-4-5 on max)`. */
+/** One-line human rendering for tool descriptions and logs: `DeepSeek-V4-Flash on iu (fallback claude-haiku-4-5 on max)`,
+ *  or, for an opencode-harness route, `deepseek-v4.1-flash on iu via opencode (variant high) (fallback claude-sonnet-5[1m] on max)`. */
 export function describeRoute(route: ToolRoute): string {
+  const harnessPart =
+    route.harness === "opencode"
+      ? ` via opencode${route.variant ? ` (variant ${route.variant})` : ""}`
+      : "";
   const fb = route.fallback
     ? ` (fallback ${route.fallback.model ?? route.model} on ${route.fallback.backend})`
     : "";
-  return `${route.model} on ${route.backend}${fb}`;
+  return `${route.model} on ${route.backend}${harnessPart}${fb}`;
 }
 
 /** Log the effective override list once at startup — `warn` if any override was refused

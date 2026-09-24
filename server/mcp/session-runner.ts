@@ -8,10 +8,12 @@ import { appLogger } from "../logger.ts";
 import { processKind } from "../lib/process-context.ts";
 import { getIuConfig } from "../lib/iu-openai.ts";
 import { IDLE_TIMEOUT_MS } from "../lib/idle-timeout.ts";
+import { runOpencodeAttempt } from "./opencode-runner.ts";
 import {
   isClaudeModel,
   withModel,
   type Backend,
+  type Harness,
   type RouteFallback,
   type ToolRoute,
 } from "../lib/routing.ts";
@@ -73,7 +75,7 @@ export type { Backend } from "../lib/routing.ts";
  * which is the bug this resolves. See `process-context.ts` for why this must be read per call
  * rather than captured once at module load.
  */
-function runnerLogger(): typeof appLogger {
+export function runnerLogger(): typeof appLogger {
   return processKind() === "app" ? appLogger : mcpLogger;
 }
 
@@ -99,17 +101,58 @@ const SENSITIVE_ENV_RE =
  *  vars after this point regardless. */
 const ALWAYS_KEEP_ENV = new Set(["CLAUDE_CODE_OAUTH_TOKEN"]);
 
+/** Delete every credential-shaped key (`SENSITIVE_ENV_RE`, less `ALWAYS_KEEP_ENV`) from an
+ *  env object IN PLACE. Factored out of `buildWorkerEnv` so `opencode-runner.ts`'s
+ *  `buildOpencodeEnv` can apply the identical scrub without duplicating the regex/exemption
+ *  pair — see `buildWorkerEnv`'s inline comment for why this must run before either harness
+ *  writes its own backend credentials. */
+export function scrubSensitiveEnv(env: Record<string, string>): void {
+  for (const key of Object.keys(env)) {
+    if (SENSITIVE_ENV_RE.test(key) && !ALWAYS_KEEP_ENV.has(key)) delete env[key];
+  }
+}
+
+/** Pure: the `data` object of a `session_env` line — split out of `writeSessionEnv` so the
+ *  `lane`/`harness` shape is unit-testable without touching `~/.claude/logs`. */
+export function sessionEnvRecord(
+  sessionId: string,
+  baseUrl: string | null,
+  model: string,
+  backend: Backend,
+  tool: string | undefined,
+  harness: Harness,
+): {
+  session: string;
+  base_url: string | null;
+  model: string;
+  backend: Backend;
+  lane: string;
+  harness: Harness;
+} {
+  return { session: sessionId, base_url: baseUrl, model, backend, lane: usageLane(tool), harness };
+}
+
 /** Mirror dotfiles' SessionStart hook: record the worker's base_url keyed by its
  * transcript sessionId so usage-tracker's classifier (base_url present → "iu",
  * null/missing → "max") tags the run correctly. Called for both the "iu" backend
  * (real base_url) and the "max" backend (explicit null — see the max branch below
  * for why null is written rather than skipped). Idempotent — safe if the hook also
- * fires. Never throws. */
-function writeSessionEnv(
+ * fires. Never throws.
+ *
+ * `lane` (`usageLane(tool)`, e.g. `"sideclaw:dispatch"`) and `harness` are the only
+ * per-worker signal that survives to usage-tracker at all: every worker runs with
+ * `disableAllHooks: true` (WORKER_SETTINGS), so dotfiles' own SessionStart hook never
+ * fires inside one — this sidecar record is the sole source, not a mirror of a redundant
+ * one, despite the doc-comment framing above predating that fact. Exported so
+ * `opencode-runner.ts` writes the identical shape (`harness: "opencode"`) rather than a
+ * second, drifting sink usage-tracker would need its own collector for. */
+export function writeSessionEnv(
   sessionId: string,
   baseUrl: string | null,
   model: string,
   backend: Backend,
+  tool: string | undefined,
+  harness: Harness,
 ): void {
   try {
     mkdirSync(CLAUDE_LOG_DIR, { recursive: true });
@@ -120,7 +163,7 @@ function writeSessionEnv(
         src: "sideclaw",
         event: "session_env",
         level: "info",
-        data: { session: sessionId, base_url: baseUrl, model, backend },
+        data: sessionEnvRecord(sessionId, baseUrl, model, backend, tool, harness),
       }) + "\n";
     appendFileSync(join(CLAUDE_LOG_DIR, `${now.slice(0, 10)}.jsonl`), line);
   } catch {
@@ -141,7 +184,10 @@ const ATTRIBUTION_LOG = join(
   "sideclaw-sessions.jsonl",
 );
 
-function writeAttribution(record: Record<string, unknown>): void {
+/** Exported so `opencode-runner.ts` appends to the SAME attribution log/sink under its own
+ *  `harness: "opencode"` record shape, rather than a parallel file usage-tracker would need
+ *  a second collector for. */
+export function writeAttribution(record: Record<string, unknown>): void {
   try {
     mkdirSync(dirname(ATTRIBUTION_LOG), { recursive: true });
     appendFileSync(ATTRIBUTION_LOG, JSON.stringify(record) + "\n", "utf-8");
@@ -495,7 +541,10 @@ export function mcpHeartbeat(extra: McpExtra, label: string): () => void {
 //   4. brace-scan for the first top-level {...} that parses (skipping strings)
 // Returns the parsed value, or undefined if nothing parses.
 
-function extractJson<T>(raw: string): T | undefined {
+/** Exported so `opencode-runner.ts` reuses the identical extraction — opencode has no
+ *  `--json-schema` flag, so its final assistant text is always run through this rather than
+ *  a CLI-parsed envelope. */
+export function extractJson<T>(raw: string): T | undefined {
   const text = raw.trim();
 
   const tryParse = (s: string): T | undefined => {
@@ -746,9 +795,7 @@ export function buildWorkerEnv(input: WorkerEnvInput): Record<string, string> {
   // these sessions, so `env` is one command away. Tools that genuinely need a credential
   // pass it explicitly via `extraEnv` (review does this for the research-gateway),
   // applied after all of this and therefore still winning.
-  for (const key of Object.keys(env)) {
-    if (SENSITIVE_ENV_RE.test(key) && !ALWAYS_KEEP_ENV.has(key)) delete env[key];
-  }
+  scrubSensitiveEnv(env);
   // ANTHROPIC_API_KEY is deleted in every branch: it is rejected by claude v2.x
   // ("Not logged in") and would shadow ANTHROPIC_AUTH_TOKEN.
   delete env.ANTHROPIC_API_KEY;
@@ -1221,6 +1268,21 @@ export function activeSessionCount(): number {
   return activeProcs.size;
 }
 
+/** Register a non-`runSession` child process (e.g. `server/lib/ocr.ts`'s `ocr review` spawn)
+ *  into the same `activeProcs` map worker sessions use, so `POST /api/jobs/:id/cancel`
+ *  (`terminateSessionsForJob`) and a drain (`terminateActiveSessions`) can kill it too — the
+ *  same reason `runSessionAttempt` registers its own `Bun.spawn` result below. Returns an
+ *  untrack fn; the caller runs it in a `finally` once the process has exited (mirroring
+ *  `void proc.exited.finally(() => activeProcs.delete(proc))` below, which `runSession`'s own
+ *  spawn gets for free but an external caller must do itself). */
+export function trackExternalProc(
+  proc: ReturnType<typeof Bun.spawn>,
+  jobId: string | undefined,
+): () => void {
+  activeProcs.set(proc, jobId);
+  return () => activeProcs.delete(proc);
+}
+
 /** Test-only: register an already-constructed fake "proc" into `activeProcs` under a given
  *  jobId, so `terminateSessionsForJob`/`terminateActiveSessions` can be exercised without
  *  spawning a real `claude -p` subprocess. The caller only needs to satisfy the `exitCode`/
@@ -1306,6 +1368,24 @@ export interface ForcedAttempt {
   reason: "rate-limited" | "iu-unavailable";
 }
 
+/** Pure: which harness THIS attempt actually spawns. A forced attempt (a fallback lane
+ *  switch, `ForcedAttempt`) ALWAYS runs `claude` — Max only ever serves a Claude id via
+ *  `claude -p`, and the `iu`→`max` reverse lane's `fallback.model` is always a Claude id by
+ *  construction (`usableFallback` in routing.ts refuses any fallback onto `max` that isn't).
+ *
+ *  A Claude MODEL also always forces `claude` regardless of `route.harness` — defense in
+ *  depth, mirrored at the routing-table level (routing.ts's `buildRoutingTable` cross-field
+ *  validation already normalizes this for every route built through the table, and
+ *  `withModel` does the same for a per-call model override), but this guard covers a
+ *  hand-built `ToolRoute` that bypasses both (as some tests do directly) — opencode's `iu`
+ *  provider has no code path to a Claude id at all.
+ *
+ *  A non-forced (primary) attempt on a non-Claude model just runs the route's own declared
+ *  harness. See routing.ts's module-header Harness paragraph. */
+export function resolveHarness(route: ToolRoute, forced?: ForcedAttempt): Harness {
+  return forced || isClaudeModel(route.model) ? "claude" : route.harness;
+}
+
 /** One session launch. Renamed out of `runSession` so the retry loop can wrap it —
  *  `turnsRef` is populated as soon as the worker's first assistant turn streams back,
  *  which is what lets the wrapper tell "failed before doing anything" from "failed
@@ -1346,6 +1426,16 @@ async function runSessionAttempt<T = unknown>(
   // had to be joined against jobs.db by timestamp to find out which job each one belonged to —
   // this is what makes each line self-describing instead.
   const errCtx = { tool, model, backend, jobId };
+  // Harness dispatch — see `resolveHarness`'s doc comment. A forced (fallback) attempt is
+  // never opencode, so this can only route a PRIMARY attempt off the claude path below; the
+  // rest of this function (buildSessionArgs, the claude `Bun.spawn`, the stream-json event
+  // loop, the claude-specific envelope classification) is entirely skipped for one, in favor
+  // of opencode-runner.ts's own self-contained attempt implementation, which returns the
+  // same `SessionResult<T>` shape this function does everywhere else.
+  const harness = resolveHarness(route, forced);
+  if (harness === "opencode") {
+    return runOpencodeAttempt(opts, turnsRef, { model, backend, variant: route.variant });
+  }
   if (forced) {
     recordFallback(forced.reason, tool);
     runnerLogger().warn(
@@ -1371,6 +1461,7 @@ async function runSessionAttempt<T = unknown>(
       project: cwd,
       model,
       backend,
+      harness: "claude",
       tsStart,
       tsEnd: new Date().toISOString(),
       outcome,
@@ -1531,7 +1622,14 @@ async function runSessionAttempt<T = unknown>(
     // as billing="max" downstream, but an explicit record is distinguishable from
     // a missing/rotated-out log entry (models.ts documents that ambiguity as a
     // known silent-default-to-max weak point) and keeps the drift audit meaningful.
-    writeSessionEnv(workerSessionId, backend === "max" ? null : anthropicBase, model, backend);
+    writeSessionEnv(
+      workerSessionId,
+      backend === "max" ? null : anthropicBase,
+      model,
+      backend,
+      tool,
+      "claude",
+    );
     sessionEnvWritten = true;
     // Report the id up to the job layer the instant it's known — see `onSessionId`'s doc
     // comment: a job killed moments after this fires still leaves a resumable id on its row.

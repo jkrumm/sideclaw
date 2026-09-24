@@ -11,7 +11,7 @@ import {
 import type { ProgressSink } from "../store.ts";
 import { appLogger as logger } from "../../logger.ts";
 import { parseParams } from "./util.ts";
-import { routeFor } from "../../lib/routing.ts";
+import { routeFor, type Harness } from "../../lib/routing.ts";
 import {
   DEFAULT_DISPATCH_TIER,
   DEFAULT_DISPATCH_WORKSPACE,
@@ -599,6 +599,41 @@ export function assertInPlaceAllowed(tier: DispatchTier, sensitive: boolean): vo
   }
 }
 
+/** Repo-local opencode config a live checkout could carry — same set `stripProjectSettings`
+ *  (dispatch-git.ts) removes from a WORKTREE before an episode starts. In-place has no
+ *  worktree to strip it from (see `runDispatch`'s in-place branch). `OPENCODE_CONFIG_CONTENT`
+ *  (opencode-runner.ts's `buildOpencodeEnv`) already wins over a repo-local
+ *  `opencode.json`/`opencode.jsonc` for the PERMISSION profile specifically — measured
+ *  2026-09-24, see opencode-runner.ts's `buildOpencodeEnv` doc comment — so those two files
+ *  are refused here mainly for defense in depth (a future opencode release, or a config key
+ *  this repo's permission block doesn't cover, could reintroduce the gap). `.opencode/` is
+ *  the one that matters unconditionally: it can carry a PLUGIN, which executes arbitrary code
+ *  the moment opencode loads it, regardless of any permission setting. There is no equivalent
+ *  of "strip it, restore it after" for a live checkout other sessions are using, so the only
+ *  safe move is refusing the episode outright, before it ever spawns. */
+const IN_PLACE_OPENCODE_CONFIG_PATHS = ["opencode.json", "opencode.jsonc", ".opencode"];
+
+/** Refuse an in-place `implement` episode outright when the resolved route runs the opencode
+ *  harness AND the live repo root carries its own `opencode.json`/`opencode.jsonc`/`.opencode/`.
+ *  Worktree tiers are unaffected — `stripProjectSettings` already removes these from the
+ *  throwaway worktree before the episode and restores them after; only in-place has no
+ *  worktree to strip. A no-op for the claude harness (nothing in `.claude/` needs this — that
+ *  case is bounded by `disableAllHooks`/`GIT_DENY_CREDENTIALS_ENV` even left in place, see
+ *  AGENTS.md's Dispatch section). Checked before anything else — same style as
+ *  `assertInPlaceAllowed`. */
+export function assertInPlaceOpencodeConfigAllowed(cwd: string, harness: Harness): void {
+  if (harness !== "opencode") return;
+  const found = IN_PLACE_OPENCODE_CONFIG_PATHS.filter((p) => existsSync(join(cwd, p)));
+  if (found.length > 0) {
+    throw new Error(
+      `dispatch refused: workspace 'in-place' on the opencode harness is not allowed in a ` +
+        `repo carrying its own ${found.join(", ")} — a repo-local opencode config/plugin ` +
+        `executes regardless of this episode's permission profile, and in-place has no ` +
+        `worktree to strip it from first. Use the default worktree workspace instead.`,
+    );
+  }
+}
+
 // ── In-place concurrency — at most one episode per repo, in this process ────────
 //
 // Two workers editing the same live checkout simultaneously would interleave edits in a
@@ -819,7 +854,13 @@ export async function runDispatch(
   // refused combination costs nothing beyond validating the input.
   assertSensitiveTierAllowed(tier, effectiveSensitive);
   const inPlace = tier === "implement" && workspace === "in-place";
-  if (workspace === "in-place") assertInPlaceAllowed(tier, effectiveSensitive);
+  if (workspace === "in-place") {
+    assertInPlaceAllowed(tier, effectiveSensitive);
+    // Checked before anything runs, same as the assertion above — implement always resolves
+    // dispatch_implement's route, which is what actually decides the harness this episode
+    // would spawn.
+    assertInPlaceOpencodeConfigAllowed(cwd, routeFor("dispatch_implement").harness);
+  }
   // A resumed row never re-runs this: the store refuses to resume an in-place row (see the
   // runDispatch doc comment), so `resuming` and `inPlace` cannot both be true.
   const resuming = resumeCtx?.resume !== undefined;

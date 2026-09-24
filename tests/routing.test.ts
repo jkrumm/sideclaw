@@ -6,7 +6,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildRoutingTable,
   DEEPSEEK_FLASH,
-  DEEPSEEK_PRO,
+  DEEPSEEK_V41_FLASH,
   describeRoute,
   GLM_FLASH,
   HAIKU,
@@ -46,6 +46,8 @@ describe("buildRoutingTable defaults", () => {
         fallback: { backend: "max", model: HAIKU },
         transport: "session",
         thinkingTokens: 2048,
+        harness: "claude",
+        variant: undefined,
       });
     }
   });
@@ -57,27 +59,31 @@ describe("buildRoutingTable defaults", () => {
         backend: "max",
         fallback: { backend: "iu" },
         transport: "session",
+        harness: "claude",
+        variant: undefined,
       });
     }
   });
 
-  test("dispatch: DeepSeek-V4-Flash on iu with the Sonnet-on-max quota fallback (the AGENT tier), thinking capped at 8192", () => {
+  test("dispatch: deepseek-v4.1-flash via opencode on iu with the Sonnet-on-max fallback (the AGENT_OC tier), variant high", () => {
     expect(routes.dispatch).toEqual({
-      model: DEEPSEEK_FLASH,
+      model: DEEPSEEK_V41_FLASH,
       backend: "iu",
       fallback: { backend: "max", model: SONNET },
       transport: "session",
-      thinkingTokens: 8192,
+      harness: "opencode",
+      variant: "high",
     });
   });
 
-  test("dispatch_implement: DeepSeek-V4-Pro on iu with the Sonnet-on-max quota fallback (implement-tier only)", () => {
+  test("dispatch_implement: deepseek-v4.1-flash via opencode on iu with the Sonnet-on-max fallback (implement-tier only), variant max", () => {
     expect(routes.dispatch_implement).toEqual({
-      model: DEEPSEEK_PRO,
+      model: DEEPSEEK_V41_FLASH,
       backend: "iu",
       fallback: { backend: "max", model: SONNET },
       transport: "session",
-      thinkingTokens: 8192,
+      harness: "opencode",
+      variant: "max",
     });
   });
 
@@ -88,8 +94,21 @@ describe("buildRoutingTable defaults", () => {
         backend: "max",
         fallback: { backend: "iu" },
         transport: "session",
+        harness: "claude",
+        variant: undefined,
       });
     }
+  });
+
+  test("review_ocr: DeepSeek-V4-Flash on iu, no fallback, over the fixed external-iu transport", () => {
+    expect(routes.review_ocr).toEqual({
+      model: DEEPSEEK_FLASH,
+      backend: "iu",
+      fallback: null,
+      transport: "external-iu",
+      harness: "claude",
+      variant: undefined,
+    });
   });
 
   test("adversary stays gpt-5.6-terra on iu, no fallback, over the fixed iu-openai transport", () => {
@@ -98,6 +117,8 @@ describe("buildRoutingTable defaults", () => {
       backend: "iu",
       fallback: null,
       transport: "iu-openai",
+      harness: "claude",
+      variant: undefined,
     });
   });
 
@@ -108,6 +129,8 @@ describe("buildRoutingTable defaults", () => {
         backend: "iu",
         fallback: null,
         transport: "iu-openai",
+        harness: "claude",
+        variant: undefined,
       });
     }
   });
@@ -171,6 +194,40 @@ describe("buildRoutingTable env overrides", () => {
     }
   });
 
+  test("a backend override on review_ocr (fixed external-iu transport) is refused, whatever the value", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_BACKEND_REVIEW_OCR: "max" });
+    expect(routes.review_ocr.backend).toBe("iu");
+    expect(overrides).toEqual([
+      {
+        tool: "review_ocr",
+        field: "backend",
+        value: "max",
+        refused: expect.stringContaining("external-iu transport"),
+      },
+    ]);
+  });
+
+  test("SIDECLAW_MODEL_REVIEW_OCR replaces the model and is reported", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_REVIEW_OCR: HAIKU });
+    expect(routes.review_ocr.model).toBe(HAIKU);
+    expect(overrides).toEqual([{ tool: "review_ocr", field: "model", value: HAIKU }]);
+  });
+
+  test("a thinking-token override on review_ocr (fixed external-iu transport) is refused, whatever the value", () => {
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_THINKING_TOKENS_REVIEW_OCR: "4096",
+    });
+    expect(routes.review_ocr.thinkingTokens).toBeUndefined();
+    expect(overrides).toEqual([
+      {
+        tool: "review_ocr",
+        field: "thinkingTokens",
+        value: "4096",
+        refused: expect.stringContaining("session transport"),
+      },
+    ]);
+  });
+
   test("a gateway model override on a max route forces iu and keeps a fixed-model fallback only", () => {
     const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_REVIEW: "glm-5.3-flash" });
     expect(routes.review.backend).toBe("iu");
@@ -214,9 +271,13 @@ describe("buildRoutingTable env overrides", () => {
   });
 
   test("a non-positive-integer thinking-token override is refused, default stays", () => {
+    // Not `dispatch` — AGENT_OC/AGENT_OC_IMPLEMENT (2026-09-24, the opencode harness) carry
+    // no `thinkingTokens` default at all (opencode's reasoning-effort knob is `variant`, not
+    // this claude/gateway-only env control), so `overview` (still CLASSIFY, 2048) is the
+    // still-8192-analogous session-transport tool this refusal case needs.
     for (const bad of ["0", "-8", "3.5", "not-a-number"]) {
-      const { routes, overrides } = buildRoutingTable({ SIDECLAW_THINKING_TOKENS_DISPATCH: bad });
-      expect(routes.dispatch.thinkingTokens).toBe(8192);
+      const { routes, overrides } = buildRoutingTable({ SIDECLAW_THINKING_TOKENS_OVERVIEW: bad });
+      expect(routes.overview.thinkingTokens).toBe(2048);
       expect(overrides[0]?.refused).toContain("positive integer");
     }
   });
@@ -248,6 +309,138 @@ describe("buildRoutingTable env overrides", () => {
       ]);
     }
   });
+
+  test("SIDECLAW_HARNESS_<TOOL>=claude PAIRED with a Claude model override moves dispatch onto claude and reports both", () => {
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_HARNESS_DISPATCH: "claude",
+      SIDECLAW_MODEL_DISPATCH: SONNET,
+    });
+    expect(routes.dispatch.harness).toBe("claude");
+    expect(routes.dispatch.model).toBe(SONNET);
+    expect(overrides).toEqual([
+      { tool: "dispatch", field: "model", value: SONNET },
+      { tool: "dispatch", field: "harness", value: "claude" },
+    ]);
+  });
+
+  test("SIDECLAW_HARNESS_<TOOL>=claude ALONE (default model stays deepseek-v4.1-flash) is refused — that model has no path through claude -p", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_HARNESS_DISPATCH: "claude" });
+    expect(routes.dispatch.harness).toBe("opencode");
+    expect(routes.dispatch.model).toBe(DEEPSEEK_V41_FLASH);
+    expect(overrides).toEqual([
+      {
+        tool: "dispatch",
+        field: "harness",
+        value: "claude",
+        refused: expect.stringContaining("reachable only via the opencode harness"),
+      },
+    ]);
+  });
+
+  test("SIDECLAW_MODEL_<TOOL>=deepseek-v4.1-flash on a claude-harness tool is refused the same way, blaming the model override instead", () => {
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_MODEL_CHECK: DEEPSEEK_V41_FLASH,
+    });
+    expect(routes.check.harness).toBe("claude");
+    expect(routes.check.model).toBe(DEEPSEEK_FLASH); // reverted to CLASSIFY's own default
+    expect(overrides).toEqual([
+      {
+        tool: "check",
+        field: "model",
+        value: DEEPSEEK_V41_FLASH,
+        refused: expect.stringContaining("reachable only via the opencode harness"),
+      },
+    ]);
+  });
+
+  test("a Claude model override on an opencode-harness route normalizes harness back to claude — implied, not refused", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_MODEL_DISPATCH: SONNET });
+    expect(routes.dispatch.model).toBe(SONNET);
+    expect(routes.dispatch.harness).toBe("claude");
+    expect(routes.dispatch.variant).toBeUndefined();
+    expect(overrides).toEqual([
+      { tool: "dispatch", field: "model", value: SONNET },
+      {
+        tool: "dispatch",
+        field: "harness",
+        value: "claude",
+        implied: expect.stringContaining("a Claude id can only run on the claude harness"),
+      },
+    ]);
+  });
+
+  test("an unknown harness name is refused, default stays", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_HARNESS_DISPATCH: "codex" });
+    expect(routes.dispatch.harness).toBe("opencode");
+    expect(overrides[0]?.refused).toContain("unknown harness");
+  });
+
+  test("a harness override on a fixed iu-openai/external-iu transport tool is refused, whatever the value", () => {
+    for (const [envKey, tool] of [
+      ["SIDECLAW_HARNESS_ADVERSARY", "adversary"],
+      ["SIDECLAW_HARNESS_REVIEW_OCR", "review_ocr"],
+    ] as const) {
+      const { routes, overrides } = buildRoutingTable({ [envKey]: "opencode" });
+      expect(routes[tool].harness).toBe("claude");
+      expect(overrides).toEqual([
+        {
+          tool,
+          field: "harness",
+          value: "opencode",
+          refused: expect.stringContaining("transport"),
+        },
+      ]);
+    }
+  });
+
+  test("SIDECLAW_VARIANT_<TOOL> replaces the tier's variant and is reported", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_VARIANT_DISPATCH: "none" });
+    expect(routes.dispatch.variant).toBe("none");
+    expect(overrides).toEqual([{ tool: "dispatch", field: "variant", value: "none" }]);
+  });
+
+  test("a variant override on a fixed iu-openai transport tool is refused, whatever the value", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_VARIANT_READ_IMAGE: "max" });
+    expect(routes.read_image.variant).toBeUndefined();
+    expect(overrides).toEqual([
+      {
+        tool: "read_image",
+        field: "variant",
+        value: "max",
+        refused: expect.stringContaining("iu-openai transport"),
+      },
+    ]);
+  });
+
+  test("a variant override on a claude-harness route (review) is refused", () => {
+    const { routes, overrides } = buildRoutingTable({ SIDECLAW_VARIANT_REVIEW: "max" });
+    expect(routes.review.variant).toBeUndefined();
+    expect(overrides).toEqual([
+      {
+        tool: "review",
+        field: "variant",
+        value: "max",
+        refused: expect.stringContaining("opencode-only reasoning-effort knob"),
+      },
+    ]);
+  });
+
+  test("a thinking-tokens override on an opencode-harness route (dispatch) is refused", () => {
+    const { routes, overrides } = buildRoutingTable({
+      SIDECLAW_THINKING_TOKENS_DISPATCH: "4096",
+    });
+    expect(routes.dispatch.thinkingTokens).toBeUndefined();
+    expect(overrides).toEqual([
+      {
+        tool: "dispatch",
+        field: "thinkingTokens",
+        value: "4096",
+        refused: expect.stringContaining(
+          "reasoning depth is controlled by SIDECLAW_VARIANT_DISPATCH",
+        ),
+      },
+    ]);
+  });
 });
 
 describe("withModel", () => {
@@ -265,6 +458,8 @@ describe("withModel", () => {
       fallback: { backend: "iu" },
       transport: "session",
       thinkingTokens: undefined,
+      harness: "claude",
+      variant: undefined,
     });
   });
 
@@ -276,7 +471,21 @@ describe("withModel", () => {
       fallback: { backend: "max" },
       transport: "session",
       thinkingTokens: 2048,
+      harness: "claude",
+      variant: undefined,
     });
+  });
+
+  test("withModel(claude id) forces harness claude even on an opencode-harness route", () => {
+    const r = withModel(routeFor("dispatch"), "claude-sonnet-5[1m]");
+    expect(r.harness).toBe("claude");
+    expect(r.variant).toBeUndefined();
+  });
+
+  test("withModel(non-claude id) keeps the route's own harness", () => {
+    const r = withModel(routeFor("dispatch"), "some-other-gateway-model");
+    expect(r.harness).toBe("opencode");
+    expect(r.variant).toBe("high");
   });
 
   test("a gateway override on a max route is forced onto iu with no Max-servable fallback", () => {
@@ -293,6 +502,8 @@ describe("withModel", () => {
       fallback: { backend: "max", model: HAIKU },
       transport: "session",
       thinkingTokens: 2048,
+      harness: "claude",
+      variant: undefined,
     });
   });
 
@@ -309,6 +520,15 @@ describe("routeFor / describeRoute", () => {
     if (a.fallback) a.fallback.model = "mutated";
     expect(routeFor("check").model).toBe(DEEPSEEK_FLASH);
     expect(routeFor("check").fallback?.model).toBe(HAIKU);
+  });
+
+  test("describeRoute renders an opencode-harness route's harness and variant", () => {
+    expect(describeRoute(routeFor("dispatch"))).toBe(
+      `${DEEPSEEK_V41_FLASH} on iu via opencode (variant high) (fallback ${SONNET} on max)`,
+    );
+    expect(describeRoute(routeFor("dispatch_implement"))).toBe(
+      `${DEEPSEEK_V41_FLASH} on iu via opencode (variant max) (fallback ${SONNET} on max)`,
+    );
   });
 
   test("describeRoute renders the fallback model or the primary when none is fixed", () => {

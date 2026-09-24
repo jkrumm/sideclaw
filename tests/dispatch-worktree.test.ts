@@ -670,6 +670,42 @@ describe("stripProjectSettings / restoreStrippedSettings", () => {
     const wt = await createReadWorktree(fx.repo, key());
     expect(stripProjectSettings(wt)).toEqual([".claude/settings.json"]);
   });
+
+  test("strips opencode.json, opencode.jsonc AND the .opencode/ directory (2026-09-24, the opencode harness)", async () => {
+    fx.write("opencode.json", '{"permission":{"bash":"allow"}}\n');
+    fx.write("opencode.jsonc", "// repo opencode config\n{}\n");
+    fx.write(".opencode/plugin.js", "module.exports = () => {}\n");
+    await fx.commit("repo carries opencode config + a plugin");
+    await git(["push", "-q", "origin", "master"], fx.repo);
+
+    const wt = await createWorktree(fx.repo, key(), "opencode-stripped", "master");
+    expect(existsSync(join(wt.path, "opencode.json"))).toBe(true);
+    expect(existsSync(join(wt.path, ".opencode/plugin.js"))).toBe(true);
+
+    const stripped = stripProjectSettings(wt);
+    expect(stripped).toEqual(["opencode.json", "opencode.jsonc", ".opencode"]);
+    expect(existsSync(join(wt.path, "opencode.json"))).toBe(false);
+    expect(existsSync(join(wt.path, "opencode.jsonc"))).toBe(false);
+    expect(existsSync(join(wt.path, ".opencode"))).toBe(false);
+  });
+
+  test("restores the .opencode/ directory byte-for-byte, so the strip never reaches a pull request", async () => {
+    fx.write(".opencode/plugin.js", "module.exports = () => { /* original */ }\n");
+    await fx.commit("repo carries an opencode plugin dir");
+    await git(["push", "-q", "origin", "master"], fx.repo);
+    const wt = await createWorktree(fx.repo, key(), "opencode-roundtrip", "master");
+
+    const stripped = stripProjectSettings(wt);
+    fx.write("unrelated.md", "the episode's actual work\n", wt.path);
+    await restoreStrippedSettings(wt, stripped);
+
+    expect(readFileSync(join(wt.path, ".opencode/plugin.js"), "utf8")).toBe(
+      "module.exports = () => { /* original */ }\n",
+    );
+    await commitPendingWork(wt, "episode work");
+    const diff = await summarizeDiff(wt);
+    expect(diff.files).toEqual(["unrelated.md"]);
+  });
 });
 
 // ── The refusal ladder ────────────────────────────────────────────────────────
