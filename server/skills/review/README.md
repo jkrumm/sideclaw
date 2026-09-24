@@ -165,17 +165,17 @@ table is always `GET /api/routing`.
 
 | Component                                                                                             | Model             |
 | ----------------------------------------------------------------------------------------------------- | ----------------- |
-| 1 router triage session (own `review_router` route — the cheap CLASSIFY tier, same as check/overview) | glm-5.3-flash     |
+| 1 router triage session (own `review_router` route — the cheap CLASSIFY tier, same as check/overview) | DeepSeek-V4-Flash |
 | 2–8 angle sessions (3 in flight)                                                                      | claude-sonnet-5   |
 | 1 adversary critic (single HTTPS call, no agent)                                                      | gpt-5.6-terra     |
-| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles)            | DeepSeek-V4-Flash |
+| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles)            | gpt-5.6-luna      |
 | 1 synthesis session                                                                                   | claude-sonnet-5   |
 
 OCR reads the repo itself with its own tool loop rather than working off a single diff
 string, so its own IU-billed token spend (`review_ocr` in the `sideclaw-iu` usage sink) runs
-**~1.4-4.6M tokens per run** — high, but over 90% is cache reads (repeated repo-context
-reads across its internal subtasks), not fresh input, so the real marginal cost is well
-below the raw token count.
+**~0.7-0.9M tokens per run** on gpt-5.6-luna (~1m50s on a 1.8k-line diff), most of it cache
+reads. DeepSeek-V4-Flash, the first pick, needed 5.8M tokens and 8 minutes on the same range
+for comparable findings — see the `review_ocr` comment in `server/lib/routing.ts`.
 
 `gpt-5.6-terra` is a reasoning model — it thinks before answering, so it is
 slower (~50s) and pricier ($2.50/$15 per 1M, ~$0.08 a review) than the

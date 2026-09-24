@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import {
   buildRoutingTable,
   DEEPSEEK_FLASH,
+  GPT_LUNA,
   DEEPSEEK_V41_FLASH,
   describeRoute,
   GLM_FLASH,
@@ -100,9 +101,9 @@ describe("buildRoutingTable defaults", () => {
     }
   });
 
-  test("review_ocr: DeepSeek-V4-Flash on iu, no fallback, over the fixed external-iu transport", () => {
+  test("review_ocr: gpt-5.6-luna on iu, no fallback, over the fixed external-iu transport", () => {
     expect(routes.review_ocr).toEqual({
-      model: DEEPSEEK_FLASH,
+      model: GPT_LUNA,
       backend: "iu",
       fallback: null,
       transport: "external-iu",

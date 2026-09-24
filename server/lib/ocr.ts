@@ -94,6 +94,28 @@ export function ocrModeArgs(scope: string, refBaseOid?: string): string[] | null
   return ["--from", scope, "--to", "HEAD"]; // bare ref
 }
 
+/** Which IU transport a model id answers on, as `ocr`'s `OCR_LLM_PROTOCOL`. Probed
+ *  2026-09-24 with `ocr llm test`: GPT ids answer on both OpenAI routes but need Responses
+ *  to keep reasoning items across ocr's tool loop; Claude, the `DeepSeek-V4-*` gateway ids
+ *  and MiniMax answer on the Anthropic route; everything else (deepseek-v4.1-flash, Gemini)
+ *  only on OpenAI Chat Completions. */
+export type OcrProtocol = "anthropic" | "openai" | "openai-responses";
+
+export function ocrProtocolFor(model: string): OcrProtocol {
+  if (/^gpt-/i.test(model)) return "openai-responses";
+  if (/^(claude-|DeepSeek-V4-|minimax-)/i.test(model)) return "anthropic";
+  return "openai"; // an unknown family fails soft at run time; the `review.ocr` log names it
+}
+
+/** Protocol and base URL, decided together so the pairing can't drift. */
+export function ocrTransportFor(
+  model: string,
+  iu: { anthropicBase: string; openaiBase: string },
+): { protocol: OcrProtocol; url: string } {
+  const protocol = ocrProtocolFor(model);
+  return { protocol, url: protocol === "anthropic" ? iu.anthropicBase : iu.openaiBase };
+}
+
 /** Compact markdown rendering of one OCR run, fed into the synthesis prompt's `[OCR_RESULTS]`
  *  placeholder the same way the fallow/CodeRabbit blocks already are. Pure, never throws.
  *  Zero comments still renders `warnings` and a non-`complete`/`success` `status` — a
@@ -252,6 +274,7 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
     }
 
     const model = routeFor("review_ocr").model;
+    const transport = ocrTransportFor(model, iuConfig);
 
     // A private per-run directory, not two loose files in the shared tmp root — both the
     // JSON output and the background-context file may carry repo/diff content, so they get
@@ -289,9 +312,9 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
       PATH: process.env.PATH ?? "",
       HOME: process.env.HOME ?? "",
       TMPDIR: process.env.TMPDIR ?? tmpdir(),
-      OCR_LLM_URL: iuConfig.anthropicBase,
+      OCR_LLM_URL: transport.url,
       OCR_LLM_TOKEN: iuConfig.key,
-      OCR_LLM_PROTOCOL: "anthropic",
+      OCR_LLM_PROTOCOL: transport.protocol,
       OCR_LLM_MODEL: model,
       OCR_ENABLE_TELEMETRY: "0",
     };
@@ -422,6 +445,8 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         event: "review.ocr",
         tool: "review_ocr",
         project: opts.cwd,
+        model,
+        protocol: transport.protocol,
         status: parsed.status,
         comments: parsed.comments?.length ?? 0,
         totalTokens: parsed.summary?.total_tokens ?? 0,

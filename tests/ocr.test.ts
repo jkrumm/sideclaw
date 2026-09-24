@@ -4,7 +4,15 @@
 // process-spawning callers.
 
 import { describe, expect, test } from "bun:test";
-import { ocrModeArgs, renderOcrBlock, type OcrResult } from "../server/lib/ocr.ts";
+import {
+  ocrModeArgs,
+  ocrProtocolFor,
+  ocrTransportFor,
+  renderOcrBlock,
+  type OcrProtocol,
+  type OcrResult,
+} from "../server/lib/ocr.ts";
+import { routeFor } from "../server/lib/routing.ts";
 
 describe("ocrModeArgs", () => {
   test("uncommitted → workspace mode (no flags)", () => {
@@ -225,5 +233,29 @@ describe("renderOcrBlock caps and status", () => {
       comments: [{ path: "a.ts", content: "c", start_line: 1, end_line: 1 }],
     });
     expect(block).not.toContain("status complete");
+  });
+});
+
+describe("ocrProtocolFor / ocrTransportFor", () => {
+  test.each([
+    ["gpt-5.6-luna", "openai-responses"],
+    ["GPT-5.6-luna", "openai-responses"],
+    ["DeepSeek-V4-Flash", "anthropic"],
+    ["claude-haiku-4-5", "anthropic"],
+    ["minimax-m3", "anthropic"],
+    ["deepseek-v4.1-flash", "openai"],
+    ["gemini-3.8-flash", "openai"],
+    ["some-unknown-model", "openai"],
+  ])("%s → %s", (model, protocol) => {
+    expect(ocrProtocolFor(model)).toBe(protocol as OcrProtocol);
+  });
+
+  test("the default route resolves to the Responses transport on the OpenAI base", () => {
+    const iu = { anthropicBase: "https://x/anthropic", openaiBase: "https://x/openai/v1" };
+    expect(ocrTransportFor(routeFor("review_ocr").model, iu)).toEqual({
+      protocol: "openai-responses",
+      url: "https://x/openai/v1",
+    });
+    expect(ocrTransportFor("DeepSeek-V4-Flash", iu).url).toBe("https://x/anthropic");
   });
 });
