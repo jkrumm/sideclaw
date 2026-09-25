@@ -5,6 +5,8 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  OCR_EFFORT,
+  ocrArgs,
   ocrModeArgs,
   ocrProtocolFor,
   ocrTransportFor,
@@ -250,12 +252,28 @@ describe("ocrProtocolFor / ocrTransportFor", () => {
     expect(ocrProtocolFor(model)).toBe(protocol as OcrProtocol);
   });
 
-  test("the default route resolves to the Responses transport on the OpenAI base", () => {
+  test("the default route resolves to OpenAI chat on the OpenAI base", () => {
     const iu = { anthropicBase: "https://x/anthropic", openaiBase: "https://x/openai/v1" };
     expect(ocrTransportFor(routeFor("review_ocr").model, iu)).toEqual({
-      protocol: "openai-responses",
+      protocol: "openai",
       url: "https://x/openai/v1",
     });
     expect(ocrTransportFor("DeepSeek-V4-Flash", iu).url).toBe("https://x/anthropic");
+  });
+});
+
+describe("ocrArgs", () => {
+  test("pins no per-subtask timeout and the measured review-pass effort", () => {
+    const args = ocrArgs({ modeArgs: ["--commit", "HEAD"], repo: "/r", outFile: "/o.json" });
+    expect(args.slice(0, 3)).toEqual(["review", "--commit", "HEAD"]);
+    expect(args[args.indexOf("--timeout") + 1]).toBe("0");
+    expect(args[args.indexOf("--effort") + 1]).toBe(OCR_EFFORT);
+    expect(OCR_EFFORT).toBe("low");
+    expect(args).not.toContain("--background-file");
+  });
+
+  test("appends the background file when context is given", () => {
+    const args = ocrArgs({ modeArgs: [], repo: "/r", outFile: "/o", bgFile: "/bg.md" });
+    expect(args.slice(-2)).toEqual(["--background-file", "/bg.md"]);
   });
 });

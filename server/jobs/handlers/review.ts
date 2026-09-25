@@ -1186,9 +1186,18 @@ export async function runReview(
     // router + angle-session phases above since right after Phase 1 confirmed real changes —
     // this is the first point its 3-7 minute wall time can actually block anything.
     bump("synthesis: awaiting ocr");
+    const ocrWaitStart = performance.now();
     const ocrResult = await ocrPromise;
     logger.info(
-      { event: "review.ocr", tool: "review", project: cwd, hasOcr: ocrResult.ran },
+      {
+        event: "review.ocr",
+        tool: "review",
+        project: cwd,
+        hasOcr: ocrResult.ran,
+        // How long synthesis blocked on OCR after the angles were done; ~0 means OCR finished
+        // inside the angle phase and cost the review no wall time.
+        ocrWaitMs: Math.round(performance.now() - ocrWaitStart),
+      },
       "ocr review resolved",
     );
     bump("synthesizing findings");

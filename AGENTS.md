@@ -445,10 +445,10 @@ profile: `server/skills/review/README.md`.
 
 **OpenCodeReview (OCR):** one more phase-1 input, started right after Phase 1
 confirms real changes and awaited only just before the synthesis prompt is
-built, so its ~2 minute wall time runs parallel with the router + angle
+built, so its ~2.5 minute wall time runs parallel with the router + angle
 phases instead of adding in front of them (`server/lib/ocr.ts`, route
-`review_ocr` — gpt-5.6-luna over IU's OpenAI Responses transport, picked by a
-same-range bake-off, rationale in `routing.ts`; per-token, off Max; no Max fallback,
+`review_ocr` — deepseek-v4.1-flash over IU's OpenAI route with `--effort low`,
+picked by a same-range bake-off, rationale in `routing.ts`; per-token, off Max; no Max fallback,
 since it's an external CLI, not a `runSession` worker). Fails soft to a
 one-line skip/fail block the synthesizer reads like an unavailable
 fallow/CodeRabbit — never a gate, never thrown into the review. Disable with

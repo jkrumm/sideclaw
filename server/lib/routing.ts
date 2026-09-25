@@ -147,8 +147,6 @@ export const DEEPSEEK_FLASH = "DeepSeek-V4-Flash";
  *  NOT the IU native Anthropic transport `DEEPSEEK_FLASH` above runs over — `claude -p`
  *  cannot reach this id at all. See AGENT_OC below. */
 export const DEEPSEEK_V41_FLASH = "deepseek-v4.1-flash";
-/** review_ocr only — reached over IU's OpenAI Responses route by the `ocr` CLI (ocr.ts). */
-export const GPT_LUNA = "gpt-5.6-luna";
 
 // ── Tiers — named once, referenced by every tool that shares the shape, so a re-tiering
 // touches one line instead of hunting down every duplicate. ──────────────────────────
@@ -319,14 +317,17 @@ const DEFAULT_ROUTES: Record<RoutedTool, ToolRoute> = {
   // review_ocr: the `ocr` CLI (server/lib/ocr.ts) only ever consumes `.model` — it is not a
   // `runSession` worker, so there is no Max lane for it to fall back to (Max serves the
   // Claude Code CLI's own auth path, not an arbitrary external binary's), same reasoning as
-  // adversary/VISION below. gpt-5.6-luna since 2026-09-24: a same-range bake-off (sideclaw
-  // 819bcc7..4898afb, 1.8k lines) ran it 3× at 1m39s-1m53s / 0.7-0.9M tokens with 4-6
-  // findings, all verified real, vs DeepSeek-V4-Flash 8m13s / 5.8M (6 real),
-  // deepseek-v4.1-flash 6m30s / 5.7M (6 real, 2 false), gemini-3.8-flash 7m01s (1),
-  // minimax-m3 7m13s (16, mostly noise), gpt-6-luna 1m28s (2). Finishing inside the angle
-  // phase takes OCR off the review's critical path. Protocol per model: ocr.ts.
+  // adversary/VISION below. deepseek-v4.1-flash with ocr's `--effort low` (ocr.ts) since
+  // 2026-09-25, from a same-range bake-off (sideclaw 819bcc7..4898afb, 1.8k lines, every
+  // finding checked by hand). Wall time in ocr is LLM rounds × ~5s per round (the same for
+  // every model), not tok/s: at the default effort (2 review passes) v4.1-flash explored for
+  // 117 rounds / 6m30s. With `--effort low` it ran 3× at 2m31s-3m09s with 4-7 findings,
+  // nearly all real, and the most cross-file/config catches of any model — the class the
+  // angle reviewers miss. Also measured: `reasoning_effort: none` 2m04s but noisier;
+  // gpt-5.6-luna 3× 1m39s-1m53s, 4-6 real (overlaps the angles more); gpt-6-luna 3× ~1m30s,
+  // 2-3 real (terser); gemini-3.8-flash 2× ~7m, 1-3 real (84 rounds at a 3.3s IU TTFT).
   review_ocr: {
-    model: GPT_LUNA,
+    model: DEEPSEEK_V41_FLASH,
     backend: "iu",
     fallback: null,
     transport: "external-iu",
@@ -472,7 +473,9 @@ export function buildRoutingTable(env: Record<string, string | undefined>): Rout
     // If the overrides above land on this combination, REFUSE whichever override actually
     // caused it and fall back to the tool's own documented default for BOTH fields — a
     // partial revert would leave the other field pointing at a combination nothing declared.
-    if (model === DEEPSEEK_V41_FLASH && harness !== "opencode") {
+    // Session transport only: an external-iu route (review_ocr's `ocr` CLI) never runs a
+    // harness, so it may carry this id with the inert default harness.
+    if (base.transport === "session" && model === DEEPSEEK_V41_FLASH && harness !== "opencode") {
       const culprit = harnessOverride ? "harness" : modelOverride ? "model" : "harness";
       const culpritValue = harnessOverride ?? modelOverride ?? harness;
       // The culprit override already pushed a plain "accepted" entry above (the harness or

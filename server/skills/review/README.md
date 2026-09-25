@@ -163,19 +163,20 @@ with a quota error. The router triage runs on the cheap CLASSIFY tier
 so its bias profile is uncorrelated with the claude-sonnet-5 reviewers. The live
 table is always `GET /api/routing`.
 
-| Component                                                                                             | Model             |
-| ----------------------------------------------------------------------------------------------------- | ----------------- |
-| 1 router triage session (own `review_router` route — the cheap CLASSIFY tier, same as check/overview) | DeepSeek-V4-Flash |
-| 2–8 angle sessions (3 in flight)                                                                      | claude-sonnet-5   |
-| 1 adversary critic (single HTTPS call, no agent)                                                      | gpt-5.6-terra     |
-| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles)            | gpt-5.6-luna      |
-| 1 synthesis session                                                                                   | claude-sonnet-5   |
+| Component                                                                                             | Model               |
+| ----------------------------------------------------------------------------------------------------- | ------------------- |
+| 1 router triage session (own `review_router` route — the cheap CLASSIFY tier, same as check/overview) | DeepSeek-V4-Flash   |
+| 2–8 angle sessions (3 in flight)                                                                      | claude-sonnet-5     |
+| 1 adversary critic (single HTTPS call, no agent)                                                      | gpt-5.6-terra       |
+| 1 OpenCodeReview run (own `review_ocr` route, external CLI, parallel with router + angles)            | deepseek-v4.1-flash |
+| 1 synthesis session                                                                                   | claude-sonnet-5     |
 
 OCR reads the repo itself with its own tool loop rather than working off a single diff
 string, so its own IU-billed token spend (`review_ocr` in the `sideclaw-iu` usage sink) runs
-**~0.7-0.9M tokens per run** on gpt-5.6-luna (~1m50s on a 1.8k-line diff), most of it cache
-reads. DeepSeek-V4-Flash, the first pick, needed 5.8M tokens and 8 minutes on the same range
-for comparable findings — see the `review_ocr` comment in `server/lib/routing.ts`.
+**~1.5-3M tokens per run** on deepseek-v4.1-flash with `--effort low` (~2.5-3 min on a
+1.8k-line diff), mostly cache reads. ocr's wall time is LLM rounds × ~5 s, so the default
+effort's second review pass doubled it — see the `review_ocr` comment in
+`server/lib/routing.ts` for the full bake-off.
 
 `gpt-5.6-terra` is a reasoning model — it thinks before answering, so it is
 slower (~50s) and pricier ($2.50/$15 per 1M, ~$0.08 a review) than the

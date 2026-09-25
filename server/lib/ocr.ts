@@ -94,6 +94,39 @@ export function ocrModeArgs(scope: string, refBaseOid?: string): string[] | null
   return ["--from", scope, "--to", "HEAD"]; // bare ref
 }
 
+/** ocr's review-pass preset. Model-agnostic on purpose: it sets how many review passes ocr
+ *  runs, not a model knob. Measured on deepseek-v4.1-flash: one pass instead of the default
+ *  two cut ~6.5 to ~2.7 minutes with no loss of real findings (routing.ts's review_ocr). */
+export const OCR_EFFORT = "low";
+
+/** The `ocr review` argv after the binary. Pure, so the flags that matter for wall time
+ *  (`--timeout 0`, `--effort`) are pinned by a test rather than by review. */
+export function ocrArgs(input: {
+  modeArgs: string[];
+  repo: string;
+  outFile: string;
+  bgFile?: string;
+}): string[] {
+  const args = [
+    "review",
+    ...input.modeArgs,
+    "--repo",
+    input.repo,
+    "--format",
+    "json",
+    "--audience",
+    "human",
+    "--timeout",
+    "0",
+    "--effort",
+    OCR_EFFORT,
+    "-o",
+    input.outFile,
+  ];
+  if (input.bgFile) args.push("--background-file", input.bgFile);
+  return args;
+}
+
 /** Which IU transport a model id answers on, as `ocr`'s `OCR_LLM_PROTOCOL`. Probed
  *  2026-09-24 with `ocr llm test`: GPT ids answer on both OpenAI routes but need Responses
  *  to keep reasoning items across ocr's tool loop; Claude, the `DeepSeek-V4-*` gateway ids
@@ -289,21 +322,7 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
       await writeFile(bgFile, opts.context ?? "", { encoding: "utf-8", mode: 0o600 });
     }
 
-    const args = [
-      "review",
-      ...modeArgs,
-      "--repo",
-      opts.cwd,
-      "--format",
-      "json",
-      "--audience",
-      "human",
-      "--timeout",
-      "0",
-      "-o",
-      outFile,
-    ];
-    if (bgFile) args.push("--background-file", bgFile);
+    const args = ocrArgs({ modeArgs, repo: opts.cwd, outFile, bgFile });
 
     // Minimal env, deliberately not a copy of process.env — same reasoning
     // buildWorkerEnv's scrub applies to a worker session: a spawned CLI has no reason to hold
@@ -447,6 +466,7 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         project: opts.cwd,
         model,
         protocol: transport.protocol,
+        effort: OCR_EFFORT,
         status: parsed.status,
         comments: parsed.comments?.length ?? 0,
         totalTokens: parsed.summary?.total_tokens ?? 0,
