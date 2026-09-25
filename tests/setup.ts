@@ -46,3 +46,11 @@ process.env.SIDECLAW_JOBS_DB ??= join(
   mkdtempSync(join(tmpdir(), "sideclaw-test-jobs-")),
   "jobs.db",
 );
+
+// Same reasoning, for `recordIuUsage`'s NDJSON sink (`server/lib/iu-openai.ts`): a test file
+// that imports it transitively (e.g. via `server/lib/ocr.ts`) before any test sets the env
+// itself must still never append to the real ~/.local/share/usage-tracker/sideclaw-iu.jsonl.
+process.env.SIDECLAW_IU_USAGE_LOG ??= join(
+  mkdtempSync(join(tmpdir(), "sideclaw-test-iu-usage-")),
+  "sideclaw-iu.jsonl",
+);

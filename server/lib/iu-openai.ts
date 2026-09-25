@@ -17,10 +17,17 @@ import { IDLE_TIMEOUT_MS } from "./idle-timeout.ts";
 
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 
-// NDJSON usage sink consumed by the usage-tracker's `sideclaw-iu` collector.
-const USAGE_SINK =
-  process.env.SIDECLAW_IU_USAGE_LOG ??
-  join(homedir(), ".local", "share", "usage-tracker", "sideclaw-iu.jsonl");
+/** NDJSON usage sink consumed by the usage-tracker's `sideclaw-iu` collector. Resolved fresh
+ *  on every call (not cached at module load) — a test that sets `SIDECLAW_IU_USAGE_LOG` AFTER
+ *  this module has already been imported (e.g. transitively, via `server/lib/ocr.ts`, from an
+ *  earlier test file in the same bun test process) would otherwise leak rows into the real
+ *  sink because a module-level constant had already baked in the default path. */
+function usageSinkPath(): string {
+  return (
+    process.env.SIDECLAW_IU_USAGE_LOG ??
+    join(homedir(), ".local", "share", "usage-tracker", "sideclaw-iu.jsonl")
+  );
+}
 
 /**
  * Token usage for one IU call — the single source of truth for both the
@@ -41,6 +48,23 @@ export const IU_USAGE_SCHEMA = z.object({
         "total - input - output (Gemini, which reports it nowhere). 0 for non-thinking models.",
     ),
   totalTokens: z.number().describe("Total tokens: input + output + reasoning."),
+  cacheReadTokens: z
+    .number()
+    .default(0)
+    .describe(
+      "Prompt tokens served from cache, read from prompt_tokens_details.cached_tokens. A " +
+        "SUBSET of inputTokens (OpenAI convention: cached_tokens <= prompt_tokens), not " +
+        "additional tokens. 0 where the vendor doesn't report it.",
+    ),
+  costUsd: z
+    .number()
+    .nullable()
+    .default(null)
+    .describe(
+      "The gateway's own reported cost for this call in USD (usage.cost), when the model " +
+        "id reports it — DeepSeek ids currently do over /openai/v1/chat/completions, GPT/" +
+        "Gemini ids don't. Never computed locally; null when absent.",
+    ),
 });
 
 export type IuUsage = z.infer<typeof IU_USAGE_SCHEMA>;
@@ -292,11 +316,22 @@ function normalizeUsage(raw: unknown): IuUsage | undefined {
   // Gemini convention: unreported, and sitting outside completion_tokens.
   const external = Math.max(0, totalTokens - inputTokens - completionTokens);
 
+  // Cache reads: a subset of prompt_tokens (verified: cached_tokens <= prompt_tokens),
+  // reported by DeepSeek ids on this gateway; absent elsewhere.
+  const promptDetails = u.prompt_tokens_details as Record<string, unknown> | undefined;
+  const cacheReadTokens =
+    promptDetails && typeof promptDetails === "object" ? num(promptDetails.cached_tokens) : 0;
+
+  // The gateway's own cost, when the model id reports it — never derived locally.
+  const costUsd = typeof u.cost === "number" && Number.isFinite(u.cost) ? u.cost : null;
+
   return {
     inputTokens,
     outputTokens: Math.max(0, completionTokens - reported),
     reasoningTokens: reported + external,
     totalTokens,
+    cacheReadTokens,
+    costUsd,
   };
 }
 
@@ -311,9 +346,21 @@ export async function recordIuUsage(rec: {
   requestId?: string;
   latencyMs: number;
   bytes?: number;
+  /** Overrides `usage?.cacheReadTokens` — for callers (e.g. `server/lib/ocr.ts`) that never
+   *  built a full `IuUsage` object but still know the cache-read count from their own summary. */
+  cacheReadTokens?: number;
+  /** No `IuUsage` field carries this (the IU OpenAI transport reports no cache-write
+   *  convention) — callers that know it (ocr's own summary) pass it directly. Defaults to 0. */
+  cacheWriteTokens?: number;
+  /** Overrides `usage?.costUsd`. Pass `null` explicitly for a caller that knows for certain
+   *  no cost is available (e.g. ocr, which reports none) rather than leaving it to fall
+   *  through to `usage?.costUsd`. */
+  costUsd?: number | null;
+  outcome?: "ok" | "error";
 }): Promise<void> {
+  const sink = usageSinkPath();
   try {
-    await mkdir(dirname(USAGE_SINK), { recursive: true });
+    await mkdir(dirname(sink), { recursive: true });
     const line =
       JSON.stringify({
         ts: new Date().toISOString(),
@@ -322,19 +369,24 @@ export async function recordIuUsage(rec: {
         tool: rec.tool,
         model: rec.model,
         billing: "iu",
+        // `input_tokens` is the TOTAL prompt tokens INCLUDING cache reads (OpenAI convention,
+        // which is what both the gateway and ocr report; verified: cached_tokens <=
+        // prompt_tokens) — the usage-tracker collector subtracts `cache_read_tokens` to get
+        // the uncached count. Never subtract here.
         input_tokens: rec.usage?.inputTokens ?? 0,
         output_tokens: rec.usage?.outputTokens ?? 0,
         reasoning_tokens: rec.usage?.reasoningTokens ?? 0,
         total_tokens: rec.usage?.totalTokens ?? 0,
+        cache_read_tokens: rec.cacheReadTokens ?? rec.usage?.cacheReadTokens ?? 0,
+        cache_write_tokens: rec.cacheWriteTokens ?? 0,
+        cost_usd: rec.costUsd !== undefined ? rec.costUsd : (rec.usage?.costUsd ?? null),
+        outcome: rec.outcome ?? "ok",
         latency_ms: rec.latencyMs,
         bytes: rec.bytes ?? null,
       }) + "\n";
-    await appendFile(USAGE_SINK, line);
+    await appendFile(sink, line);
   } catch (err) {
-    logger.warn(
-      { event: "iu.usage.sink_failed", err, sink: USAGE_SINK },
-      "iu usage sink append failed",
-    );
+    logger.warn({ event: "iu.usage.sink_failed", err, sink }, "iu usage sink append failed");
   }
 }
 
@@ -384,8 +436,21 @@ export async function visionRead(opts: {
     { idleTimeoutMs: opts.timeoutMs },
   );
 
-  if (!data.text) throw new Error("Vision call returned no content.");
   const latencyMs = Math.round(performance.now() - t0);
+
+  if (!data.text) {
+    // A paid call still bills tokens even when the response carries no text — record it
+    // before throwing, or the spend is lost.
+    await recordIuUsage({
+      tool: opts.tool ?? "read_image",
+      model,
+      usage: data.usage,
+      requestId: data.id,
+      latencyMs,
+      outcome: "error",
+    });
+    throw new Error("Vision call returned no content.");
+  }
 
   await recordIuUsage({
     tool: opts.tool ?? "read_image",
@@ -447,9 +512,21 @@ export async function textComplete(opts: {
   if (opts.maxTokens) body.max_completion_tokens = opts.maxTokens;
 
   const data = await iuFetch("/chat/completions", body, { idleTimeoutMs: opts.timeoutMs });
-
-  if (!data.text) throw new Error("Text completion returned no content.");
   const latencyMs = Math.round(performance.now() - t0);
+
+  if (!data.text) {
+    // A paid call still bills tokens even when the response carries no text — record it
+    // before throwing, or the spend is lost.
+    await recordIuUsage({
+      tool: opts.tool ?? "text_complete",
+      model,
+      usage: data.usage,
+      requestId: data.id,
+      latencyMs,
+      outcome: "error",
+    });
+    throw new Error("Text completion returned no content.");
+  }
 
   await recordIuUsage({
     tool: opts.tool ?? "text_complete",

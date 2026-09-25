@@ -1,6 +1,6 @@
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { getIuConfig, recordIuUsage, type IuUsage } from "./iu-openai.ts";
 import { trackExternalProc } from "../mcp/session-runner.ts";
 import { IDLE_TIMEOUT_MS } from "./idle-timeout.ts";
@@ -149,6 +149,203 @@ export function ocrTransportFor(
   return { protocol, url: protocol === "anthropic" ? iu.anthropicBase : iu.openaiBase };
 }
 
+/** Maps a clean `ocr` run's own `OcrSummary` onto a `recordIuUsage` call — pulled out as a
+ *  pure function (rather than inlined at the one call site) so the mapping is unit-tested
+ *  independent of spawning the real binary: `input_tokens`/`output_tokens`/`total_tokens` go
+ *  into `usage` (reasoningTokens always 0 — ocr reports no thinking split), `cache_read_tokens`
+ *  is duplicated onto both `usage.cacheReadTokens` and the top-level override (the latter
+ *  wins), `cache_write_tokens` has no `IuUsage` field so it's a top-level override only, and
+ *  `costUsd` is always `null` — ocr's own summary reports no cost. */
+export function ocrSummaryToUsage(summary: OcrSummary | undefined): {
+  usage: IuUsage;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  costUsd: null;
+} {
+  const cacheReadTokens = summary?.cache_read_tokens ?? 0;
+  return {
+    usage: {
+      inputTokens: summary?.input_tokens ?? 0,
+      outputTokens: summary?.output_tokens ?? 0,
+      reasoningTokens: 0,
+      totalTokens: summary?.total_tokens ?? 0,
+      cacheReadTokens,
+      costUsd: null,
+    },
+    cacheReadTokens,
+    cacheWriteTokens: summary?.cache_write_tokens ?? 0,
+    costUsd: null,
+  };
+}
+
+// ── Failure-path usage recovery ──────────────────────────────────────────────────────────
+//
+// `ocr` only writes its `OcrSummary` on a clean run. An idle kill, a non-zero exit, an
+// unparseable JSON output, or an early abort all still spent real tokens, but leave nothing
+// in this process to report — the spend would otherwise be silently lost. `ocr` itself keeps
+// a session log per run at `~/.opencodereview/sessions/<slug>/<sessionId>.jsonl`
+// (`OCR_SESSIONS_ROOT`/`ocrSessionSlug`) that carries the same usage a clean run's summary
+// would have, one `{"type":"llm_response"}` line per LLM turn. Recovery is best-effort and
+// must never throw into the review — see `recordOcrFailureUsage`.
+
+const OCR_SESSIONS_ROOT = join(homedir(), ".opencodereview", "sessions");
+
+/** ocr's session-log directory slug for a repo path: the absolute path with every `/` turned
+ *  into `-`, then the resulting leading `-` dropped (e.g. `/Users/jkrumm/SourceRoot/sideclaw`
+ *  -> `Users-jkrumm-SourceRoot-sideclaw`). In ref/PR/branch mode `--repo` is the WORKTREE
+ *  path, not the original repo — callers must pass the same path they gave `ocr --repo`. */
+export function ocrSessionSlug(repoPath: string): string {
+  return repoPath.replaceAll("/", "-").replace(/^-/, "");
+}
+
+export interface OcrSessionUsageSum {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+}
+
+const ZERO_OCR_SESSION_USAGE: OcrSessionUsageSum = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  totalTokens: 0,
+};
+
+function numField(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+/** Pure fold over one ocr session-log file's lines (already split on `\n`) — sums every
+ *  `{"type":"llm_response"}` line's `usage`. Tolerant of blank lines, unrelated event types
+ *  and unparseable/malformed JSON (skipped, never throws) — this reads a 3rd-party log after
+ *  a failure, not a shape sideclaw controls. */
+export function sumOcrSessionUsage(lines: string[]): OcrSessionUsageSum {
+  const sum = { ...ZERO_OCR_SESSION_USAGE };
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object") continue;
+    const rec = parsed as Record<string, unknown>;
+    if (rec.type !== "llm_response") continue;
+    const usage = rec.usage;
+    if (!usage || typeof usage !== "object") continue;
+    const u = usage as Record<string, unknown>;
+    sum.inputTokens += numField(u.prompt_tokens);
+    sum.outputTokens += numField(u.completion_tokens);
+    sum.cacheReadTokens += numField(u.cache_read_tokens);
+    sum.cacheWriteTokens += numField(u.cache_write_tokens);
+  }
+  sum.totalTokens = sum.inputTokens + sum.outputTokens;
+  return sum;
+}
+
+/** A timestamp field ocr may report either as epoch millis (number) or an ISO string —
+ *  undocumented which, so both are accepted. `undefined` for anything else. */
+function toEpochMs(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const ms = Date.parse(v);
+    if (!Number.isNaN(ms)) return ms;
+  }
+  return undefined;
+}
+
+/** Locates and sums every ocr session-log file for this repo whose run overlaps the failed
+ *  attempt: `session_start.timestamp` at or after `startedAtMs - 2000` (a small backward slop
+ *  for clock skew between this process and the `ocr` child) and `session_start.cwd` matching
+ *  `repoPath` exactly. Never throws — a missing directory, an unreadable file, or a session
+ *  log with no parseable `session_start` line all resolve to "nothing found", the same shape
+ *  as a run that genuinely spent zero tokens before failing. */
+async function findOcrSessionUsage(
+  repoPath: string,
+  startedAtMs: number,
+): Promise<OcrSessionUsageSum> {
+  const dir = join(OCR_SESSIONS_ROOT, ocrSessionSlug(repoPath));
+  let entries: string[];
+  try {
+    entries = await readdir(dir);
+  } catch {
+    return { ...ZERO_OCR_SESSION_USAGE };
+  }
+
+  const cutoff = startedAtMs - 2_000;
+  const totals = { ...ZERO_OCR_SESSION_USAGE };
+  for (const entry of entries) {
+    if (!entry.endsWith(".jsonl")) continue;
+    let text: string;
+    try {
+      text = await Bun.file(join(dir, entry)).text();
+    } catch {
+      continue;
+    }
+    const lines = text.split("\n");
+    const firstLine = lines.find((l) => l.trim());
+    if (!firstLine) continue;
+    let start: Record<string, unknown>;
+    try {
+      start = JSON.parse(firstLine) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    if (start.type !== "session_start") continue;
+    const startedTs = toEpochMs(start.timestamp);
+    if (startedTs === undefined || startedTs < cutoff) continue;
+    if (start.cwd !== repoPath) continue;
+
+    const fileSum = sumOcrSessionUsage(lines);
+    totals.inputTokens += fileSum.inputTokens;
+    totals.outputTokens += fileSum.outputTokens;
+    totals.cacheReadTokens += fileSum.cacheReadTokens;
+    totals.cacheWriteTokens += fileSum.cacheWriteTokens;
+    totals.totalTokens += fileSum.totalTokens;
+  }
+  return totals;
+}
+
+/** Best-effort recovery + recording of token spend for an ocr run that failed before (or
+ *  instead of) producing its own `OcrSummary` — idle kill, non-zero exit, unparseable JSON
+ *  output, or an early abort. NEVER throws: telemetry on a failure path must not turn into a
+ *  second failure that shadows the real one. */
+async function recordOcrFailureUsage(input: {
+  repoPath: string;
+  startedAtMs: number;
+  model: string;
+  durationMs: number;
+}): Promise<void> {
+  try {
+    const recovered = await findOcrSessionUsage(input.repoPath, input.startedAtMs);
+    await recordIuUsage({
+      tool: "review_ocr",
+      model: input.model,
+      usage: {
+        inputTokens: recovered.inputTokens,
+        outputTokens: recovered.outputTokens,
+        reasoningTokens: 0,
+        totalTokens: recovered.totalTokens,
+        cacheReadTokens: recovered.cacheReadTokens,
+        costUsd: null,
+      },
+      cacheWriteTokens: recovered.cacheWriteTokens,
+      latencyMs: input.durationMs,
+      outcome: "error",
+    });
+  } catch (err) {
+    logger.warn(
+      { event: "review.ocr", tool: "review_ocr", project: input.repoPath, error: String(err) },
+      "ocr failure-path usage recovery failed",
+    );
+  }
+}
+
 /** Compact markdown rendering of one OCR run, fed into the synthesis prompt's `[OCR_RESULTS]`
  *  placeholder the same way the fallow/CodeRabbit blocks already are. Pure, never throws.
  *  Zero comments still renders `warnings` and a non-`complete`/`success` `status` — a
@@ -238,6 +435,9 @@ export interface RunOcrReviewResult {
  *  resolved. */
 export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrReviewResult> {
   const startMs = performance.now();
+  // Wall-clock counterpart to `startMs` (a monotonic clock, useless for matching against
+  // ocr's own session-log timestamps) — only used by the failure-path usage recovery below.
+  const startedAtMs = Date.now();
 
   // Declared before the try so the `finally` can always reach them, regardless of which
   // guard clause or catch returned first — the same lifecycle-tracking shape
@@ -396,10 +596,12 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
 
     await Promise.all([readStderr(), readStdout()]);
     const exitCode = await proc.exited;
-
-    if (opts.signal?.aborted) return { block: skippedBlock("review exited early"), ran: true };
-
     const durationMs = Math.round(performance.now() - startMs);
+
+    if (opts.signal?.aborted) {
+      await recordOcrFailureUsage({ repoPath: opts.cwd, startedAtMs, model, durationMs });
+      return { block: skippedBlock("review exited early"), ran: true };
+    }
 
     if (killedForIdle) {
       logger.warn(
@@ -413,6 +615,7 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         },
         "ocr killed — idle watchdog",
       );
+      await recordOcrFailureUsage({ repoPath: opts.cwd, startedAtMs, model, durationMs });
       return {
         block: failedBlock(
           `idle — no output for ${Math.round(IDLE_TIMEOUT_MS / 1000)}s, last: ${truncateForPrompt(lastActivityLine)}`,
@@ -433,6 +636,7 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         },
         "ocr exited non-zero",
       );
+      await recordOcrFailureUsage({ repoPath: opts.cwd, startedAtMs, model, durationMs });
       return {
         block: failedBlock(`exit ${exitCode}: ${truncateForPrompt(lastActivityLine)}`),
         ran: true,
@@ -448,16 +652,12 @@ export async function runOcrReview(opts: RunOcrReviewOptions): Promise<RunOcrRev
         { event: "review.ocr", tool: "review_ocr", project: opts.cwd, error: String(err) },
         "ocr output did not parse as JSON",
       );
+      await recordOcrFailureUsage({ repoPath: opts.cwd, startedAtMs, model, durationMs });
       return { block: failedBlock("output did not parse as JSON"), ran: true };
     }
 
-    const usage: IuUsage = {
-      inputTokens: parsed.summary?.input_tokens ?? 0,
-      outputTokens: parsed.summary?.output_tokens ?? 0,
-      reasoningTokens: 0,
-      totalTokens: parsed.summary?.total_tokens ?? 0,
-    };
-    await recordIuUsage({ tool: "review_ocr", model, usage, latencyMs: durationMs });
+    const usageArgs = ocrSummaryToUsage(parsed.summary);
+    await recordIuUsage({ tool: "review_ocr", model, latencyMs: durationMs, ...usageArgs });
 
     logger.info(
       {

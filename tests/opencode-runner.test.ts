@@ -350,6 +350,26 @@ describe("reduceOpencodeEvent over a real captured successful stream", () => {
     expect(accum.sawErrorEvent).toBe(false);
   });
 
+  test("tallies cache.write across step_finish events, not just cache.read", () => {
+    let accum = INITIAL_OPENCODE_ACCUM;
+    accum = reduceOpencodeEvent(accum, {
+      type: "step_finish",
+      sessionID: "s",
+      part: {
+        type: "step-finish",
+        reason: "tool-calls",
+        tokens: { cache: { read: 10, write: 4 } },
+      },
+    } as never);
+    accum = reduceOpencodeEvent(accum, {
+      type: "step_finish",
+      sessionID: "s",
+      part: { type: "step-finish", reason: "stop", tokens: { cache: { read: 20, write: 6 } } },
+    } as never);
+    expect(accum.cacheReadTokens).toBe(30);
+    expect(accum.cacheWriteTokens).toBe(10);
+  });
+
   test("finished reflects the LAST step_finish's reason, not an OR across every one", () => {
     // The fixture's first step_finish is reason "tool-calls" (mid-run), the second is "stop".
     let accum = INITIAL_OPENCODE_ACCUM;

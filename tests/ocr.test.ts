@@ -9,10 +9,14 @@ import {
   ocrArgs,
   ocrModeArgs,
   ocrProtocolFor,
+  ocrSessionSlug,
+  ocrSummaryToUsage,
   ocrTransportFor,
   renderOcrBlock,
+  sumOcrSessionUsage,
   type OcrProtocol,
   type OcrResult,
+  type OcrSummary,
 } from "../server/lib/ocr.ts";
 import { routeFor } from "../server/lib/routing.ts";
 
@@ -259,6 +263,143 @@ describe("ocrProtocolFor / ocrTransportFor", () => {
       url: "https://x/openai/v1",
     });
     expect(ocrTransportFor("DeepSeek-V4-Flash", iu).url).toBe("https://x/anthropic");
+  });
+});
+
+describe("ocrSessionSlug", () => {
+  test("turns every path separator into a dash and drops the leading one", () => {
+    expect(ocrSessionSlug("/Users/jkrumm/SourceRoot/sideclaw")).toBe(
+      "Users-jkrumm-SourceRoot-sideclaw",
+    );
+  });
+
+  test("a worktree path slugs the same way", () => {
+    expect(ocrSessionSlug("/tmp/sideclaw-worktrees/abc123")).toBe("tmp-sideclaw-worktrees-abc123");
+  });
+});
+
+describe("sumOcrSessionUsage", () => {
+  test("sums prompt/completion/cache tokens across every llm_response line", () => {
+    const lines = [
+      JSON.stringify({ type: "session_start", timestamp: 1000, cwd: "/repo" }),
+      JSON.stringify({
+        type: "llm_response",
+        usage: {
+          prompt_tokens: 100,
+          completion_tokens: 20,
+          cache_read_tokens: 30,
+          cache_write_tokens: 5,
+        },
+      }),
+      JSON.stringify({
+        type: "llm_response",
+        usage: {
+          prompt_tokens: 200,
+          completion_tokens: 40,
+          cache_read_tokens: 0,
+          cache_write_tokens: 0,
+        },
+      }),
+    ];
+    const sum = sumOcrSessionUsage(lines);
+    expect(sum.inputTokens).toBe(300);
+    expect(sum.outputTokens).toBe(60);
+    expect(sum.cacheReadTokens).toBe(30);
+    expect(sum.cacheWriteTokens).toBe(5);
+    expect(sum.totalTokens).toBe(360);
+  });
+
+  test("ignores non-llm_response lines, blank lines, and unparseable JSON", () => {
+    const lines = [
+      "",
+      "   ",
+      "not json at all {",
+      JSON.stringify({ type: "session_start", timestamp: 1000, cwd: "/repo" }),
+      JSON.stringify({ type: "tool_call", name: "bash" }),
+      JSON.stringify({ type: "llm_response", usage: { prompt_tokens: 10, completion_tokens: 2 } }),
+    ];
+    const sum = sumOcrSessionUsage(lines);
+    expect(sum.inputTokens).toBe(10);
+    expect(sum.outputTokens).toBe(2);
+    expect(sum.cacheReadTokens).toBe(0);
+    expect(sum.cacheWriteTokens).toBe(0);
+  });
+
+  test("an llm_response line with no usage field contributes zero, not a throw", () => {
+    const lines = [JSON.stringify({ type: "llm_response" })];
+    expect(() => sumOcrSessionUsage(lines)).not.toThrow();
+    expect(sumOcrSessionUsage(lines)).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+    });
+  });
+
+  test("an empty line array sums to all zeros", () => {
+    expect(sumOcrSessionUsage([])).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      totalTokens: 0,
+    });
+  });
+});
+
+describe("ocrSummaryToUsage", () => {
+  test("maps input/output/total straight through, cache_read_tokens onto both places, no cost", () => {
+    const summary: OcrSummary = {
+      files_reviewed: 3,
+      comments: 2,
+      total_tokens: 1200,
+      input_tokens: 1000,
+      output_tokens: 200,
+      cache_read_tokens: 300,
+      cache_write_tokens: 50,
+      elapsed: "1m2s",
+    };
+    const result = ocrSummaryToUsage(summary);
+    expect(result.usage).toEqual({
+      inputTokens: 1000,
+      outputTokens: 200,
+      reasoningTokens: 0,
+      totalTokens: 1200,
+      cacheReadTokens: 300,
+      costUsd: null,
+    });
+    expect(result.cacheReadTokens).toBe(300);
+    expect(result.cacheWriteTokens).toBe(50);
+    expect(result.costUsd).toBeNull();
+  });
+
+  test("an undefined summary maps to an all-zero usage, never a throw", () => {
+    const result = ocrSummaryToUsage(undefined);
+    expect(result.usage).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      costUsd: null,
+    });
+    expect(result.cacheReadTokens).toBe(0);
+    expect(result.cacheWriteTokens).toBe(0);
+  });
+
+  test("a summary with no cache fields at all defaults both to 0", () => {
+    const summary: OcrSummary = {
+      files_reviewed: 1,
+      comments: 0,
+      total_tokens: 100,
+      input_tokens: 90,
+      output_tokens: 10,
+      elapsed: "5s",
+    };
+    const result = ocrSummaryToUsage(summary);
+    expect(result.usage.cacheReadTokens).toBe(0);
+    expect(result.cacheWriteTokens).toBe(0);
   });
 });
 

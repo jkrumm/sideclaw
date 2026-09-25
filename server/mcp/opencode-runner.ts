@@ -434,6 +434,7 @@ export interface OpencodeAccum {
   outputTokens: number;
   reasoningTokens: number;
   cacheReadTokens: number;
+  cacheWriteTokens: number;
   /** Whether the MOST RECENT `step_finish` seen so far had `part.reason === "stop"` — the
    *  final assistant turn, as opposed to a `"tool-calls"` step that continues the loop.
    *  Overwritten on every `step_finish` (not OR-accumulated), so this always reflects the
@@ -454,6 +455,7 @@ export const INITIAL_OPENCODE_ACCUM: OpencodeAccum = {
   outputTokens: 0,
   reasoningTokens: 0,
   cacheReadTokens: 0,
+  cacheWriteTokens: 0,
   finished: false,
   sawErrorEvent: false,
 };
@@ -479,6 +481,7 @@ export function reduceOpencodeEvent(state: OpencodeAccum, event: OpencodeEvent):
         next.outputTokens += part.tokens.output ?? 0;
         next.reasoningTokens += part.tokens.reasoning ?? 0;
         next.cacheReadTokens += part.tokens.cache?.read ?? 0;
+        next.cacheWriteTokens += part.tokens.cache?.write ?? 0;
       }
       // Overwrite, not OR — see `OpencodeAccum.finished`'s doc comment: only the LAST
       // step_finish's reason should decide this.
@@ -910,6 +913,7 @@ export async function runOpencodeAttempt<T>(
     // usage-tracker regardless of which harness produced the row.
     thinkingTokens: accum.reasoningTokens,
     cacheReadTokens: accum.cacheReadTokens,
+    cacheWriteTokens: accum.cacheWriteTokens,
   };
   const emitAttribution = (
     outcome: "ok" | "error" | "timeout_idle",
