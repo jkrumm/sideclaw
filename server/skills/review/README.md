@@ -110,9 +110,18 @@ External tools run in parallel with agents:
   "improvements": [{ "file", "line?", "message", "angle" }],
   "discussions":  [{ "file", "line?", "message", "angle" }],
   "testGaps":     ["file — type: scenarios"],
-  "summary":      "2-3 sentence assessment"
+  "summary":      "2-3 sentence assessment",
+  "upstreamLimit?": true,
+  "retryable?":     true
 }
 ```
+
+`upstreamLimit`/`retryable` are optional, handler-set, and present only on a _salvaged_
+`needs-human` verdict — the synthesis never serialized and no structured verdict could be
+parsed. They are `true` when the failed synthesis was an upstream quota/rate limit (e.g. the
+Max weekly limit the CLI emits as the session's only output) rather than a review finding, so
+a consumer (warden) requeues after the reset window instead of parking the item on the owner.
+A genuine serialization failure leaves them `false`.
 
 ### Three-Tier Action Classification
 

@@ -64,8 +64,9 @@ proactive check here: the reactive fallback below is the actual safeguard and
 is unchanged.
 
 **Reactive retries in `runSession`**, both gated on the route's declared
-`fallback` and on "no worker output yet" (`turnsRef.current === 0`), both
-latched so the fallback attempt itself is never switched again:
+`fallback` and — except for the terminal provider-limit notice described
+below — on "no worker output yet" (`turnsRef.current === 0`), both latched so
+the fallback attempt itself is never switched again:
 
 - **`max` → `iu`**: an attempt classified as quota/rate-limit exhaustion
   forces the next attempt onto `iu`, same model (`backend.fallback`, reason
@@ -100,6 +101,15 @@ latched so the fallback attempt itself is never switched again:
      observed `api_retry` — without it the reactive fallback cannot see that
      shape of quota exhaustion at all. See `runSessionAttempt` in
      `session-runner.ts` for exactly which branch sets which.
+  3. `isProviderLimitNotice` matches `SessionResult.rawText` — the CLI's own
+     terminal Max limit notice ("You've hit your weekly limit · resets …",
+     job fbda02ed), which arrives as a `<synthetic>` assistant turn and
+     therefore counts as observed output (turning the `noOutputYet` gate
+     OFF) while living only in `rawText`, never in the transport-only
+     `classificationText`. Anchored at the START of the text and
+     phrase-specific, so a worker's own output that merely quotes it (e.g. a
+     review of this very code) cannot match. This is the one case where an
+     output-bearing `max` failure may still take the lane switch.
 - A `backend: "max"` session that times out is never quota-classified by
   either signal above (its `classificationText` is a fixed string
   `QUOTA_ERROR_RE` never matches, and a hang produces no `api_retry` event).

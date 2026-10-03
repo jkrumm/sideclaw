@@ -225,6 +225,48 @@ describe("planNextAttempt", () => {
     expect(plan).toEqual({ kind: "return" });
   });
 
+  test("REGRESSION (job fbda02ed): the Max weekly-limit notice is the only output — it still takes the iu fallback despite `noOutputYet: false`", () => {
+    // The CLI emits its terminal weekly-limit notice as a `<synthetic>` assistant turn, so
+    // turns > 0 and the quota lane's `noOutputYet` guard used to gate the fallback off
+    // entirely; `classificationText` is the constructed exit message, so `isQuotaError`
+    // never saw the notice. It lives only in `rawText`, which is now consulted via the
+    // narrow `isProviderLimitNotice` check.
+    const plan = planNextAttempt({
+      ...base,
+      noOutputYet: false,
+      result: {
+        ok: false,
+        backend: "max",
+        error: "Session exited with code 1 after a success result envelope",
+        classificationText: "Session exited with code 1 after a success result envelope",
+        rawText: "You've hit your weekly limit · resets 6pm (Europe/Berlin)",
+      },
+      fallback: maxToIu,
+    });
+    expect(plan).toEqual({
+      kind: "fallback",
+      forced: { backend: "iu", model: "claude-sonnet-5[1m]", reason: "rate-limited" },
+    });
+  });
+
+  test("output-bearing max failure whose MODEL TEXT merely mentions quota/limit must not switch to iu", () => {
+    // The anchored provider-notice check is the ONLY rawText path — a worker's own output
+    // (here, a synthesis JSON) that happens to contain quota/limit words stays on max.
+    const plan = planNextAttempt({
+      ...base,
+      noOutputYet: false,
+      result: {
+        ok: false,
+        backend: "max",
+        error: "Session exited with code 1 after a success result envelope",
+        classificationText: "Session exited with code 1 after a success result envelope",
+        rawText: '{"summary":"the diff bumps the storage quota and rate limit handling"}',
+      },
+      fallback: maxToIu,
+    });
+    expect(plan).toEqual({ kind: "return" });
+  });
+
   test("the structured api_retry signal alone (hadApiRetry, no matching classificationText) still triggers the fallback", () => {
     const plan = planNextAttempt({
       ...base,

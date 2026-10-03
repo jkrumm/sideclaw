@@ -1012,7 +1012,27 @@ export function resolveBackend(route: ToolRoute): ResolvedBackend {
 // `planNextAttempt` and wins outright when present; it is not exhaustive on its own
 // (a definitive quota block the CLI never got to retry emits no `api_retry` event),
 // so this regex stays the fallback path rather than the only one.
-const QUOTA_ERROR_RE = /hit your (usage )?limit|usage limit|rate.?limit|429|overloaded|quota/i;
+const QUOTA_ERROR_RE =
+  /hit your (usage |weekly )?limit|usage limit|rate.?limit|429|overloaded|quota/i;
+
+/** The CLI's OWN terminal Max limit notice, observed verbatim (job fbda02ed, 2026-09-30)
+ *  as "You've hit your weekly limit · resets 6pm (Europe/Berlin)". It is emitted as a
+ *  `<synthetic>` assistant turn — not model-generated text — carrying a
+ *  `subtype: "success"` result envelope and exit code 1, with no `errors[]`, no
+ *  `api_error_status` and no `api_retry`. Because it is an assistant turn it counts as
+ *  observed output (`noOutputYet` false, so the quota lane's guard gates the fallback
+ *  off), and because it is the worker's last assistant text it lives only in `rawText`
+ *  — never in the transport-only `classificationText`. `QUOTA_ERROR_RE` alone therefore
+ *  cannot see it: its `hit your (usage |weekly )?limit` alternative would match the text,
+ *  but nothing ever calls `isQuotaError` on `rawText`.
+ *
+ *  This phrase — anchored at the START of the assistant text — is provider UI copy, not
+ *  something a worker's own stdout realistically leads with (a review synthesis emits
+ *  JSON, a diff starts with `diff --git`, …). Anchoring is deliberate: a diff that merely
+ *  *quotes* the phrase mid-output (e.g. a review of this very code) must not match. See
+ *  `planNextAttempt` for how the match bridges to the reactive `max` → `iu` lane without
+ *  reopening `rawText` to the generic quota vocabulary `isQuotaError` uses. */
+const PROVIDER_LIMIT_NOTICE_RE = /^\s*you'?ve hit your (usage|weekly) limit\b/i;
 
 /** Does this TRANSPORT-sourced text look like Max quota/rate-limit exhaustion rather
  *  than a generic transport or logic failure? Pure — feeds the reactive once-only
@@ -1021,6 +1041,35 @@ const QUOTA_ERROR_RE = /hit your (usage )?limit|usage limit|rate.?limit|429|over
  *  (`isRetryableSessionError`), which stays backend-agnostic. */
 export function isQuotaError(text: string): boolean {
   return QUOTA_ERROR_RE.test(text);
+}
+
+/** Does this failed attempt's `rawText` look like the CLI's own terminal Max limit
+ *  notice (`PROVIDER_LIMIT_NOTICE_RE`)? Pure. Separate from `isQuotaError` on purpose:
+ *  `isQuotaError`'s vocabulary ("quota", "429", bare "weekly limit") is too loose for
+ *  model stdout, so this stays a distinct, phrase-specific entry point that
+ *  `planNextAttempt` consults instead of ever feeding `rawText` to `isQuotaError`. */
+export function isProviderLimitNotice(text: string): boolean {
+  return PROVIDER_LIMIT_NOTICE_RE.test(text);
+}
+
+/** The complete upstream-limit signal for a FAILED result: the structured `api_retry`
+ *  event, a quota-shaped `classificationText`, or the CLI's own terminal limit notice in
+ *  `rawText`. Pure. `planNextAttempt` uses it for its reactive `max` → `iu` lane; a job
+ *  handler with no lane left to switch (e.g. review's synthesis salvage, which has already
+ *  exhausted its own retry) uses it to mark a `needs-human` verdict `upstreamLimit` /
+ *  `retryable`, so a consumer requeues after the reset window instead of parking the item
+ *  on the owner. `rawText` is consulted ONLY through the anchored `isProviderLimitNotice`
+ *  phrase, never the loose `isQuotaError` vocabulary that model stdout must not reach. */
+export function isUpstreamLimitFailure(result: {
+  hadApiRetry?: boolean;
+  classificationText?: string;
+  rawText?: string;
+}): boolean {
+  return (
+    result.hadApiRetry === true ||
+    isQuotaError(result.classificationText ?? "") ||
+    isProviderLimitNotice(result.rawText ?? "")
+  );
 }
 
 // Text patterns for an `iu`-backend attempt the gateway itself refused outright:
@@ -2139,12 +2188,15 @@ async function runSessionAttempt<T = unknown>(
  *  switch) and both latched by `usedFallback` so a failure on the fallback attempt
  *  itself is never switched again:
  *
- *  - `max` → `iu`: an attempt that ran on `max`, produced no output yet, and looks like
- *    quota/rate-limit exhaustion — either `hadApiRetry` (the CLI itself retried after a
- *    provider-side 429/529) or `isQuotaError` matching `classificationText` (stderr and
- *    the runner's own constructed error text, never model stdout) — forces the next
- *    attempt onto `iu`, same model. Takes precedence over the transient retry (the same
- *    failure would otherwise also match a bare "429" in `isRetryableSessionError`).
+ *  - `max` → `iu`: an attempt that ran on `max` and looks like quota/rate-limit
+ *    exhaustion — either `hadApiRetry` (the CLI itself retried after a provider-side
+ *    429/529) or `isQuotaError` matching `classificationText` (stderr and the runner's own
+ *    constructed error text, never model stdout), normally with no output yet, OR a
+ *    terminal `isProviderLimitNotice` match in `rawText` (the CLI's fixed "You've hit your
+ *    weekly limit…" notice is emitted as a `<synthetic>` assistant turn, so it DOES count
+ *    as output and would otherwise gate this lane off) — forces the next attempt onto
+ *    `iu`, same model. Takes precedence over the transient retry (the same failure would
+ *    otherwise also match a bare "429" in `isRetryableSessionError`).
  *  - `iu` → `max`: an attempt that ran on `iu` and failed with a transport error
  *    before producing output is first retried once on `iu` (a single 503 is the common
  *    case and should not spend Max quota); if THAT fails the same way, the next attempt
@@ -2170,6 +2222,11 @@ export interface AttemptOutcome {
   /** See `SessionResult.apiErrorStatus` — a gateway/API refusal, checked instead of
    *  `noOutputYet` since this failure shape produces one synthetic "turn". */
   apiErrorStatus?: number;
+  /** See `SessionResult.rawText` — the worker's last assistant text. Consulted ONLY by
+   *  the narrow `isProviderLimitNotice` check below (never by `isQuotaError`, which stays
+   *  on transport-sourced text) so a terminal Max weekly-limit notice, which counts as
+   *  output and therefore gates off `noOutputYet`, can still reach the quota lane. */
+  rawText?: string;
 }
 
 export interface NextAttemptInput {
@@ -2241,16 +2298,24 @@ export function planNextAttempt(input: NextAttemptInput): NextAttemptPlan {
   const gatewayRefused =
     typeof result.apiErrorStatus === "number" &&
     GATEWAY_REFUSED_STATUSES.has(result.apiErrorStatus);
+  // The provider's own terminal Max limit notice arrives as a `<synthetic>` assistant turn
+  // (so `noOutputYet` is false, gating the quota lane off) and lives only in `rawText`.
+  // This is the single bridge that lets an output-bearing Max quota failure still take the
+  // lane switch — narrowly scoped to the exact notice phrase (`isProviderLimitNotice`),
+  // never the loose `isQuotaError` vocabulary, so a worker's own stdout cannot trigger it.
+  // Max-specific: the phrase is the Max subscription's notice, and the `iu` → `max` branch
+  // below still requires `iuDown`, which this signal never sets.
+  const providerLimitNoticed = isProviderLimitNotice(result.rawText ?? "");
   const switchable =
     !result.ok &&
     !usedFallback &&
     !isLastAttempt &&
-    (noOutputYet || timedOutStuck || gatewayRefused);
+    (noOutputYet || timedOutStuck || gatewayRefused || providerLimitNoticed);
   // The structured `api_retry` signal wins outright when present; otherwise fall back to
   // the regex over TRANSPORT-sourced text only (`classificationText`, never the full
-  // `error`, which can embed the model's own stdout) — see `isQuotaError`'s doc comment.
-  const quotaFlavored =
-    result.hadApiRetry === true || isQuotaError(result.classificationText ?? "");
+  // `error`, which can embed the model's own stdout), or the provider's own anchored limit
+  // notice in `rawText` — see `isUpstreamLimitFailure`'s doc comment.
+  const quotaFlavored = isUpstreamLimitFailure(result);
 
   if (switchable && result.backend === "max" && fallback?.backend === "iu" && quotaFlavored) {
     return {

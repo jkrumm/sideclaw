@@ -2,7 +2,12 @@ import { existsSync } from "fs";
 import { join } from "path";
 import { randomUUID } from "crypto";
 import { z } from "zod";
-import { runSession, zodValidator } from "../../mcp/session-runner.ts";
+import {
+  isUpstreamLimitFailure,
+  runSession,
+  zodValidator,
+  type SessionResult,
+} from "../../mcp/session-runner.ts";
 import { routeFor } from "../../lib/routing.ts";
 import { textComplete } from "../../lib/iu-openai.ts";
 import { dataBlock, newFenceNonce } from "../../lib/prompt-fence.ts";
@@ -164,7 +169,11 @@ export const REVIEW_OUTCOMES = ["clean", "actionable", "needs-human"] as const;
 
 // A consumer (today: warden) pins this number and treats a mismatch as a loud refusal rather
 // than a best-effort parse — same contract as DISPATCH_SCHEMA_VERSION in dispatch.ts. Bump it
-// whenever a field's meaning or presence on REVIEW_OUTPUT changes.
+// whenever a field's meaning or presence on REVIEW_OUTPUT changes. An OPTIONAL, additive field
+// is the deliberate exception: a pinned consumer that ignores unknown keys reads it as absent
+// and parses the rest correctly, so bumping would only force it to refuse results it can still
+// read. `upstreamLimit`/`retryable` below are exactly that case — the consumer is another repo
+// this change cannot update in lockstep.
 export const REVIEW_SCHEMA_VERSION = 1;
 
 // What the SYNTHESIS worker is shown and graded against. `schemaVersion` is deliberately not
@@ -207,11 +216,70 @@ export const REVIEW_OUTPUT = SYNTHESIS_OUTPUT.extend({
       "Version of this output shape. Pin this number; a mismatch means the shape moved under " +
         "you and should be a loud refusal, not a best-effort parse.",
     ),
+  upstreamLimit: z
+    .boolean()
+    .optional()
+    .describe(
+      "Set by the HANDLER only on a salvaged needs-human verdict: true when the failed " +
+        "synthesis was an upstream/provider quota or rate limit (e.g. the Max weekly limit) " +
+        "rather than a review finding. Without it a quota-caused salvage is byte-identical to " +
+        "a genuine human escalation; a consumer should requeue after the reset window instead " +
+        "of parking the item on the owner.",
+    ),
+  retryable: z
+    .boolean()
+    .optional()
+    .describe(
+      "Set alongside `upstreamLimit`: the review can be re-run once the upstream limit " +
+        "resets. Absent everywhere else.",
+    ),
 });
 
 const REVIEW_JSON_SCHEMA = z.toJSONSchema(SYNTHESIS_OUTPUT);
 
 export type ReviewOutput = z.infer<typeof REVIEW_OUTPUT>;
+
+// ── Salvaged verdict — the synthesis that never serialized ──────────────────────
+
+/** The `needs-human` verdict returned when the synthesizer fails twice and no structured
+ *  verdict can be parsed. Pure, and exported so the upstream-limit classification below is
+ *  pinned by a test without the review pipeline's git/session harness (the same seam dispatch's
+ *  `salvage` exposes).
+ *
+ *  `upstreamLimit`/`retryable` are the consumer-facing requeue signal: on a quota/rate-limit
+ *  failure (the Max weekly limit that arrived as the synthesizer's only output) the salvaged
+ *  verdict is otherwise byte-identical to a genuine human escalation, and a consumer such as
+ *  warden parks it instead of re-running the review after the reset. Both are set from
+ *  `isUpstreamLimitFailure` — the same three signals the session runner's reactive `max` → `iu`
+ *  fallback uses, re-read here because that fallback may have been exhausted or unavailable. */
+export function salvagedVerdict(
+  synthesisResult: Pick<SessionResult, "rawText" | "error" | "hadApiRetry" | "classificationText">,
+  totalReviewers: number,
+): ReviewOutput {
+  const raw = (synthesisResult.rawText ?? synthesisResult.error ?? "").trim();
+  const upstreamLimit = isUpstreamLimitFailure(synthesisResult);
+  return {
+    outcome: "needs-human",
+    blocking: [],
+    improvements: [],
+    discussions: [
+      {
+        file: "(review pipeline)",
+        message:
+          "Synthesis did not return valid JSON after a retry, so the findings could not be " +
+          "structured. The multi-angle review DID run — its raw synthesizer output is preserved " +
+          "below for manual triage; re-run the review or read this directly:\n\n" +
+          (raw.slice(0, 6000) || "(no synthesizer text was captured)"),
+        angle: "synthesis",
+      },
+    ],
+    testGaps: [],
+    summary: `Review ran ${totalReviewers} reviewers but synthesis failed to serialize a structured verdict (after one retry). Findings were NOT lost — see the discussions entry for the raw synthesizer text. Treat as needs-human.`,
+    schemaVersion: REVIEW_SCHEMA_VERSION,
+    upstreamLimit,
+    retryable: upstreamLimit,
+  };
+}
 
 // ── Angle session output — simpler schema for individual reviewers ─────────────
 
@@ -1246,7 +1314,7 @@ export async function runReview(
     }
 
     if (!synthesisResult.ok || !synthesisResult.data) {
-      const raw = (synthesisResult.rawText ?? synthesisResult.error ?? "").trim();
+      const verdict = salvagedVerdict(synthesisResult, totalReviewers);
       logger.error(
         {
           event: "review.done",
@@ -1254,30 +1322,13 @@ export async function runReview(
           project: cwd,
           outcome: "needs-human",
           salvaged: true,
+          upstreamLimit: verdict.upstreamLimit === true,
           durationMs: Math.round(performance.now() - startMs),
           error: synthesisResult.error,
         },
         "synthesis failed twice — returning salvaged needs-human verdict",
       );
-      return {
-        outcome: "needs-human",
-        blocking: [],
-        improvements: [],
-        discussions: [
-          {
-            file: "(review pipeline)",
-            message:
-              "Synthesis did not return valid JSON after a retry, so the findings could not be " +
-              "structured. The multi-angle review DID run — its raw synthesizer output is preserved " +
-              "below for manual triage; re-run the review or read this directly:\n\n" +
-              (raw.slice(0, 6000) || "(no synthesizer text was captured)"),
-            angle: "synthesis",
-          },
-        ],
-        testGaps: [],
-        summary: `Review ran ${totalReviewers} reviewers but synthesis failed to serialize a structured verdict (after one retry). Findings were NOT lost — see the discussions entry for the raw synthesizer text. Treat as needs-human.`,
-        schemaVersion: REVIEW_SCHEMA_VERSION,
-      };
+      return verdict;
     }
 
     const data = synthesisResult.data;
